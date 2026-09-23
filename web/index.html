@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>租房管理</title>
+    <script>
+      // 本次页面是不是由飞牛统一网关的 socket 服务出来的：服务端返回入口 HTML 时
+      // 替换 __FNOS_GATEWAY__（见 server/server/server.go）。占位符写在字符串里，
+      // 所以开发服务器 / 普通构建没替换时就是 false，不会报错。
+      // 前端必须知道这个答案：网关域上**不能带应用自己的 Authorization**——飞牛
+      // 接入层会把它当成自己的会话 token，认不出就直接回 200 "invalid token"，
+      // 请求根本到不了应用（「登录后刷新就掉登录态」就是这么来的）。网关域的登录态
+      // 由服务端用网关注入的 X-Trim-* 身份解析（见 server/middleware/middleware.go）。
+      window.__FNOS_GATEWAY__ = "__FNOS_GATEWAY_FLAG__" === "true";
+    </script>
+    <script>
+      // Apply the saved theme BEFORE any CSS or Vue mounts so the first paint
+      // already reflects the user's choice — otherwise a system-default
+      // light flash cuts in before Pinia's theme store runs apply().
+      (function () {
+        try {
+          var mode = localStorage.getItem('smallgo-theme-mode') || 'system';
+          var brand = localStorage.getItem('smallgo-theme-brand') || 'default';
+          var dark = mode === 'dark' ||
+            (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var root = document.documentElement;
+          root.classList.toggle('dark', dark);
+          if (brand !== 'default') root.classList.add('brand-' + brand);
+        } catch (e) { /* private mode or storage off — fall back to defaults */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

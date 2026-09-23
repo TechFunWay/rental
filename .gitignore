@@ -1,0 +1,66 @@
+# Binaries
+server/rental
+server/rental-*
+server/smallgo
+server/smallgo-*
+*.exe
+*.dll
+*.so
+*.dylib
+*.fpk
+
+# Data
+server/data/
+data/
+dev/data/
+*.db
+*.db-journal
+
+# Frontend dependencies and build output
+web/node_modules/
+web/dist/
+
+# Compiled frontend served by the backend
+server/static/dist/
+
+# Build output
+dev/
+build/
+release/
+dist/
+*.tar.gz
+*.zip
+*.oci.tar
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Agent / local tooling
+.omo/
+.mimocode/
+.opencode/
+.claude/*
+!.claude/skills/
+.memory/
+tmp/*
+!tmp/.gitkeep
+.zcode/
