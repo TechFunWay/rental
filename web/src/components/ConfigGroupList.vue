@@ -141,6 +141,14 @@ const selectOptionLabelMap: Record<string, Record<string, string>> = {
     light: '浅色',
     dark: '深色',
   },
+  rental_water_mode: {
+    meter: '按吨计价（元/吨）',
+    monthly: '包月（元/月）',
+  },
+  rental_pay_cycle: {
+    monthly: '月付（每月一张账单）',
+    quarterly: '季付（每 3 个月一张账单）',
+  },
 }
 
 function groupTitle(key: string): string {

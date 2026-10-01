@@ -65,8 +65,9 @@ ARG VERSION
 LABEL org.opencontainers.image.title="techfunway-rental"
 LABEL org.opencontainers.image.description="面向房东、公寓与宿舍管理者的租房管理系统"
 LABEL org.opencontainers.image.version="${VERSION}"
-LABEL org.opencontainers.image.source="https://gitee.com/TechFunWay/rental"
+LABEL org.opencontainers.image.source="https://github.com/TechFunWay/rental"
 
+WORKDIR /app
 COPY techfunway-rental-v${VERSION}-linux-${TARGETARCH}/rental /app/rental
 COPY techfunway-rental-v${VERSION}-linux-${TARGETARCH}/www /app/static/dist
 

@@ -1,14 +1,14 @@
 <template>
   <div class="page-container animate-fade-in">
-    <!-- 欢迎横幅 -->
-    <div class="relative overflow-hidden rounded-2xl bg-brand-gradient p-7 sm:p-9 shadow-glow">
+    <!-- 欢迎横幅：手机端收紧（介绍长文案只在桌面端显示） -->
+    <div class="relative overflow-hidden rounded-2xl bg-brand-gradient p-4 sm:p-9 shadow-glow">
       <div class="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-white/10 blur-2xl"></div>
       <div class="absolute -bottom-20 -left-10 w-56 h-56 rounded-full bg-black/10 blur-2xl"></div>
       <div class="relative">
-        <p class="text-white/80 text-sm font-medium">{{ greeting }}，{{ authStore.user?.username || '房东' }} 👋</p>
-        <h1 class="text-2xl sm:text-3xl font-extrabold text-white mt-2">租房管理</h1>
-        <p class="text-white/80 mt-3 max-w-xl">房源、租户与月度抄表账单一站式管理，费用自动计算，欠缴一目了然。</p>
-        <div class="flex flex-wrap gap-3 mt-6">
+        <p class="text-white/80 text-xs sm:text-sm font-medium">{{ greeting }}，{{ authStore.user?.username || '房东' }} 👋</p>
+        <h1 class="text-xl sm:text-3xl font-extrabold text-white mt-1 sm:mt-2">租房管理</h1>
+        <p class="hidden sm:block text-white/80 mt-3 max-w-xl">房源、租户与月度抄表账单一站式管理，费用自动计算，欠缴一目了然。</p>
+        <div class="flex flex-wrap gap-2 sm:gap-3 mt-3 sm:mt-6">
           <RouterLink to="/admin/bills" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white text-brand-700 text-sm font-semibold hover:bg-white/90 active:scale-[0.98] transition-all">
             去抄表记账
           </RouterLink>
@@ -19,17 +19,17 @@
       </div>
     </div>
 
-    <!-- 统计卡 -->
-    <div class="grid grid-cols-2 xl:grid-cols-4 gap-4">
-      <div v-for="card in statCards" :key="card.label" class="surface rounded-2xl p-3.5 sm:p-5 hover:-translate-y-0.5 transition-transform">
-        <div class="flex items-center justify-between">
-          <span class="text-sm text-muted-foreground">{{ card.label }}</span>
-          <span class="w-9 h-9 rounded-lg flex items-center justify-center" :class="card.bg">
+    <!-- 统计卡：手机两列两行（两位小数金额要完整显示，四列放不下），桌面一行四列大卡 -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
+      <div v-for="card in statCards" :key="card.label" class="surface rounded-2xl p-3 lg:p-5 hover:-translate-y-0.5 transition-transform min-w-0">
+        <div class="flex items-center justify-between gap-1">
+          <span class="text-xs lg:text-sm text-muted-foreground">{{ card.label }}</span>
+          <span class="w-9 h-9 rounded-lg items-center justify-center hidden lg:flex" :class="card.bg">
             <span v-html="card.icon" class="w-5 h-5 block"></span>
           </span>
         </div>
-        <div class="mt-2 sm:mt-3 text-xl sm:text-2xl font-extrabold text-foreground tabular-nums">{{ card.value }}</div>
-        <div class="mt-1 text-xs text-muted-foreground">{{ card.sub }}</div>
+        <div class="mt-1.5 lg:mt-3 text-xl lg:text-2xl font-extrabold text-foreground tabular-nums truncate">{{ card.value }}</div>
+        <div class="mt-1 text-[11px] lg:text-xs text-muted-foreground truncate">{{ card.sub }}</div>
       </div>
     </div>
 
@@ -92,8 +92,43 @@
       </div>
     </div>
 
-    <!-- 到期提醒 + 欠缴名单：不用翻列表就知道该办什么 -->
-    <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+    <!-- 到期提醒 + 缴费提醒 + 欠缴名单：不用翻列表就知道该办什么 -->
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+      <!-- 缴费提醒（按房间设置的缴费日，窗口内或已逾期） -->
+      <div class="surface rounded-2xl p-4 sm:p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-sm sm:text-base font-bold text-foreground">缴费提醒</h3>
+          <span class="badge shrink-0" :class="paymentDue.length ? 'bg-amber-500/10 text-amber-600 dark:text-amber-300' : 'bg-muted text-muted-foreground'">
+            {{ paymentDue.length ? `${paymentDue.length} 笔` : '暂无' }}
+          </span>
+        </div>
+        <div v-if="!paymentDue.length" class="text-sm text-muted-foreground py-6 text-center">
+          暂无临期或逾期的缴费。到「租户管理」给租户设置缴费日即可开启提醒。
+        </div>
+        <div v-else class="divide-y divide-border/60">
+          <RouterLink
+            v-for="p in paymentDue"
+            :key="p.room_id"
+            to="/admin/bills"
+            class="flex items-center justify-between py-2 group"
+            :title="p.due_date"
+          >
+            <div class="min-w-0">
+              <div class="flex items-baseline gap-2">
+                <span class="text-sm font-semibold text-foreground">{{ p.room_no }}</span>
+                <span class="text-xs text-muted-foreground truncate">{{ p.tenant_name || '—' }}</span>
+              </div>
+              <div class="text-[11px] text-muted-foreground mt-0.5 tabular-nums">
+                {{ cycleLabel(p.pay_cycle) }} · {{ coveredPeriodText(p.period, p.pay_cycle) }} · 每月 {{ p.pay_day }} 号收 · 预计 {{ fmtMoney(p.expected_amount) }} 元
+              </div>
+            </div>
+            <span class="text-xs font-medium tabular-nums shrink-0 ml-2" :class="p.days_left < 0 ? 'text-rose-500' : 'text-amber-500'">
+              {{ payDueText(p) }}
+            </span>
+          </RouterLink>
+        </div>
+      </div>
+
       <!-- 租约到期（60 天内含已过期） -->
       <div class="surface rounded-2xl p-4 sm:p-6">
         <div class="flex items-center justify-between mb-4">
@@ -156,7 +191,9 @@
       <div v-if="!stats?.recent_bills.length" class="text-sm text-muted-foreground py-8 text-center">
         还没有账单，去「抄表账单」抄表建账吧。
       </div>
-      <div v-else class="overflow-x-auto">
+      <template v-else>
+      <!-- 桌面端：表格 -->
+      <div class="hidden sm:block overflow-x-auto">
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-muted-foreground border-b border-border">
@@ -182,6 +219,17 @@
           </tbody>
         </table>
       </div>
+      <!-- 手机端：紧凑卡片列表 -->
+      <div class="sm:hidden -mx-2 space-y-1.5">
+        <div v-for="b in stats!.recent_bills" :key="b.id" class="rounded-xl border border-border bg-surface/80 px-3 py-2 flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-foreground truncate">{{ b.room_no }} <span class="text-xs text-muted-foreground font-normal">{{ b.tenant_name || '—' }}</span></div>
+            <div class="text-[11px] text-muted-foreground tabular-nums mt-0.5">{{ b.period }} · 应付 {{ fmtMoney(b.total_amount) }} 元 · 已收 {{ fmtMoney(b.paid_amount) }} 元</div>
+          </div>
+          <span class="badge shrink-0 !px-1.5 !py-0.5 text-[11px]" :class="statusClass(b)">{{ statusText(b) }}</span>
+        </div>
+      </div>
+      </template>
     </div>
   </div>
 </template>
@@ -190,7 +238,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { currentPeriod, fmtMoney, getStats, isArrears, type RentalStats } from '../api/rental'
+import { currentPeriod, fmtMoney, getStats, isArrears, type PaymentDueItem, type RentalStats } from '../api/rental'
+import { coveredPeriodText, cycleLabel } from '../utils/cycle'
 
 const authStore = useAuthStore()
 const stats = ref<RentalStats | null>(null)
@@ -204,6 +253,7 @@ const greeting = computed(() => {
   return '晚上好'
 })
 
+// 全应用数字统一保留两位小数，统计卡金额直接用 fmtMoney（fixed 2 位）
 const statCards = computed(() => [
   {
     label: '房源总数',
@@ -242,9 +292,17 @@ const paidPct = computed(() => {
 })
 const arrearsPct = computed(() => (stats.value?.month.total ?? 0) > 0 ? 100 - paidPct.value : 0)
 
-// 租约到期名单（60 天内含已过期）与本月欠缴户名单，由 stats 接口返回
+// 租约到期名单（60 天内含已过期）、缴费提醒与本月欠缴户名单，由 stats 接口返回
 const leaseDue = computed(() => stats.value?.lease_due ?? [])
+const paymentDue = computed<PaymentDueItem[]>(() => stats.value?.payment_due ?? [])
 const arrearsList = computed(() => stats.value?.arrears_list ?? [])
+
+// 缴费提醒的到期文案：负数 = 已逾期，0 = 今天，正数 = 剩余天数
+function payDueText(p: PaymentDueItem): string {
+  if (p.days_left < 0) return `已逾期 ${-p.days_left} 天`
+  if (p.days_left === 0) return '今天到期'
+  return `${p.days_left} 天后缴费`
+}
 
 function statusText(b: { status: string }) {
   if (b.status === 'paid') return '已缴清'
