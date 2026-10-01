@@ -405,5 +405,9 @@ func serveSPA(c *gin.Context, cfg config.Config) {
 		return
 	}
 	page := strings.ReplaceAll(string(data), "__FNOS_GATEWAY_FLAG__", strconv.FormatBool(middleware.OnFnOSGateway(c.Request.Context())))
+	// 入口 HTML 禁止强缓存：升级后浏览器必须拿到新的 index.html（从而引用新的
+	// hash 资源），否则用户看到旧前端还以为升级没生效。no-cache 是协商缓存，
+	// 文件没变时 304，性能无影响。
+	c.Header("Cache-Control", "no-cache")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(page))
 }

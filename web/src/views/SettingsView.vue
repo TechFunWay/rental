@@ -17,6 +17,12 @@
       @save="handleSave"
     />
 
+    <!-- 收费项目：内置租金/水/电/燃气/卫生/管理 + 自定义（宽带费等），每项可自定义收费周期 -->
+    <FeeItemsCard class="mt-4" />
+
+    <!-- 缴费提醒通知：钉钉 / 邮箱 / 短信 / QQ 机器人渠道绑定与测试 -->
+    <NotifyChannelsCard class="mt-4" />
+
     <!-- 支持开发者（仅管理员可见，赞赏完全自愿） -->
     <div v-if="authStore.isAdmin" class="surface rounded-2xl p-5 sm:p-6">
       <div class="flex flex-wrap items-center justify-between gap-4">
@@ -46,6 +52,8 @@
 import { onMounted, ref } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import ConfigGroupList from '../components/ConfigGroupList.vue'
+import FeeItemsCard from '../components/FeeItemsCard.vue'
+import NotifyChannelsCard from '../components/NotifyChannelsCard.vue'
 import { getUserConfigMeta, updateConfig } from '../api/config'
 import type { ConfigMeta } from '../api/config'
 import { useThemeStore } from '../stores/theme'

@@ -1,17 +1,18 @@
 # Binaries
-server/rental
-server/rental-*
 server/smallgo
 server/smallgo-*
+server/rental
+!server/rental/
+server/rental-*
 *.exe
 *.dll
 *.so
 *.dylib
-*.fpk
 
 # Data
 server/data/
 data/
+data-acc/
 dev/data/
 *.db
 *.db-journal
@@ -20,8 +21,16 @@ dev/data/
 web/node_modules/
 web/dist/
 
-# Compiled frontend served by the backend
+# Compiled frontend served by the backend (run `make build-frontend` to regenerate)
 server/static/dist/
+
+# Agent / IDE side artifacts (kept out of git)
+.omo/
+.playwright-mcp/
+memory/
+.claude/*
+!.claude/skills/
+.opencode/
 
 # Build output
 dev/
@@ -30,9 +39,9 @@ release/
 dist/
 *.tar.gz
 *.zip
-*.oci.tar
+*.fpk
 
-# IDE / editor
+# IDE
 .idea/
 .vscode/
 *.swp
@@ -42,9 +51,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
-.AppleDouble
-.LSOverride
-._*
 
 # Environment
 .env
@@ -54,13 +60,11 @@ Thumbs.db
 # Logs
 *.log
 
-# Agent / local tooling
-.omo/
-.mimocode/
-.opencode/
-.claude/*
-!.claude/skills/
-.memory/
+# ---------- 本地临时目录 ----------
+# 临时测试与调试文件统一放这里，目录内内容不入库（仅保留 .gitkeep 占位）
 tmp/*
 !tmp/.gitkeep
+
+# AI 工具本地目录
 .zcode/
+.mimocode/

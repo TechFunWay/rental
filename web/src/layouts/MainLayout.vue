@@ -11,11 +11,12 @@
     <!-- Sidebar -->
     <aside
       :class="[
-        'fixed inset-y-0 left-0 z-40 w-72 transform transition-transform duration-300 ease-out lg:translate-x-0',
+        'fixed inset-y-0 left-0 z-40 w-72 p-3 pr-0 pb-[calc(0.75rem+env(safe-area-inset-bottom))] lg:pr-3 transform transition-transform duration-300 ease-out lg:translate-x-0',
         sidebarOpen ? 'translate-x-0' : '-translate-x-full'
       ]"
     >
-      <div class="h-full m-3 mr-0 lg:mr-3 rounded-2xl surface flex flex-col overflow-hidden">
+      <!-- 边距由 aside 的 padding 承担：内层 h-full + 自身 margin 会超出视口，手机上底部被顶出屏幕 -->
+      <div class="h-full rounded-2xl surface flex flex-col overflow-hidden">
         <!-- Brand -->
         <div class="flex items-center gap-3 h-20 px-6 border-b border-border">
           <div class="w-11 h-11 rounded-xl bg-brand-gradient flex items-center justify-center shadow-glow shrink-0">
@@ -44,6 +45,11 @@
                 <span v-html="item.icon" class="w-5 h-5 block"></span>
               </span>
               {{ item.label }}
+              <span
+                v-if="item.to === '/admin/bills' && paymentDueCount"
+                class="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[11px] font-bold bg-rose-500 text-white tabular-nums"
+                title="待收缴费提醒"
+              >{{ paymentDueCount > 99 ? '99+' : paymentDueCount }}</span>
             </RouterLink>
 
             <template v-if="authStore.isAdmin">
@@ -171,16 +177,17 @@
           <button class="text-muted-foreground hover:text-foreground text-lg leading-none px-1" title="关闭" @click="supportStore.dismissUpdateBanner()">×</button>
         </div>
 
-        <!-- 赞赏横幅（管理员，每个版本一次） -->
+        <!-- 赞赏横幅（管理员，每个版本一次）；手机端只留一句，长文案桌面端才显示 -->
         <div v-if="supportStore.bannerVisible" class="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-400/40 bg-amber-400/10 px-4 py-3">
           <span class="text-sm text-foreground">
-            ❤ 如果这个应用对你有帮助，欢迎 <button class="font-semibold text-brand-600 dark:text-brand-300 hover:underline" @click="supportStore.open()">请作者喝杯咖啡</button>（不赞赏不影响任何功能）。
+            ❤ <button class="font-semibold text-brand-600 dark:text-brand-300 hover:underline" @click="supportStore.open()">请作者喝杯咖啡</button><span class="hidden sm:inline">（不赞赏不影响任何功能）</span><span class="sm:hidden">，不赞赏不影响功能</span>。
           </span>
           <button class="text-muted-foreground hover:text-foreground text-lg leading-none px-1" title="关闭" @click="supportStore.dismissBanner()">×</button>
         </div>
 
         <RouterView v-slot="{ Component }">
-          <transition mode="out-in" enter-active-class="transition-all duration-300 ease-out" enter-from-class="opacity-0 translate-y-2" leave-active-class="transition-all duration-150" leave-to-class="opacity-0">
+          <!-- 手机端体验：短淡入即可（out-in 长动画会有"停顿-再出现"的卡顿感） -->
+          <transition mode="out-in" enter-active-class="transition-[opacity,transform] duration-150 ease-out" enter-from-class="opacity-0 translate-y-1.5" leave-active-class="transition-opacity duration-75" leave-to-class="opacity-0">
             <component :is="Component" />
           </transition>
         </RouterView>
@@ -193,7 +200,7 @@
       style="padding-bottom: env(safe-area-inset-bottom)"
       aria-label="手机端主导航"
     >
-      <div class="grid grid-cols-4">
+      <div class="grid grid-cols-5">
         <RouterLink
           v-for="item in mobileNav"
           :key="item.to"
@@ -201,11 +208,17 @@
           class="flex flex-col items-center justify-center gap-0.5 py-2.5 text-[11px] font-medium transition-colors"
           :class="isActive(item.to) ? 'text-brand-600 dark:text-brand-300' : 'text-muted-foreground'"
         >
-          <span
-            class="w-9 h-7 rounded-lg flex items-center justify-center"
-            :class="isActive(item.to) ? 'bg-brand-gradient text-white shadow-glow' : ''"
-          >
-            <span v-html="item.icon" class="w-5 h-5 block"></span>
+          <span class="relative">
+            <span
+              class="w-9 h-7 rounded-lg flex items-center justify-center"
+              :class="isActive(item.to) ? 'bg-brand-gradient text-white shadow-glow' : ''"
+            >
+              <span v-html="item.icon" class="w-5 h-5 block"></span>
+            </span>
+            <span
+              v-if="item.to === '/admin/bills' && paymentDueCount"
+              class="absolute -top-1 -right-2 min-w-[16px] h-4 px-1 rounded-full text-[10px] font-bold bg-rose-500 text-white flex items-center justify-center tabular-nums"
+            >{{ paymentDueCount > 99 ? '99+' : paymentDueCount }}</span>
           </span>
           {{ item.label }}
         </RouterLink>
@@ -243,6 +256,7 @@ import { useRouter, useRoute, RouterLink, RouterView } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
 import { getVersion } from '../api/config'
+import { getStats } from '../api/rental'
 import { useSupportStore } from '../stores/support'
 import UiThemeToggle from '../components/ui/ThemeToggle.vue'
 import Modal from '../components/Modal.vue'
@@ -258,6 +272,20 @@ const menuOpen = ref(false)
 const menuRef = ref<HTMLElement | null>(null)
 const versionInfo = ref('')
 
+// 缴费提醒角标：待提醒的缴费笔数，挂在「抄表账单」导航项上。
+// 轮询 + 路由切换时刷新，失败静默（角标只是提醒，不阻塞任何页面）。
+const paymentDueCount = ref(0)
+let paymentTimer: number | undefined
+
+async function refreshPaymentBadge() {
+  try {
+    const res = await getStats()
+    if (res.data?.code === 0) {
+      paymentDueCount.value = (res.data.data?.payment_due ?? []).length
+    }
+  } catch { /* 静默 */ }
+}
+
 onMounted(async () => {
   try {
     const res = await getVersion()
@@ -269,19 +297,31 @@ onMounted(async () => {
   // 赞赏提示与新版本检查：仅管理员可见（store 内部只对管理员生效）
   await authStore.init()
   supportStore.init(authStore.isAdmin)
+  // 缴费提醒角标：立即拉一次，之后每 5 分钟刷新
+  refreshPaymentBadge()
+  paymentTimer = window.setInterval(refreshPaymentBadge, 5 * 60 * 1000)
 })
+
+onBeforeUnmount(() => {
+  if (paymentTimer) window.clearInterval(paymentTimer)
+})
+
+// 路由切换时刷新角标（在账单页收款后回到其它页面时数字能及时更新）。
+watch(() => route.path, () => refreshPaymentBadge())
 
 const mainNavIcons = {
   overview: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>',
   rooms: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>',
   tenants: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zm7 2a4 4 0 014 4v2h-4m-4-9.5a2.5 2.5 0 11-3 4.1"/></svg>',
   bills: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3"/></svg>',
+  meters: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
 }
 
 const mobileNav = [
   { to: '/admin', label: '总览', icon: mainNavIcons.overview },
   { to: '/admin/rooms', label: '房源', icon: mainNavIcons.rooms },
   { to: '/admin/tenants', label: '租户', icon: mainNavIcons.tenants },
+  { to: '/admin/meters', label: '抄表', icon: mainNavIcons.meters },
   { to: '/admin/bills', label: '账单', icon: mainNavIcons.bills },
 ]
 
@@ -289,7 +329,10 @@ const mainNav = [
   { to: '/admin', label: '总览', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
   { to: '/admin/rooms', label: '房源管理', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
   { to: '/admin/tenants', label: '租户管理', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zm7 2a4 4 0 014 4v2h-4m-4-9.5a2.5 2.5 0 11-3 4.1"/></svg>' },
+  { to: '/admin/meters', label: '抄表记录', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>' },
   { to: '/admin/bills', label: '抄表账单', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3"/></svg>' },
+  { to: '/admin/payments', label: '收款记录', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"/></svg>' },
+  { to: '/admin/analytics', label: '统计分析', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' },
   { to: '/admin/profile', label: '个人资料', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>' },
   { to: '/admin/settings', label: '偏好设置', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75"/></svg>' },
 ]
@@ -306,6 +349,9 @@ const titleMap: Record<string, string> = {
   '/admin/rooms': '房源管理',
   '/admin/tenants': '租户管理',
   '/admin/bills': '抄表账单',
+  '/admin/meters': '抄表记录',
+  '/admin/payments': '收款记录',
+  '/admin/analytics': '统计分析',
   '/admin/profile': '个人资料',
   '/admin/settings': '偏好设置',
   '/admin/users': '用户管理',
@@ -394,28 +440,28 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
 .glow {
   position: absolute;
   border-radius: 9999px;
-  filter: blur(110px);
+  /* 用径向渐变画柔光，不用 filter: blur —— 大面积高斯模糊在手机 WebView 上渲染贵、重绘更贵 */
 }
 .glow-1 {
-  width: 40rem;
-  height: 40rem;
-  top: -14rem;
-  left: -10rem;
-  background: rgba(99, 102, 241, 0.18);
+  width: 44rem;
+  height: 44rem;
+  top: -16rem;
+  left: -12rem;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.18) 0%, rgba(99, 102, 241, 0) 65%);
 }
 .glow-2 {
-  width: 36rem;
-  height: 36rem;
-  top: -8rem;
-  right: -12rem;
-  background: rgba(168, 85, 247, 0.14);
+  width: 40rem;
+  height: 40rem;
+  top: -10rem;
+  right: -14rem;
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.14) 0%, rgba(168, 85, 247, 0) 65%);
 }
 .glow-3 {
-  width: 34rem;
-  height: 34rem;
-  bottom: -16rem;
-  left: 30%;
-  background: rgba(34, 211, 238, 0.1);
+  width: 38rem;
+  height: 38rem;
+  bottom: -18rem;
+  left: 28%;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.1) 0%, rgba(34, 211, 238, 0) 65%);
 }
 .app-grid {
   position: absolute;
@@ -427,7 +473,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onClickOutside))
   -webkit-mask: radial-gradient(circle at 50% 0%, #000 0%, transparent 70%);
   mask: radial-gradient(circle at 50% 0%, #000 0%, transparent 70%);
 }
-.dark .glow-1 { background: rgba(99, 102, 241, 0.3); }
-.dark .glow-2 { background: rgba(168, 85, 247, 0.24); }
-.dark .glow-3 { background: rgba(34, 211, 238, 0.16); }
+.dark .glow-1 { background: radial-gradient(circle, rgba(99, 102, 241, 0.3) 0%, rgba(99, 102, 241, 0) 65%); }
+.dark .glow-2 { background: radial-gradient(circle, rgba(168, 85, 247, 0.24) 0%, rgba(168, 85, 247, 0) 65%); }
+.dark .glow-3 { background: radial-gradient(circle, rgba(34, 211, 238, 0.16) 0%, rgba(34, 211, 238, 0) 65%); }
 </style>

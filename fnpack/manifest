@@ -1,5 +1,5 @@
 appname                    = techfunway-rental
-version                    = 0.2.0
+version               = 0.3.0
 display_name               = 租房管理
 desc                       = """
 面向个人房东、小型公寓与工厂宿舍管理者的租房管理系统。支持按小区/楼栋/单元/楼层/房号录入房源，租约到期着色提醒，月度水电气抄表账单与一键生成，收款与欠缴跟踪，CSV 模板导入导出，收费单据打印；电脑端表格与手机端卡片/底部导航双布局，并支持飞牛 NAS 账号一键登录与本地数据备份恢复。
@@ -7,9 +7,9 @@ desc                       = """
 source                     = thirdparty
 platform                   = x86
 maintainer                 = 科技智趣坊
-maintainer_url             = https://gitee.com/TechFunWay/smallgo
+maintainer_url             = https://github.com/TechFunWay/rental
 distributor                = 科技智趣坊
-distributor_url            = http://techfunway.wycto.cn
+distributor_url            = https://github.com/TechFunWay/rental
 os_min_version             = 1.0.0
 ctl_stop                   = true
 desktop_uidir              = ui
@@ -18,11 +18,11 @@ service_port               = 8910
 checkport                  = true
 disable_authorization_path = false
 changelog                  = """
-v0.2.0 更新：
-1. 房源支持小区/楼栋/单元/楼层/房号结构化录入，不同小区允许相同房号
-2. 租户登记支持租约到期时间，列表按剩余天数着色提醒
-3. 账单支持直填读数，总览页可对待收/到期事项做提醒
-4. 备份支持一键恢复，恢复前自动生成安全快照
-5. 修复飞牛网关登录刷新掉线，登录后可独立退出应用
-6. 应用图标升级为 3D 玻璃质感；默认端口统一为 8910
+v0.3.0 更新：
+1. 新增自定义收费项目，读数类项目按月收、固定费项目按租户缴费周期到期才收
+2. 租户可勾选参与结算的收费项目，并新增身份证号
+3. 新增收款流水与统计分析页，账单可查看费用明细与收款分摊
+4. 新增缴费提醒（总览卡片 + 钉钉/邮箱/短信/QQ 推送）、合同存档与抄表台账
+5. 水费支持包月模式，计费与缴费改到每个租户上单独设置
+6. 手机端列表卡片化、弹窗改底部滑出、应用内日期选择器，浏览操作更顺手
 """

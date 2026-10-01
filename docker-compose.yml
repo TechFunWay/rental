@@ -15,7 +15,7 @@
 version: '3.8'
 services:
   rental:
-    image: techfunways/rental:latest
+    image: techfunways/rental:v0.3.0
     container_name: techfunway-rental
     ports:
       - "8910:8910"

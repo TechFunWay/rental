@@ -52,6 +52,8 @@ for ARCH in "amd64" "arm64"; do
   echo "Building fnOS package for ${ARCH}..."
 
   echo "  Compiling Go binary via Docker (CGO_ENABLED=1, linux/${ARCH})..."
+  # 优先清华镜像；镜像不可用（如 403/断网）时回退官方 dl-cdn，避免整包构建中断。
+  # 注意：这行注释必须留在 docker run 的续行之外，否则会把续行切断。
   docker run --rm \
     -v "${ROOT_DIR}/server:/src" \
     -v "go-build-cache:/root/.cache/go-build" \
@@ -61,7 +63,7 @@ for ARCH in "amd64" "arm64"; do
     -e "LDFLAGS=${LDFLAGS}" \
     -e "ARCH=${ARCH}" \
     golang:1.26-alpine \
-    sh -c 'sed -i "s|dl-cdn.alpinelinux.org|mirrors.tuna.tsinghua.edu.cn|" /etc/apk/repositories && apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go build -ldflags "$LDFLAGS -extldflags -static" -o "rental-linux-${ARCH}" .'
+    sh -c '(sed -i "s|dl-cdn.alpinelinux.org|mirrors.tuna.tsinghua.edu.cn|" /etc/apk/repositories && apk add --no-cache gcc musl-dev) || (sed -i "s|mirrors.tuna.tsinghua.edu.cn|dl-cdn.alpinelinux.org|" /etc/apk/repositories && apk add --no-cache gcc musl-dev) && CGO_ENABLED=1 go build -ldflags "$LDFLAGS -extldflags -static" -o "rental-linux-${ARCH}" .'
 
   # Prepare build directory
   BUILD_PACK="${BUILD_DIR}/${APP_NAME}_${PKG_ARCH}"
