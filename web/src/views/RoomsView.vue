@@ -3,7 +3,7 @@
     <PageHeader title="房源管理" description="房号、默认租金与费用、单价覆盖及抄表底数">
       <template #actions>
         <button class="btn-ghost" @click="exportRooms">导出房源</button>
-        <button class="btn-brand" @click="openCreate">＋ 新增房源</button>
+        <button v-if="accessStore.canEdit" class="btn-brand" @click="openCreate">＋ 新增房源</button>
       </template>
     </PageHeader>
 
@@ -62,8 +62,8 @@
                 <span v-else class="badge bg-muted text-muted-foreground">空闲</span>
               </td>
               <td class="py-3 px-4 text-right whitespace-nowrap">
-                <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(r)">编辑</button>
-                <button class="text-destructive hover:underline" @click="remove(r)">删除</button>
+                <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(r)">编辑</button>
+                <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(r)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -91,8 +91,8 @@
           </div>
 
           <div class="flex items-center gap-3 pt-0.5 border-t border-border/60 text-xs">
-            <button class="text-brand-600 dark:text-brand-300" @click="openEdit(r)">编辑</button>
-            <button class="text-destructive ml-auto" @click="remove(r)">删除</button>
+            <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300" @click="openEdit(r)">编辑</button>
+            <button v-if="accessStore.canFull" class="text-destructive ml-auto" @click="remove(r)">删除</button>
           </div>
         </div>
       </div>
@@ -218,6 +218,7 @@ import FilterPanel from '../components/FilterPanel.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import { useRentalAccessStore } from '../stores/rentalAccess'
 import { toast } from '../utils/toast'
 import {
   defaultBilling, fetchBillingDefaults, globalBillingText, numText, roomBillingSummary,
@@ -228,6 +229,7 @@ import {
   type Room, type RoomView,
 } from '../api/rental'
 
+const accessStore = useRentalAccessStore()
 const rooms = ref<RoomView[]>([])
 const allRooms = ref<RoomView[]>([])
 const total = ref(0)

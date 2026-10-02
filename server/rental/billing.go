@@ -2,9 +2,9 @@
 //
 // v0.2.3 起水费计费方式（按吨/包月）、水费金额、缴费周期（月付/季付）、
 // 缴费日与提前提醒天数都在租户上配置：每个租户可以不一样。租户没设置的项
-// 回退到用户级全局默认（偏好设置 → 租房设置）。
+// 回退到系统级全局默认（系统配置 → 租房设置，管理员维护、全员共享）。
 //
-// 账单仍然按房开（(user, room, period) 唯一），因此房间的生效设置取该房
+// 账单仍然按房开（(room, period) 唯一），因此房间的生效设置取该房
 // 在租租户的设置：同一房间有多名在租租户（宿舍场景）时，逐项取"第一个
 // 显式设置"的租户（按登记先后，与账单租户名快照同序）。
 package rental
@@ -14,8 +14,10 @@ import (
 	"strconv"
 	"strings"
 
+	"smallgo/server/response"
 	"smallgo/server/sysconfig"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
 
@@ -104,18 +106,18 @@ func configInt(db *gorm.DB, key string, userID uint, def int) int {
 }
 
 // globalWaterAmount 全局默认水费金额：按吨读元/吨单价，包月读元/月金额。
-func globalWaterAmount(db *gorm.DB, userID uint, mode string) float64 {
+func globalWaterAmount(db *gorm.DB, mode string) float64 {
 	if normalizeWaterMode(mode) == waterModeMonthly {
-		return configFloat(db, "rental_water_monthly_fee", userID, 0)
+		return configFloat(db, "rental_water_monthly_fee", 0, 0)
 	}
-	return configFloat(db, "rental_water_price", userID, 5.0)
+	return configFloat(db, "rental_water_price", 0, 5.0)
 }
 
 // effectiveRoomBilling 解析房间生效的计费与缴费设置：逐项"第一个显式设置的
 // 在租租户" → 全局默认。没有在租租户的房间（空置/已退租）直接用全局默认。
+// 全局默认读系统级共享设置（user_id=0，管理员维护）。
 func effectiveRoomBilling(db *gorm.DB, room *Room) billingConfig {
 	tenants := activeRoomTenants(db, room.ID)
-	userID := room.UserID
 
 	// 水费计费方式：租户显式设置 → 全局默认（空值与未知值一律按吨）。
 	mode := ""
@@ -126,7 +128,7 @@ func effectiveRoomBilling(db *gorm.DB, room *Room) billingConfig {
 		}
 	}
 	if mode == "" {
-		mode = normalizeWaterMode(configString(db, "rental_water_mode", userID, waterModeMeter))
+		mode = normalizeWaterMode(configString(db, "rental_water_mode", 0, waterModeMeter))
 	}
 
 	// 水费金额随最终方式取：该方式下第一个有显式金额的租户 → 全局默认金额。
@@ -138,7 +140,7 @@ func effectiveRoomBilling(db *gorm.DB, room *Room) billingConfig {
 		}
 	}
 	if amount <= 0 {
-		amount = globalWaterAmount(db, userID, mode)
+		amount = globalWaterAmount(db, mode)
 	}
 
 	// 缴费周期：租户显式设置 → 全局默认。
@@ -150,7 +152,7 @@ func effectiveRoomBilling(db *gorm.DB, room *Room) billingConfig {
 		}
 	}
 	if cycle == "" {
-		cycle = normalizePayCycle(configString(db, "rental_pay_cycle", userID, payCycleMonthly))
+		cycle = normalizePayCycle(configString(db, "rental_pay_cycle", 0, payCycleMonthly))
 	}
 
 	// 缴费日：租户 0-28 的取值都算显式设置（0=不提醒）；-1 才回退全局。
@@ -162,7 +164,7 @@ func effectiveRoomBilling(db *gorm.DB, room *Room) billingConfig {
 		}
 	}
 	if payDay < 0 {
-		payDay = clampPayDay(configInt(db, "rental_pay_day", userID, 0))
+		payDay = clampPayDay(configInt(db, "rental_pay_day", 0, 0))
 	}
 
 	// 提前提醒天数：租户 0-30 的取值都算显式设置；-1 回退全局。
@@ -174,7 +176,7 @@ func effectiveRoomBilling(db *gorm.DB, room *Room) billingConfig {
 		}
 	}
 	if remind < 0 {
-		remind = clampRemindDays(configInt(db, "rental_remind_days", userID, defaultRemindDays))
+		remind = clampRemindDays(configInt(db, "rental_remind_days", 0, defaultRemindDays))
 	}
 
 	return billingConfig{
@@ -194,12 +196,29 @@ func waterAmountForMode(db *gorm.DB, room *Room, mode string) float64 {
 			return v
 		}
 	}
-	return globalWaterAmount(db, room.UserID, mode)
+	return globalWaterAmount(db, mode)
+}
+
+// handleBillingDefaults 给前端的共享计费默认值（系统级租房设置）：
+// 员工账号看不到系统配置页，抄表/开票弹窗的"跟随全局默认"改从这里取。
+func handleBillingDefaults(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		water, elec, gas := defaultPrices(db)
+		response.Success(c, gin.H{
+			"water_mode":        normalizeWaterMode(configString(db, "rental_water_mode", 0, waterModeMeter)),
+			"water_price":       water,
+			"water_monthly_fee": configFloat(db, "rental_water_monthly_fee", 0, 0),
+			"pay_cycle":         normalizePayCycle(configString(db, "rental_pay_cycle", 0, payCycleMonthly)),
+			"pay_day":           clampPayDay(configInt(db, "rental_pay_day", 0, 0)),
+			"elec_price":        elec,
+			"gas_price":         gas,
+			"remind_days":       clampRemindDays(configInt(db, "rental_remind_days", 0, defaultRemindDays)),
+		})
+	}
 }
 
 // clampPayDay 把缴费日收进 0-28（0=不提醒，负数按 0 处理）。
-func clampPayDay(day int) int {
-	if day < 0 {
+func clampPayDay(day int) int {	if day < 0 {
 		return 0
 	}
 	if day > payDayMax {

@@ -8,8 +8,12 @@
 // 会话 token。应用自己的 `Bearer <jwt>` 它认不出来，于是直接返回 200 纯文本
 // "invalid token"，请求根本到不了应用——表现就是「飞牛登录后一刷新就回登录页」
 // （启动引导拿不到自己的登录态，前端按未登录处理）。
-// 所以网关域上一律不带 Authorization，登录态改由服务端用网关注入的
-// X-Trim-Userid/Username 解析成「已绑定的应用账号」；直连端口照旧带 JWT。
+// 所以网关域上一律不带 Authorization，登录态有两个来源，都由服务端解析：
+//   1. 账密登录/注册时种下的应用会话 cookie（HttpOnly，Path=网关前缀），
+//      优先——输账号密码进来的账号不依赖飞牛账号；
+//   2. 网关注入的 X-Trim-Userid/Username 解析成「已绑定的应用账号」，
+//      兜底——服务一键登录。
+// 直连端口照旧带 JWT。
 export function onFnOSGatewayOrigin(): boolean {
   return (window as { __FNOS_GATEWAY__?: boolean }).__FNOS_GATEWAY__ === true
 }

@@ -53,7 +53,7 @@
       <div class="flex flex-wrap items-center justify-between gap-3 p-5 sm:p-6 border-b border-border">
         <div>
           <h2 class="text-lg font-bold text-foreground">用户列表</h2>
-          <p class="text-sm text-muted-foreground">管理系统中的所有账户</p>
+          <p class="text-sm text-muted-foreground">管理账户并按人授权业务权限（无 / 只读 / 录入 / 完全，管理员默认全部）</p>
         </div>
         <div class="flex items-center gap-2 w-full sm:w-auto">
           <div class="relative flex-1 sm:flex-none">
@@ -74,8 +74,9 @@
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-xs uppercase tracking-wider text-muted-foreground bg-muted/60">
-              <th class="py-3.5 px-6 font-semibold">用户</th>
+              <th class="py-3.5 px-4 font-semibold">用户</th>
               <th class="py-3.5 px-4 font-semibold">角色</th>
+              <th class="py-3.5 px-4 font-semibold">业务权限</th>
               <th class="py-3.5 px-4 font-semibold">状态</th>
               <th class="py-3.5 px-4 font-semibold">创建时间</th>
               <th class="py-3.5 px-6 font-semibold text-right">操作</th>
@@ -102,6 +103,23 @@
                 <span v-else class="badge bg-muted text-muted-foreground">普通用户</span>
               </td>
               <td class="py-3.5 px-4">
+                <!-- 业务权限（数据共享后按人授权）；管理员恒为全部，不给选择 -->
+                <span v-if="user.role === 'admin'" class="text-xs text-muted-foreground whitespace-nowrap">全部</span>
+                <select
+                  v-else
+                  :value="accessLevelOf(user)"
+                  class="input-field !py-1.5 !w-auto text-xs"
+                  :disabled="savingAccess === user.id"
+                  title="设置业务权限：无 / 只读 / 录入 / 完全"
+                  @change="changeAccess(user, ($event.target as HTMLSelectElement).value as AccessLevel)"
+                >
+                  <option value="none">无（未授权）</option>
+                  <option value="readonly">只读</option>
+                  <option value="edit">录入</option>
+                  <option value="full">完全</option>
+                </select>
+              </td>
+              <td class="py-3.5 px-4">
                 <span v-if="user.status === 1" class="badge bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>启用
                 </span>
@@ -126,7 +144,7 @@
               </td>
             </tr>
             <tr v-if="users.length === 0">
-              <td colspan="5" class="py-16 text-center">
+              <td colspan="6" class="py-16 text-center">
                 <div class="flex flex-col items-center gap-3 text-muted-foreground">
                   <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-3.13a4 4 0 10-4-4 4 4 0 004 4z"/></svg>
                   <span class="text-sm">暂无用户数据</span>
@@ -191,6 +209,7 @@
 import { ref, computed, onMounted } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { getUsers, toggleUserStatus, deleteUser, resetUserPassword } from '../api/user'
+import { getAccessList, setAccess, type AccessLevel } from '../api/rental'
 import { passwordValidationError } from '../utils/password'
 import { toast } from '../utils/toast'
 
@@ -200,6 +219,45 @@ const page = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
 const totalPages = computed(() => Math.ceil(total.value / pageSize.value) || 1)
+
+// ---- 业务权限授权（数据共享后管理员按用户设置等级） ----
+const accessMap = ref<Record<number, AccessLevel>>({})
+const savingAccess = ref<number | null>(null)
+
+function accessLevelOf(user: any): AccessLevel {
+  return accessMap.value[user.id] ?? 'none'
+}
+
+async function loadAccess() {
+  try {
+    const res = await getAccessList()
+    if (res.data?.code === 0) {
+      const map: Record<number, AccessLevel> = {}
+      for (const row of res.data.data ?? []) {
+        map[row.user_id] = row.level as AccessLevel
+      }
+      accessMap.value = map
+    }
+  } catch { /* 读取失败按未授权展示 */ }
+}
+
+async function changeAccess(user: any, level: AccessLevel) {
+  savingAccess.value = user.id
+  try {
+    const res = await setAccess(user.id, level)
+    if (res.data?.code === 0) {
+      accessMap.value = { ...accessMap.value, [user.id]: level }
+      const label = { none: '已撤销授权', readonly: '已设为只读', edit: '已设为录入', full: '已设为完全' }[level]
+      toast(`${user.username} ${label}`)
+    } else {
+      toast(res.data?.message || '授权失败', 'error')
+    }
+  } catch (e: any) {
+    toast(e?.response?.data?.message || '授权失败', 'error')
+  } finally {
+    savingAccess.value = null
+  }
+}
 
 const adminCount = computed(() => users.value.filter((u) => u.role === 'admin').length)
 const activeCount = computed(() => users.value.filter((u) => u.status === 1).length)
@@ -224,7 +282,10 @@ function avatarClass(name: string) {
   return avatarPalette[Math.abs(h) % avatarPalette.length]
 }
 
-onMounted(loadUsers)
+onMounted(() => {
+  loadUsers()
+  loadAccess()
+})
 
 async function loadUsers() {
   try {

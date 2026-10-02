@@ -83,10 +83,13 @@ func contractAbsPath(rel string) string {
 }
 
 func setupContractRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/tenants/:id/contracts", handleContractList(db))
-	api.POST("/rental/tenants/:id/contracts", handleContractUpload(db))
-	api.GET("/rental/contracts/:id/file", handleContractFile(db))
-	api.DELETE("/rental/contracts/:id", handleContractDelete(db))
+	read := requireAccess(db, AccessReadonly)
+	edit := requireAccess(db, AccessEdit)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/tenants/:id/contracts", read, handleContractList(db))
+	api.POST("/rental/tenants/:id/contracts", edit, handleContractUpload(db))
+	api.GET("/rental/contracts/:id/file", read, handleContractFile(db))
+	api.DELETE("/rental/contracts/:id", full, handleContractDelete(db))
 }
 
 func handleContractList(db *gorm.DB) gin.HandlerFunc {
@@ -278,7 +281,8 @@ func findUserContract(db *gorm.DB, c *gin.Context) (*Contract, bool) {
 		return nil, false
 	}
 	var contract Contract
-	if err := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).First(&contract).Error; err != nil {
+	// 数据共享后按 ID 直取，不再限定录入人。
+	if err := db.First(&contract, id).Error; err != nil {
 		response.ErrorNotFound(c, "合同不存在")
 		return nil, false
 	}

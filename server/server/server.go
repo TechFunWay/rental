@@ -281,9 +281,11 @@ func NewRouter(cfg config.Config, db *gorm.DB, jwtSecret string) *gin.Engine {
 	r.Use(middleware.CORS(cfg.CORSOrigin))
 	r.Use(middleware.LimitJSONBody(1 << 20))
 
+	gatewayPrefix := ""
 	appGroup := r.Group("")
 	if cfg.FnOSApp {
-		appGroup = r.Group(strings.TrimSuffix(cfg.GatewayPrefix, "/"))
+		gatewayPrefix = strings.TrimSuffix(cfg.GatewayPrefix, "/")
+		appGroup = r.Group(gatewayPrefix)
 	}
 	api := appGroup.Group("/api")
 
@@ -334,7 +336,7 @@ func NewRouter(cfg config.Config, db *gorm.DB, jwtSecret string) *gin.Engine {
 	authGroup.POST("/upload", upload.HandleUpload(cfg.UploadDir))
 	appGroup.GET("/uploads/*filepath", upload.ServeUpload(cfg.UploadDir))
 
-	user.RegisterRoutes(publicGroup, optionalAuthGroup, authGroup, adminGroup, db, cfg.FnOSApp)
+	user.RegisterRoutes(publicGroup, optionalAuthGroup, authGroup, adminGroup, db, cfg.FnOSApp, gatewayPrefix)
 
 	// Server-Sent Events stream for the default realtime broker. Apps push
 	// live updates via realtime.Publish; browsers subscribe at /api/realtime.

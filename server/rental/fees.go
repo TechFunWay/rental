@@ -44,10 +44,11 @@ const (
 
 // FeeItem 收费项目定义。BuiltIn 项目不可删除（bills 固定列依赖），可改名、
 // 改周期（fixed 类）、停用；自定义项目由用户添加（宽带费、停车费等）。
+// 数据共享后收费项目全员一套：UserID 是「录入人」戳，内置项目种子为 0。
 type FeeItem struct {
 	ID            uint      `gorm:"primarykey" json:"id"`
 	UserID        uint      `gorm:"index" json:"-"`
-	Key           string    `gorm:"not null;uniqueIndex:idx_rental_fee_item_user_key" json:"key"`
+	Key           string    `gorm:"not null;index" json:"key"`
 	Name          string    `gorm:"not null" json:"name"`
 	Kind          string    `gorm:"not null" json:"kind"` // fixed / meter
 	Unit          string    `json:"unit"`                 // meter 类计量单位（吨/度/方），fixed 为空
@@ -112,7 +113,7 @@ func paymentItemsJSON(items []PaymentItem) string {
 	return string(data)
 }
 
-// defaultFeeItems 内置收费项目（首次访问时惰性 seed，每用户一份）。
+// defaultFeeItems 内置收费项目（首次访问时惰性 seed，全局一份）。
 // 租金/卫生/管理是 fixed 类，默认跟随租户缴费周期；水/电/燃气是 meter 类恒月付。
 func defaultFeeItems() []FeeItem {
 	return []FeeItem{
@@ -125,25 +126,22 @@ func defaultFeeItems() []FeeItem {
 	}
 }
 
-// ensureFeeItems 惰性 seed：该用户还没有收费项目定义时写入内置六项。
-func ensureFeeItems(db *gorm.DB, userID uint) {
+// ensureFeeItems 惰性 seed：还没有任何收费项目定义时写入内置六项。
+func ensureFeeItems(db *gorm.DB) {
 	var count int64
-	db.Model(&FeeItem{}).Where("user_id = ?", userID).Count(&count)
+	db.Model(&FeeItem{}).Count(&count)
 	if count > 0 {
 		return
 	}
 	items := defaultFeeItems()
-	for i := range items {
-		items[i].UserID = userID
-	}
 	db.Create(&items)
 }
 
-// enabledCustomFeeItems 该用户启用的自定义（fixed 类）收费项目，出账并入账单。
-func enabledCustomFeeItems(db *gorm.DB, userID uint) []FeeItem {
+// enabledCustomFeeItems 启用的自定义（fixed 类）收费项目，出账并入账单。
+func enabledCustomFeeItems(db *gorm.DB) []FeeItem {
 	items := make([]FeeItem, 0)
-	db.Where("user_id = ? AND enabled = ? AND kind = ? AND built_in = ?",
-		userID, true, feeKindFixed, false).Order("sort ASC, id ASC").Find(&items)
+	db.Where("enabled = ? AND kind = ? AND built_in = ?",
+		true, feeKindFixed, false).Order("sort ASC, id ASC").Find(&items)
 	return items
 }
 
@@ -165,8 +163,8 @@ func fixedItemDue(db *gorm.DB, room *Room, period string) bool {
 func quarterAnchorDue(db *gorm.DB, room *Room, period string) bool {
 	var last Bill
 	err := db.Where(
-		"user_id = ? AND room_id = ? AND (rent > ? OR sanitation_fee > ? OR management_fee > ? OR extra_amount > ?)",
-		room.UserID, room.ID, 0, 0, 0, 0,
+		"room_id = ? AND (rent > ? OR sanitation_fee > ? OR management_fee > ? OR extra_amount > ?)",
+		room.ID, 0, 0, 0, 0,
 	).Order("period DESC").First(&last).Error
 	if err != nil {
 		return true // 首账月
@@ -180,20 +178,22 @@ func quarterAnchorDue(db *gorm.DB, room *Room, period string) bool {
 
 // setupFeeRoutes 收费项目 / 收款流水 / 统计分析的接口。
 func setupFeeRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/fee-items", handleFeeItemList(db))
-	api.POST("/rental/fee-items", handleFeeItemCreate(db))
-	api.PUT("/rental/fee-items/:id", handleFeeItemUpdate(db))
-	api.DELETE("/rental/fee-items/:id", handleFeeItemDelete(db))
-	api.GET("/rental/payments", handlePaymentList(db))
-	api.GET("/rental/analytics", handleAnalytics(db))
+	read := requireAccess(db, AccessReadonly)
+	edit := requireAccess(db, AccessEdit)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/fee-items", read, handleFeeItemList(db))
+	api.POST("/rental/fee-items", edit, handleFeeItemCreate(db))
+	api.PUT("/rental/fee-items/:id", edit, handleFeeItemUpdate(db))
+	api.DELETE("/rental/fee-items/:id", full, handleFeeItemDelete(db))
+	api.GET("/rental/payments", read, handlePaymentList(db))
+	api.GET("/rental/analytics", read, handleAnalytics(db))
 }
 
 func handleFeeItemList(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID := currentUserID(c)
-		ensureFeeItems(db, userID)
+		ensureFeeItems(db)
 		items := make([]FeeItem, 0)
-		db.Where("user_id = ?", userID).Order("built_in DESC, sort ASC, id ASC").Find(&items)
+		db.Order("built_in DESC, sort ASC, id ASC").Find(&items)
 		response.Success(c, items)
 	}
 }
@@ -220,11 +220,10 @@ func handleFeeItemCreate(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		cycle := normalizePayCycle(req.Cycle)
-		userID := currentUserID(c)
-		ensureFeeItems(db, userID)
+		ensureFeeItems(db)
 
 		item := FeeItem{
-			UserID:        userID,
+			UserID:        currentUserID(c), // 录入人戳
 			Key:           "custom_" + strconv.FormatInt(time.Now().UnixNano(), 36),
 			Name:          name,
 			Kind:          feeKindFixed,
@@ -248,7 +247,7 @@ func handleFeeItemUpdate(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		var item FeeItem
-		if err := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).First(&item).Error; err != nil {
+		if err := db.First(&item, id).Error; err != nil {
 			response.ErrorNotFound(c, "收费项目不存在")
 			return
 		}
@@ -280,7 +279,7 @@ func handleFeeItemDelete(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		var item FeeItem
-		if err := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).First(&item).Error; err != nil {
+		if err := db.First(&item, id).Error; err != nil {
 			response.ErrorNotFound(c, "收费项目不存在")
 			return
 		}
@@ -379,11 +378,11 @@ func fmtAmount(v float64) string {
 // customBillItems 按启用的自定义 fixed 项目生成账单明细行（金额按项目周期与
 // 到期情况计：quarterly 项目到期时收 3 个月，monthly 每月收）。
 // 租户勾选排除的项目（该房生效的"不参与计费项目"）不并入。
-func customBillItems(db *gorm.DB, room *Room, period string, userID uint) ([]BillItem, float64) {
+func customBillItems(db *gorm.DB, room *Room, period string) ([]BillItem, float64) {
 	items := make([]BillItem, 0)
 	excluded := excludedFeeSet(effectiveRoomExcludedFees(db, room))
 	var extra float64
-	for _, fi := range enabledCustomFeeItems(db, userID) {
+	for _, fi := range enabledCustomFeeItems(db) {
 		if excluded[fi.Key] {
 			continue // 租户不参与该项目，本期不收
 		}
@@ -427,8 +426,7 @@ func handlePaymentList(db *gorm.DB) gin.HandlerFunc {
 		}
 		query := db.Table("payments").
 			Select("payments.*, bills.room_no as room_no, bills.tenant_name as tenant_name, bills.period as period").
-			Joins("LEFT JOIN bills ON bills.id = payments.bill_id").
-			Where("payments.user_id = ?", currentUserID(c))
+			Joins("LEFT JOIN bills ON bills.id = payments.bill_id")
 		if from != "" {
 			query = query.Where("payments.paid_at >= ?", from+"-01 00:00:00")
 		}
@@ -468,7 +466,6 @@ func handlePaymentList(db *gorm.DB) gin.HandlerFunc {
 // handleAnalytics 统计分析：近 N 月应收/实收、项目收入构成、收缴率。
 func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID := currentUserID(c)
 		months := utils.Atoi(c.Query("months"), 12)
 		if months < 3 {
 			months = 3
@@ -485,7 +482,7 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		}
 		billedRows := make([]monthRow, 0)
 		db.Model(&Bill{}).Select("period, SUM(total_amount) as billed").
-			Where("user_id = ? AND period >= ?", userID, start[:7]).
+			Where("period >= ?", start[:7]).
 			Group("period").Order("period ASC").Scan(&billedRows)
 
 		type paidRow struct {
@@ -494,7 +491,7 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		}
 		paidRows := make([]paidRow, 0)
 		db.Model(&Payment{}).Select("strftime('%Y-%m', paid_at) as month, SUM(amount) as paid").
-			Where("user_id = ? AND paid_at >= ?", userID, start).
+			Where("paid_at >= ?", start).
 			Group("month").Order("month ASC").Scan(&paidRows)
 
 		paidByMonth := map[string]float64{}
@@ -524,13 +521,12 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		}
 		itemRows := make([]itemRow, 0)
 		db.Table("bill_items").Select("name, SUM(amount) as amount").
-			Where("user_id = ? AND bill_id IN (SELECT id FROM bills WHERE user_id = ? AND period >= ?)",
-				userID, userID, start[:7]).
+			Where("bill_id IN (SELECT id FROM bills WHERE period >= ?)", start[:7]).
 			Group("name").Order("amount DESC").Scan(&itemRows)
 
 		// 当前欠缴总额（全部未缴清账单）。
 		var arrears float64
-		db.Model(&Bill{}).Where("user_id = ? AND status <> ?", userID, billStatusPaid).
+		db.Model(&Bill{}).Where("status <> ?", billStatusPaid).
 			Select("COALESCE(SUM(total_amount - paid_amount), 0)").Scan(&arrears)
 		arrears = round2(arrears)
 

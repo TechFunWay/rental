@@ -2,8 +2,10 @@
   <div class="page-container animate-fade-in">
     <PageHeader title="抄表记录" description="每月水/电/燃气表读数台账，独立于账单：空置房、季付房的中间月份也能记">
       <template #actions>
-        <button class="btn-ghost" @click="openForm()">录入读数</button>
-        <button class="btn-brand" @click="showMetering = true">⚡ 抄表开票</button>
+        <template v-if="accessStore.canEdit">
+          <button class="btn-ghost" @click="openForm()">录入读数</button>
+          <button class="btn-brand" @click="showMetering = true">⚡ 抄表开票</button>
+        </template>
       </template>
     </PageHeader>
 
@@ -56,7 +58,7 @@
                 <td class="py-2.5 px-4 text-muted-foreground max-w-[200px] truncate" :title="r.note">{{ r.note || '—' }}</td>
                 <td class="py-2.5 px-4 text-right whitespace-nowrap">
                   <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openForm(r)">修改</button>
-                  <button class="text-destructive hover:underline" @click="remove(r)">删除</button>
+                  <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(r)">删除</button>
                 </td>
               </tr>
             </tbody>
@@ -73,7 +75,7 @@
               </div>
               <div class="flex items-center gap-3 text-xs shrink-0">
                 <button class="text-brand-600 dark:text-brand-300" @click="openForm(r)">修改</button>
-                <button class="text-destructive" @click="remove(r)">删除</button>
+                <button v-if="accessStore.canFull" class="text-destructive" @click="remove(r)">删除</button>
               </div>
             </div>
             <div class="text-[11px] leading-5 text-muted-foreground rounded-md bg-muted/50 px-2 py-1.5 tabular-nums">
@@ -148,11 +150,14 @@ import MeterReadingModal from '../components/MeterReadingModal.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import { useRentalAccessStore } from '../stores/rentalAccess'
 import { toast } from '../utils/toast'
 import {
   deleteMeterRecord, getMeterRecords, getRooms, upsertMeterRecord,
   type MeterRecord, type RoomView,
 } from '../api/rental'
+
+const accessStore = useRentalAccessStore()
 
 const records = ref<MeterRecord[]>([])
 const allRooms = ref<RoomView[]>([])

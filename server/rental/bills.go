@@ -15,14 +15,17 @@ import (
 )
 
 func setupBillRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/bills", handleBillList(db))
-	api.GET("/rental/bills/periods", handleBillPeriods(db))
-	api.GET("/rental/bills/:id", handleBillDetail(db))
-	api.POST("/rental/bills", handleBillCreate(db))
-	api.POST("/rental/bills/generate", handleBillGenerate(db))
-	api.PUT("/rental/bills/:id", handleBillUpdate(db))
-	api.POST("/rental/bills/:id/pay", handleBillPay(db))
-	api.DELETE("/rental/bills/:id", handleBillDelete(db))
+	read := requireAccess(db, AccessReadonly)
+	edit := requireAccess(db, AccessEdit)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/bills", read, handleBillList(db))
+	api.GET("/rental/bills/periods", read, handleBillPeriods(db))
+	api.GET("/rental/bills/:id", read, handleBillDetail(db))
+	api.POST("/rental/bills", edit, handleBillCreate(db))
+	api.POST("/rental/bills/generate", edit, handleBillGenerate(db))
+	api.PUT("/rental/bills/:id", edit, handleBillUpdate(db))
+	api.POST("/rental/bills/:id/pay", edit, handleBillPay(db))
+	api.DELETE("/rental/bills/:id", full, handleBillDelete(db))
 }
 
 // billRequest 是编辑账单的入参。费用三项（water_fee 等）与合计由服务端
@@ -91,7 +94,8 @@ func (b *Bill) waterFee() float64 {
 	return meterFee(b.WaterLast, b.WaterNow, b.WaterPrice)
 }
 
-// configFloat 读取用户级数值配置，读不到或非法时返回默认值。
+// configFloat 读取数值配置，读不到或非法时返回默认值。租房设置已升级为
+// 系统级共享（user_id=0），调用方一律传 0。
 func configFloat(db *gorm.DB, key string, userID uint, def float64) float64 {
 	v, err := sysconfig.GetConfig(db, key, userID)
 	if err != nil || strings.TrimSpace(v) == "" {
@@ -103,11 +107,11 @@ func configFloat(db *gorm.DB, key string, userID uint, def float64) float64 {
 	return def
 }
 
-// defaultPrices 读取用户级默认单价（sysconfig，偏好设置中的"租房设置"组）。
-func defaultPrices(db *gorm.DB, userID uint) (water, elec, gas float64) {
-	return configFloat(db, "rental_water_price", userID, 5.0),
-		configFloat(db, "rental_elec_price", userID, 1.2),
-		configFloat(db, "rental_gas_price", userID, 3.5)
+// defaultPrices 读取系统级默认单价（系统配置里的"租房设置"组，全员共享）。
+func defaultPrices(db *gorm.DB) (water, elec, gas float64) {
+	return configFloat(db, "rental_water_price", 0, 5.0),
+		configFloat(db, "rental_elec_price", 0, 1.2),
+		configFloat(db, "rental_gas_price", 0, 3.5)
 }
 
 // activeTenantNames 返回房间在租租户姓名（多人顿号连接，作为账单快照）。
@@ -122,7 +126,7 @@ func activeTenantNames(db *gorm.DB, roomID uint) string {
 // 无历史账单则取房间底数，再无则为 0。
 func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast float64) {
 	var prev Bill
-	err := db.Where("room_id = ? AND user_id = ?", room.ID, room.UserID).
+	err := db.Where("room_id = ?", room.ID).
 		Order("period DESC").First(&prev).Error
 	if err == nil {
 		return prev.WaterNow, prev.ElecNow, prev.GasNow
@@ -146,7 +150,7 @@ func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast floa
 func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 	cfg := effectiveRoomBilling(db, room)
 	waterLast, elecLast, gasLast := prefillReadings(db, room)
-	_, elec, gas := defaultPrices(db, room.UserID)
+	_, elec, gas := defaultPrices(db)
 	if room.ElecPrice > 0 {
 		elec = room.ElecPrice
 	}
@@ -191,7 +195,7 @@ func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 // applyCustomFees 把启用的自定义收费项目并入账单（金额合计进 ExtraAmount），
 // 返回明细行供落库。在建账/生成的读数覆盖处理完成后、最终 recalc 前调用。
 func applyCustomFees(db *gorm.DB, room *Room, bill *Bill) []BillItem {
-	customs, extra := customBillItems(db, room, bill.Period, bill.UserID)
+	customs, extra := customBillItems(db, room, bill.Period)
 	bill.ExtraAmount = round2(bill.ExtraAmount + extra)
 	return customs
 }
@@ -207,7 +211,7 @@ func handleBillList(db *gorm.DB) gin.HandlerFunc {
 		status := strings.TrimSpace(c.Query("status"))
 		keyword := strings.TrimSpace(c.Query("keyword"))
 
-		query := db.Model(&Bill{}).Where("user_id = ?", currentUserID(c))
+		query := db.Model(&Bill{})
 		if period != "" {
 			query = query.Where("period = ?", period)
 		}
@@ -255,7 +259,7 @@ func handleBillList(db *gorm.DB) gin.HandlerFunc {
 func handleBillPeriods(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		periods := make([]string, 0)
-		db.Model(&Bill{}).Where("user_id = ?", currentUserID(c)).
+		db.Model(&Bill{}).
 			Distinct("period").Order("period DESC").Limit(36).Pluck("period", &periods)
 		response.Success(c, periods)
 	}
@@ -268,9 +272,10 @@ func handleBillDetail(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		name, _ := sysconfig.GetConfig(db, "rental_property_name", bill.UserID)
-		contact, _ := sysconfig.GetConfig(db, "rental_contact", bill.UserID)
-		note, _ := sysconfig.GetConfig(db, "rental_receipt_note", bill.UserID)
+		// 抬头信息是系统级共享设置（管理员维护）。
+		name, _ := sysconfig.GetConfig(db, "rental_property_name", 0)
+		contact, _ := sysconfig.GetConfig(db, "rental_contact", 0)
+		note, _ := sysconfig.GetConfig(db, "rental_receipt_note", 0)
 
 		items := make([]BillItem, 0)
 		db.Where("bill_id = ?", bill.ID).Order("id ASC").Find(&items)
@@ -341,14 +346,16 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		var existing int64
-		db.Model(&Bill{}).Where("user_id = ? AND room_id = ? AND period = ?",
-			currentUserID(c), req.RoomID, req.Period).Count(&existing)
+		db.Model(&Bill{}).Where("room_id = ? AND period = ?",
+			req.RoomID, req.Period).Count(&existing)
 		if existing > 0 {
 			response.ErrorBadRequest(c, "该房间本月账单已存在")
 			return
 		}
 
+		// UserID 录入人戳：谁开的票记谁。
 		bill := newBillFromRoom(db, room, req.Period)
+		bill.UserID = currentUserID(c)
 		if req.WaterNow != nil {
 			bill.WaterNow = *req.WaterNow
 		}
@@ -433,12 +440,11 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		userID := currentUserID(c)
 		// 只为有在租租户的房间开票；空置房间不产生账单。
 		rooms := make([]Room, 0)
 		if err := db.Where(
-			"user_id = ? AND id IN (SELECT room_id FROM tenants WHERE user_id = ? AND active = ?)",
-			userID, userID, true).Order("room_no ASC").Find(&rooms).Error; err != nil {
+			"id IN (SELECT room_id FROM tenants WHERE active = ?)",
+			true).Order("room_no ASC").Find(&rooms).Error; err != nil {
 			response.ErrorInternal(c, "查询房源失败")
 			return
 		}
@@ -446,8 +452,8 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 		created, skipped := 0, 0
 		for i := range rooms {
 			var existing int64
-			db.Model(&Bill{}).Where("user_id = ? AND room_id = ? AND period = ?",
-				userID, rooms[i].ID, req.Period).Count(&existing)
+			db.Model(&Bill{}).Where("room_id = ? AND period = ?",
+				rooms[i].ID, req.Period).Count(&existing)
 			if existing > 0 {
 				skipped++
 				continue
@@ -459,6 +465,7 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 				continue
 			}
 			bill := newBillFromRoom(db, &rooms[i], req.Period)
+			bill.UserID = currentUserID(c) // 录入人戳
 			customs := applyCustomFees(db, &rooms[i], bill)
 			bill.recalc()
 			if err := db.Create(bill).Error; err != nil {
@@ -514,7 +521,7 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 			// 与水费单位匹配，避免包月沿用元/吨单价（或反之）算出离谱水费。
 			if mode != normalizeWaterMode(bill.WaterMode) && req.WaterPrice <= 0 {
 				var room Room
-				if err := db.Where("id = ? AND user_id = ?", bill.RoomID, bill.UserID).First(&room).Error; err == nil {
+				if err := db.First(&room, bill.RoomID).Error; err == nil {
 					req.WaterPrice = waterAmountForMode(db, &room, mode)
 				}
 			}
@@ -615,7 +622,7 @@ func handleBillPay(db *gorm.DB) gin.HandlerFunc {
 				return err
 			}
 			return tx.Create(&Payment{
-				UserID: bill.UserID, BillID: bill.ID,
+				UserID: currentUserID(c), BillID: bill.ID, // UserID 收款人戳
 				PaidAt: now, Amount: round2(req.Amount),
 				Items: paymentItemsJSON(shares), Note: strings.TrimSpace(req.Note),
 			}).Error
@@ -679,7 +686,8 @@ func handleBillDelete(db *gorm.DB) gin.HandlerFunc {
 
 func loadRoom(db *gorm.DB, c *gin.Context, roomID uint) (*Room, bool) {
 	var room Room
-	if err := db.Where("id = ? AND user_id = ?", roomID, currentUserID(c)).First(&room).Error; err != nil {
+	// 数据共享后按 ID 直取，不再限定录入人。
+	if err := db.First(&room, roomID).Error; err != nil {
 		response.ErrorNotFound(c, "房源不存在")
 		return nil, false
 	}
@@ -693,7 +701,8 @@ func findUserBill(db *gorm.DB, c *gin.Context) (*Bill, bool) {
 		return nil, false
 	}
 	var bill Bill
-	if err := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).First(&bill).Error; err != nil {
+	// 数据共享后按 ID 直取，不再限定录入人。
+	if err := db.First(&bill, id).Error; err != nil {
 		response.ErrorNotFound(c, "账单不存在")
 		return nil, false
 	}

@@ -48,7 +48,7 @@ func handleSetupRequired(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-func handleRegister(db *gorm.DB) gin.HandlerFunc {
+func handleRegister(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			Username string `json:"username" binding:"required"`
@@ -60,6 +60,10 @@ func handleRegister(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		secret := getJWTSecret(db)
+		// 注册只创建应用账号，不读取、不绑定网关注入的飞牛身份。要不要把飞牛
+		// 账号用起来，由用户显式点「使用飞牛 NAS 登录」并确认后的绑定流程决定
+		// （理由同 handleLogin）。网关域上注册后的会话由下方种下的应用会话
+		// cookie 维持，不再依赖绑定。
 		result, err := Register(db, req.Username, req.Password, secret)
 		if err != nil {
 			switch {
@@ -75,11 +79,12 @@ func handleRegister(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
+		setAppSessionCookie(c, gatewayPrefix, sessionToken(result), int(loginTokenTTL(db).Seconds()))
 		response.Success(c, result)
 	}
 }
 
-func handleLogin(db *gorm.DB) gin.HandlerFunc {
+func handleLogin(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			Username    string `json:"username" binding:"required"`
@@ -92,11 +97,22 @@ func handleLogin(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		secret := getJWTSecret(db)
+		// 账密登录只认应用自己的账号，绝不读取、绑定网关注入的飞牛身份：飞牛
+		// 账号只在用户显式点「使用飞牛 NAS 登录」并确认后（/auth/fnos/*）才
+		// 参与。曾在这里「即登录即绑定」，结果飞牛账号已绑给管理员时，任何
+		// 普通账号的账密登录都会被「此飞牛 NAS 账号已绑定其他应用账号」挡死，
+		// 而用户根本没碰过飞牛登录按钮。
 		result, err := Login(db, req.Username, req.Password, req.PasswordMd5, secret)
 		if err != nil {
 			response.Error(c, http.StatusUnauthorized, response.CodeInvalidCredentials, err.Error())
 			return
 		}
+
+		// 网关域上应用自己的 Authorization 送不进应用（接入层拦截），账密登录
+		// 换来的 JWT 改由 HttpOnly cookie 携带（Path=网关前缀，与兄弟应用互不
+		// 干扰），后续请求里它优先于网关隐式认人——这正是账密登录不再需要绑定
+		// 飞牛账号也能维持会话的关键。
+		setAppSessionCookie(c, gatewayPrefix, sessionToken(result), int(loginTokenTTL(db).Seconds()))
 
 		// Populate context so the audit entry is attributed to the logged-in user.
 		if u, ok := result["user"].(map[string]interface{}); ok {
@@ -109,6 +125,53 @@ func handleLogin(db *gorm.DB) gin.HandlerFunc {
 
 		response.Success(c, result)
 	}
+}
+
+// appSessionCookieName 是网关域上应用自有会话的 cookie 名，middleware.authenticate
+// 里 c.Cookie("token") 与它对应，两边不能各改各的。
+const appSessionCookieName = "token"
+
+// setAppSessionCookie 在飞牛网关域上种下应用会话 cookie；gatewayPrefix 为空
+// （非飞牛部署、直连端口语境）时不种。
+func setAppSessionCookie(c *gin.Context, gatewayPrefix, token string, maxAge int) {
+	if gatewayPrefix == "" || token == "" {
+		return
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     appSessionCookieName,
+		Value:    token,
+		Path:     gatewayPrefix,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		// 飞牛网关在局域网走 http，Secure 会导致浏览器拒发 cookie。
+		Secure: false,
+	})
+}
+
+// clearAppSessionCookie 清掉应用会话 cookie：飞牛登录/绑定流程要恢复「会话归
+// 网关所有」的语义（跟随 NAS 退出），残留的 cookie 会抢在网关隐式认人前面把
+// 用户按回账密登录的那个账号。
+func clearAppSessionCookie(c *gin.Context, gatewayPrefix string) {
+	if gatewayPrefix == "" {
+		return
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     appSessionCookieName,
+		Value:    "",
+		Path:     gatewayPrefix,
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   false,
+	})
+}
+
+func sessionToken(result map[string]interface{}) string {
+	if token, ok := result["token"].(string); ok {
+		return token
+	}
+	return ""
 }
 
 // fnOSIdentity reads only the headers injected by the fnOS unified gateway.
@@ -157,12 +220,16 @@ func handleFnOSIdentity() gin.HandlerFunc {
 	}
 }
 
-func handleFnOSLogin(db *gorm.DB) gin.HandlerFunc {
+func handleFnOSLogin(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		identity, ok := fnOSIdentity(c)
 		if !ok {
 			return
 		}
+		// 走到飞牛流程就会话归网关所有：先清掉可能残留的应用会话 cookie，
+		// 否则它抢在网关隐式认人前面，用户确认了飞牛登录却还停在账密登录的
+		// 那个账号上。
+		clearAppSessionCookie(c, gatewayPrefix)
 		result, err := LoginWithFnOS(db, identity, getJWTSecret(db))
 		if errors.Is(err, ErrFnOSNotBound) {
 			var accountCount int64
@@ -202,12 +269,15 @@ func handleFnOSLogin(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-func handleFnOSBind(db *gorm.DB) gin.HandlerFunc {
+func handleFnOSBind(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		identity, ok := fnOSIdentity(c)
 		if !ok {
 			return
 		}
+		// 绑定成功后会话归网关所有（语义同 handleFnOSLogin），先清掉应用会话
+		// cookie 再进入绑定。
+		clearAppSessionCookie(c, gatewayPrefix)
 		var req struct {
 			Mode     string `json:"mode" binding:"required"`
 			Username string `json:"username" binding:"required"`
@@ -246,12 +316,14 @@ func handleCheckAuth(db *gorm.DB) gin.HandlerFunc {
 
 		result := CheckAuth(db, uid, requireLogin)
 		// 网关域上的「登录态来源」。客户端据此区分两种会话：
-		// gateway —— 用户已主动登出应用，现在仅靠网关注入的 NAS 身份隐式
-		// 维持登录态，NAS 那侧一退出，应用必须跟着退出（会话所属方是 NAS）；
-		// app —— 用户显式登录换来的应用会话（含直连端口的 JWT），归应用
-		// 自己所有，可以独立退出，也不需要跟随 NAS。
+		// gateway —— 仅靠网关注入的 NAS 身份隐式维持登录态，NAS 那侧一退出，
+		//            应用必须跟着退出（会话所属方是 NAS）；
+		// app     —— 应用自己的凭证换来的会话（账密登录的会话 cookie、直连
+		//            端口的 JWT、API Key），归应用自己所有，可以独立退出，
+		//            也不需要跟随 NAS。
+		// 判据是 authenticate 记下的 auth_via：这次请求实际靠什么认的人。
 		if middleware.OnFnOSGateway(c.Request.Context()) {
-			if _, implicit := middleware.GatewayIdentityUser(c.Request, db); implicit {
+			if via, _ := c.Get("auth_via"); via == middleware.AuthViaGateway {
 				result["session_source"] = "gateway"
 			} else {
 				result["session_source"] = "app"
@@ -269,7 +341,7 @@ func handleCheckAuth(db *gorm.DB) gin.HandlerFunc {
 // 用户主动登出了，别再自动放行」。两种环境返回同样的结果，前端不必分支。
 //
 // 这里刻意用 OptionalAuth：退出必须幂等，重复点击或会话已失效也应返回成功。
-func handleLogout(db *gorm.DB) gin.HandlerFunc {
+func handleLogout(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID, _ := c.Get("userID")
 		uid, _ := userID.(uint)
@@ -277,6 +349,10 @@ func handleLogout(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorInternal(c, "退出登录失败，请稍后重试")
 			return
 		}
+		// 飞牛部署下 cookie 与直连端口同宿主机共享（cookie 不分端口），无论这
+		// 次退出发生在哪个监听器上都把它清掉，避免「在直连端口退出、网关域又
+		// 被会话 cookie 认回来」。
+		clearAppSessionCookie(c, gatewayPrefix)
 		if uid != 0 {
 			audit.Log(db, c, "logout", "user", uid, "用户退出登录")
 		}
@@ -466,22 +542,24 @@ func handleResetPassword(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// RegisterRoutes wires user and authentication routes.
-func RegisterRoutes(publicGroup *gin.RouterGroup, optionalAuthGroup *gin.RouterGroup, authGroup *gin.RouterGroup, adminGroup *gin.RouterGroup, db *gorm.DB, fnOSApp bool) {
+// RegisterRoutes wires user and authentication routes. gatewayPrefix 是飞牛
+// 部署的网关前缀（如 /app/techfunway-rental），用作应用会话 cookie 的 Path；
+// 非飞牛部署传空串，cookie 相关逻辑全部静默跳过。
+func RegisterRoutes(publicGroup *gin.RouterGroup, optionalAuthGroup *gin.RouterGroup, authGroup *gin.RouterGroup, adminGroup *gin.RouterGroup, db *gorm.DB, fnOSApp bool, gatewayPrefix string) {
 	publicGroup.GET("/auth/setup-required", handleSetupRequired(db))
-	publicGroup.POST("/auth/register", handleRegister(db))
-	publicGroup.POST("/auth/login", handleLogin(db))
+	publicGroup.POST("/auth/register", handleRegister(db, gatewayPrefix))
+	publicGroup.POST("/auth/login", handleLogin(db, gatewayPrefix))
 	if fnOSApp {
 		publicGroup.GET("/auth/fnos/identity", handleFnOSIdentity())
-		publicGroup.POST("/auth/fnos/login", handleFnOSLogin(db))
-		publicGroup.POST("/auth/fnos/bind", handleFnOSBind(db))
+		publicGroup.POST("/auth/fnos/login", handleFnOSLogin(db, gatewayPrefix))
+		publicGroup.POST("/auth/fnos/bind", handleFnOSBind(db, gatewayPrefix))
 	}
 
 	optionalAuthGroup.GET("/auth/check", handleCheckAuth(db))
 
 	// 退出登录走 optionalAuth：会话已失效时重复调用也必须成功（幂等），
 	// 网关域上它还会落一条「别再自动认人」的持久化标记（见 handleLogout）。
-	optionalAuthGroup.POST("/auth/logout", handleLogout(db))
+	optionalAuthGroup.POST("/auth/logout", handleLogout(db, gatewayPrefix))
 
 	authGroup.GET("/auth/me", handleGetCurrentUser(db))
 	authGroup.PUT("/auth/password", handleChangePassword(db))

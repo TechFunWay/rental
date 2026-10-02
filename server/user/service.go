@@ -289,13 +289,6 @@ func BindFnOSAccount(db *gorm.DB, identity FnOSIdentity, username, password, mod
 
 	var result map[string]interface{}
 	err := db.Transaction(func(tx *gorm.DB) error {
-		var linked database.User
-		if err := tx.Where("fn_os_user_id = ?", identity.UserID).First(&linked).Error; err == nil {
-			return ErrFnOSAlreadyBound
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-
 		var user database.User
 		switch mode {
 		case "register":
@@ -353,6 +346,18 @@ func BindFnOSAccount(db *gorm.DB, identity FnOSIdentity, username, password, mod
 			return fmt.Errorf("无效的绑定方式")
 		}
 
+		// 绑定冲突放在账号就绪之后判定：NAS 身份已绑定别的应用账号时拒绝；
+		// bind 且绑定的恰是当前验证通过的账号视为重新登录放行——用户主动
+		// 退出后（抑制标记只挡隐式认人，绑定关系仍在）凭账密回来是合法路径。
+		var linked database.User
+		if err := tx.Where("fn_os_user_id = ?", identity.UserID).First(&linked).Error; err == nil {
+			if mode != "bind" || linked.ID != user.ID {
+				return ErrFnOSAlreadyBound
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
 		if user.FnOSUserID != nil && *user.FnOSUserID != identity.UserID {
 			return fmt.Errorf("该应用账号已绑定其他飞牛 NAS 账号")
 		}
@@ -369,6 +374,11 @@ func BindFnOSAccount(db *gorm.DB, identity FnOSIdentity, username, password, mod
 		}
 		user.FnOSUserID = &identity.UserID
 		user.FnOSUsername = identity.Username
+		// 绑定同样是显式登录：解除之前的主动登出抑制，否则网关隐式认人仍被
+		// 挡住，用户绑定成功后一刷新就掉回登录页。
+		if err := ClearFnOSSessionSuppression(tx, user.ID); err != nil {
+			return err
+		}
 		var err error
 		result, err = loginResult(tx, user, jwtSecret)
 		return err

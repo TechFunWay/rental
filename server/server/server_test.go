@@ -311,6 +311,97 @@ func TestFnOSBindingRequiresGatewayIdentity(t *testing.T) {
 	}
 }
 
+// TestGatewayPasswordLoginSessionViaCookie：网关域上账密注册/登录不再绑定飞牛
+// 身份，应用会话靠登录响应种下的 HttpOnly cookie 维持——后续请求只带 cookie
+// （网关域前端不带 Authorization）就能认出账号，session_source 是 app。
+func TestGatewayPasswordLoginSessionViaCookie(t *testing.T) {
+	r, db := setupFnOSTestRouter(t)
+	const base = "/app/techfunway-rental/api/auth"
+
+	// 注册时即便网关注入了飞牛身份也不得绑定。
+	w := doFnOSJSON(r, http.MethodPost, base+"/register", "1000", "nas-admin", map[string]string{"username": "admin", "password": "secret123"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("gateway register status %d body %s", w.Code, w.Body.String())
+	}
+	var admin database.User
+	if err := db.Where("username = ?", "admin").First(&admin).Error; err != nil {
+		t.Fatal(err)
+	}
+	if admin.FnOSUserID != nil {
+		t.Fatalf("gateway register must not bind fn_os_user_id, got %v", *admin.FnOSUserID)
+	}
+	cookie := sessionCookieOf(t, w)
+	if cookie.Path != "/app/techfunway-rental" || !cookie.HttpOnly {
+		t.Fatalf("gateway register must issue app session cookie, got %#v", cookie)
+	}
+
+	// 只带 cookie（不带 Authorization）的后续请求能认出该账号。
+	w = doFnOSJSONWithCookie(r, http.MethodGet, base+"/check", "1000", "nas-admin", nil, cookie)
+	data := decode(t, w)["data"].(map[string]interface{})
+	if data["authenticated"] != true {
+		t.Fatalf("cookie session must authenticate: %s", w.Body.String())
+	}
+	if data["session_source"] != "app" {
+		t.Fatalf("cookie session source = %v, want app", data["session_source"])
+	}
+	user := data["user"].(map[string]interface{})
+	if user["username"] != "admin" {
+		t.Fatalf("cookie session user = %v, want admin", user["username"])
+	}
+
+	// 退出登录要清掉会话 cookie，网关域上光清前端退不掉。
+	w = doFnOSJSONWithCookie(r, http.MethodPost, base+"/logout", "1000", "nas-admin", nil, cookie)
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout status %d body %s", w.Code, w.Body.String())
+	}
+	cleared := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "token" && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatalf("logout must clear the app session cookie, got %v", w.Result().Cookies())
+	}
+}
+
+// sessionCookieOf 取响应里的应用会话 cookie。
+func sessionCookieOf(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "token" {
+			return cookie
+		}
+	}
+	t.Fatalf("no token cookie, headers: %v", w.Header().Values("Set-Cookie"))
+	return nil
+}
+
+// doFnOSJSONWithCookie 在网关请求上追加应用会话 cookie。
+func doFnOSJSONWithCookie(r http.Handler, method, path, uid, username string, body interface{}, cookie *http.Cookie) *httptest.ResponseRecorder {
+	var buf io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		buf = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, buf)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if uid != "" {
+		req.Header.Set("X-Trim-Userid", uid)
+		req.Header.Set("X-Trim-Username", username)
+		req.Header.Set("X-Trim-Isadmin", "true")
+		req = req.WithContext(user.MarkFnOSGateway(req.Context()))
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestFnOSListensOnPortAndGatewaySocket(t *testing.T) {
 	socketFile, err := os.CreateTemp("/tmp", "smallgo-fnos-")
 	if err != nil {

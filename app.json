@@ -1,7 +1,7 @@
 {
   "appname": "techfunway-rental",
   "display_name": "租房管理",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "desc": "面向房东、公寓与宿舍管理者的租房系统：结构化房源、租约到期提醒、月度抄表账单、收款跟踪与收费单据",
   "author": "TechFunWay",
   "website": "https://techfunway.wycto.cn",

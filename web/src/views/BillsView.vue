@@ -4,7 +4,7 @@
       <template #actions>
         <button class="btn-ghost" @click="downloadTemplate">下载模板</button>
         <button class="btn-ghost" @click="doExport">导出</button>
-        <button class="btn-ghost" @click="showImport = true">导入</button>
+        <button v-if="accessStore.canFull" class="btn-ghost" @click="showImport = true">导入</button>
       </template>
     </PageHeader>
 
@@ -94,11 +94,11 @@
               </td>
               <td class="py-2.5 px-3 text-right whitespace-nowrap">
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openDetail(b)">详情</button>
-                <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReading(b)">抄表</button>
+                <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReading(b)">抄表</button>
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReceipt(b)">单据</button>
-                <button class="text-foreground hover:underline mr-2.5" @click="openEdit(b)">编辑</button>
-                <button v-if="isArrears(b)" class="text-emerald-600 dark:text-emerald-400 hover:underline mr-2.5" @click="openPay(b)">收款</button>
-                <button class="text-destructive hover:underline" @click="remove(b)">删除</button>
+                <button v-if="accessStore.canEdit" class="text-foreground hover:underline mr-2.5" @click="openEdit(b)">编辑</button>
+                <button v-if="accessStore.canEdit && isArrears(b)" class="text-emerald-600 dark:text-emerald-400 hover:underline mr-2.5" @click="openPay(b)">收款</button>
+                <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(b)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -137,11 +137,11 @@
 
           <div class="flex items-center gap-4 pt-1.5 border-t border-border/60 text-xs">
             <button class="text-brand-600 dark:text-brand-300" @click="openDetail(b)">详情</button>
-            <button class="text-brand-600 dark:text-brand-300" @click="openReading(b)">抄表</button>
+            <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300" @click="openReading(b)">抄表</button>
             <button class="text-brand-600 dark:text-brand-300" @click="openReceipt(b)">单据</button>
-            <button class="text-foreground" @click="openEdit(b)">编辑</button>
-            <button v-if="isArrears(b)" class="text-emerald-600 dark:text-emerald-400" @click="openPay(b)">收款</button>
-            <button class="text-destructive ml-auto" @click="remove(b)">删除</button>
+            <button v-if="accessStore.canEdit" class="text-foreground" @click="openEdit(b)">编辑</button>
+            <button v-if="accessStore.canEdit && isArrears(b)" class="text-emerald-600 dark:text-emerald-400" @click="openPay(b)">收款</button>
+            <button v-if="accessStore.canFull" class="text-destructive ml-auto" @click="remove(b)">删除</button>
           </div>
         </div>
       </div>
@@ -371,6 +371,7 @@ import BillDetail from '../components/BillDetail.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import { useRentalAccessStore } from '../stores/rentalAccess'
 import RentalReceipt from '../components/RentalReceipt.vue'
 import { toast } from '../utils/toast'
 import {
@@ -382,6 +383,8 @@ import {
   getBillDetail, getBills, getFeeItems, getRooms, importBills, isArrears, payBill, updateBill,
   type Bill, type BillItemDetail, type FeeItem, type ImportResult, type PropertyMeta, type RoomView,
 } from '../api/rental'
+
+const accessStore = useRentalAccessStore()
 
 const bills = ref<Bill[]>([])
 const allRooms = ref<RoomView[]>([])

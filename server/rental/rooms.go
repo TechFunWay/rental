@@ -62,10 +62,13 @@ type roomRequest struct {
 }
 
 func setupRoomRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/rooms", handleRoomList(db))
-	api.POST("/rental/rooms", handleRoomCreate(db))
-	api.PUT("/rental/rooms/:id", handleRoomUpdate(db))
-	api.DELETE("/rental/rooms/:id", handleRoomDelete(db))
+	read := requireAccess(db, AccessReadonly)
+	edit := requireAccess(db, AccessEdit)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/rooms", read, handleRoomList(db))
+	api.POST("/rental/rooms", edit, handleRoomCreate(db))
+	api.PUT("/rental/rooms/:id", edit, handleRoomUpdate(db))
+	api.DELETE("/rental/rooms/:id", full, handleRoomDelete(db))
 }
 
 func currentUserID(c *gin.Context) uint {
@@ -78,20 +81,20 @@ func handleRoomList(db *gorm.DB) gin.HandlerFunc {
 		keyword := strings.TrimSpace(c.Query("keyword"))
 		status := c.Query("status")
 
-		query := db.Model(&Room{}).Where("user_id = ?", currentUserID(c))
+		query := db.Model(&Room{})
 		if keyword != "" {
 			like := "%" + keyword + "%"
 			// 关键字同时匹配位置信息（房号/小区/楼栋/单元）与该房在租租户姓名。
 			query = query.Where(
-				"room_no LIKE ? OR community LIKE ? OR building LIKE ? OR unit LIKE ? OR id IN (SELECT room_id FROM tenants WHERE user_id = ? AND active = ? AND name LIKE ?)",
-				like, like, like, like, currentUserID(c), true, like)
+				"room_no LIKE ? OR community LIKE ? OR building LIKE ? OR unit LIKE ? OR id IN (SELECT room_id FROM tenants WHERE active = ? AND name LIKE ?)",
+				like, like, like, like, true, like)
 		}
 		if status == "occupied" || status == "vacant" {
 			op := "IN"
 			if status == "vacant" {
 				op = "NOT IN"
 			}
-			query = query.Where("id "+op+" (SELECT room_id FROM tenants WHERE user_id = ? AND active = ?)", currentUserID(c), true)
+			query = query.Where("id "+op+" (SELECT room_id FROM tenants WHERE active = ?)", true)
 		}
 
 		var total int64
@@ -159,6 +162,18 @@ func handleRoomCreate(db *gorm.DB) gin.HandlerFunc {
 		}
 		req.RoomNo = strings.TrimSpace(req.RoomNo)
 
+		// 共享后 (小区, 房号) 全局唯一，先查重再落库（唯一索引由迁移管理，
+		// 不能只依赖约束报错）。
+		var dup int64
+		db.Model(&Room{}).Where("community = ? AND room_no = ?",
+			strings.TrimSpace(req.Community), req.RoomNo).Count(&dup)
+		if dup > 0 {
+			response.ErrorBadRequest(c, "房号已存在")
+			return
+		}
+
+		// UserID 是「录入人」戳（谁创建的房源），只作溯源，不参与数据归属——
+		// 业务数据全员共享。
 		room := Room{UserID: currentUserID(c), Community: strings.TrimSpace(req.Community), RoomNo: req.RoomNo}
 		applyRoomRequest(&room, &req)
 		if err := db.Create(&room).Error; err != nil {
@@ -275,7 +290,8 @@ func findUserRoom(db *gorm.DB, c *gin.Context) (*Room, bool) {
 		return nil, false
 	}
 	var room Room
-	if err := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).First(&room).Error; err != nil {
+	// 数据共享后按 ID 直取，不再限定录入人。
+	if err := db.First(&room, id).Error; err != nil {
 		response.ErrorNotFound(c, "房源不存在")
 		return nil, false
 	}

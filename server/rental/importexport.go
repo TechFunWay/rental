@@ -34,22 +34,23 @@ var legacyBillColumns = billColumns[:17]
 const maxImportBytes = 2 << 20 // 2MB
 
 func setupDataRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/template", handleTemplate(db))
-	api.GET("/rental/export", handleBillsExport(db))
-	api.GET("/rental/rooms/export", handleRoomsExport(db))
-	api.POST("/rental/import", handleImport(db))
+	read := requireAccess(db, AccessReadonly)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/template", read, handleTemplate(db))
+	api.GET("/rental/export", read, handleBillsExport(db))
+	api.GET("/rental/rooms/export", read, handleRoomsExport(db))
+	api.POST("/rental/import", full, handleImport(db))
 }
 
 // handleTemplate 下载导入模板：表头 + 2 行示例。
 func handleTemplate(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userID := currentUserID(c)
-		water, elec, gas := defaultPrices(db, userID)
-		// 示例里的水费模式与金额跟随用户的全局默认，避免示例与实际口径打架。
+		water, elec, gas := defaultPrices(db)
+		// 示例里的水费模式与金额跟随全局默认，避免示例与实际口径打架。
 		waterMode := waterModeMeter
-		if v, err := sysconfig.GetConfig(db, "rental_water_mode", userID); err == nil && v == waterModeMonthly {
+		if v, err := sysconfig.GetConfig(db, "rental_water_mode", 0); err == nil && v == waterModeMonthly {
 			waterMode = waterModeMonthly
-			water = configFloat(db, "rental_water_monthly_fee", userID, 0)
+			water = configFloat(db, "rental_water_monthly_fee", 0, 0)
 		}
 		rows := [][]string{billColumns}
 		rows = append(rows,
@@ -67,7 +68,7 @@ func handleTemplate(db *gorm.DB) gin.HandlerFunc {
 func handleBillsExport(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		period := strings.TrimSpace(c.Query("period"))
-		query := db.Model(&Bill{}).Where("user_id = ?", currentUserID(c))
+		query := db.Model(&Bill{})
 		if period != "" {
 			query = query.Where("period = ?", period)
 		}
@@ -102,8 +103,7 @@ func handleBillsExport(db *gorm.DB) gin.HandlerFunc {
 func handleRoomsExport(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rooms := make([]Room, 0)
-		if err := db.Where("user_id = ?", currentUserID(c)).
-			Order("room_no ASC").Limit(10000).Find(&rooms).Error; err != nil {
+		if err := db.Order("room_no ASC").Limit(10000).Find(&rooms).Error; err != nil {
 			response.ErrorInternal(c, "导出失败")
 			return
 		}
@@ -188,8 +188,7 @@ func handleImport(db *gorm.DB) gin.HandlerFunc {
 }
 
 func importCSV(db *gorm.DB, c *gin.Context, r io.Reader) (*importResult, error) {
-	userID := currentUserID(c)
-	_, defElec, defGas := defaultPrices(db, userID)
+	_, defElec, defGas := defaultPrices(db)
 
 	// 整体读入（上传已限制 2MB）并剥离 UTF-8 BOM——Excel/WPS 另存的
 	// CSV 普遍携带 BOM，若不剥离，首列表头比对会失败。
@@ -242,7 +241,6 @@ func importCSV(db *gorm.DB, c *gin.Context, r io.Reader) (*importResult, error) 
 
 // importRow 处理单行；返回 (是否新建账单, 错误原因)。
 func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defElec, defGas float64) (bool, string) {
-	userID := currentUserID(c)
 	get := func(i int) string {
 		if i < len(rec) {
 			return strings.TrimSpace(rec[i])
@@ -276,13 +274,15 @@ func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defE
 	// 留空表示未指定：新账单跟房源设置，老账单沿用原快照。
 	csvPayCycle := parsePayCycle(get(18))
 
-	// 房间不存在则按行内数据建档。水费/缴费设置自 v0.2.3 起挂在租户上，
+	// 房间不存在则按行内数据建档。CSV 只有房号一列（没有小区），匹配按房号
+	// 取最早登记的一间——与隔离时期 (user_id, room_no) 的宽松程度一致；
+	// UserID 是导入人戳。水费/缴费设置自 v0.2.3 起挂在租户上，
 	// 房源侧不再写入这些遗留列。
 	var room Room
-	err := db.Where("user_id = ? AND room_no = ?", userID, roomNo).First(&room).Error
+	err := db.Where("room_no = ?", roomNo).Order("id ASC").First(&room).Error
 	if err != nil {
 		room = Room{
-			UserID:               userID,
+			UserID:               currentUserID(c), // 录入人戳
 			RoomNo:               roomNo,
 			DefaultRent:          num(3),
 			DefaultSanitationFee: num(13),
@@ -303,11 +303,11 @@ func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defE
 	cfg := effectiveRoomBilling(db, &room)
 
 	var bill Bill
-	err = db.Where("user_id = ? AND room_id = ? AND period = ?", userID, room.ID, period).First(&bill).Error
+	err = db.Where("room_id = ? AND period = ?", room.ID, period).First(&bill).Error
 	isNew := err != nil
 	if isNew {
 		bill = Bill{
-			UserID: userID, RoomID: room.ID, Period: period, RoomNo: room.RoomNo,
+			UserID: currentUserID(c), RoomID: room.ID, Period: period, RoomNo: room.RoomNo, // 录入人戳
 			WaterMode: csvWaterMode,
 		}
 		if bill.WaterMode == "" {
@@ -375,7 +375,7 @@ func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defE
 	// 之后的账单就按租户口径生成。
 	if tenantName != "" && !isActiveTenant(db, room.ID, tenantName) {
 		tenant := Tenant{
-			UserID: userID, RoomID: room.ID, Name: tenantName, Active: true,
+			UserID: currentUserID(c), RoomID: room.ID, Name: tenantName, Active: true, // 录入人戳
 			WaterMode: csvWaterMode, PayCycle: csvPayCycle,
 			PayDay: tenantFollowGlobal, RemindDays: tenantFollowGlobal,
 		}

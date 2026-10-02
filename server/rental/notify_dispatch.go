@@ -1,7 +1,7 @@
 // notify_dispatch.go — 缴费提醒的每日推送。
 //
-// 每天 08:00 由调度器触发：对每位设置了缴费日（pay_day>0）的用户计算
-// 待提醒的缴费项，非空则按其绑定的渠道各发一条汇总消息。
+// 每天 08:00 由调度器触发：按共享台账计算待提醒的缴费项，非空则给每个
+// 绑定了提醒渠道（且有业务权限）的用户各发一条汇总消息。
 // (user, channel, 日期) 唯一去重——每渠道每天至多一条，失败不重试，
 // 错误记录在绑定行上，次日推送自然再试。
 package rental
@@ -38,19 +38,25 @@ func init() {
 	})
 }
 
-// dispatchPaymentNotices 遍历有在租租户的用户，逐渠道发送当日汇总。
-// 缴费设置挂在租户上（租户没设置时用全局默认），所以候选用户按在租租户取；
-// 生效缴费日为 0（不提醒）的用户由 computePaymentDue 自然过滤掉。
+// dispatchPaymentNotices 遍历绑定了提醒渠道的用户，逐渠道发送当日汇总。
+// 数据共享后缴费提醒只有一套台账，收件人改成「绑定了渠道且业务权限不低于
+// 只读的用户」——无权限的注册账号不会收到房源与欠缴信息。
 func dispatchPaymentNotices(db *gorm.DB) {
 	now := time.Now()
 	var userIDs []uint
-	if err := db.Model(&Tenant{}).Where("active = ?", true).Distinct().Pluck("user_id", &userIDs).Error; err != nil {
+	if err := db.Model(&notify.ChannelBinding{}).Where("active = ?", true).
+		Distinct().Pluck("user_id", &userIDs).Error; err != nil {
 		logger.Error("rental: scan notify users: %v", err)
 		return
 	}
 	sendDate := now.Format("2006-01-02")
 	for _, userID := range userIDs {
-		items := computePaymentDue(db, userID, now)
+		var role string
+		db.Table("users").Select("role").Where("id = ?", userID).Scan(&role)
+		if accessRank[accessLevel(db, userID, role)] < accessRank[AccessReadonly] {
+			continue
+		}
+		items := computePaymentDue(db, now)
 		if len(items) == 0 {
 			continue
 		}
