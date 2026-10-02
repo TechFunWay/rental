@@ -34,8 +34,10 @@ export const useAuthStore = defineStore('auth', () => {
   let initialized = false
   let initPromise: Promise<void> | null = null
 
-  // 网关域下登录态由服务端用网关注入身份回填 user（本地无 token），故以 user 为准；
-  // 直连端口 user 也只在 checkAuth 通过后才设置，等价于原来的 !!token && !!user。
+  // 网关域下登录态由服务端回填 user：有账密登录种下的会话 cookie 就认 cookie
+  // 对应的账号，否则用网关注入的 NAS 身份认「已绑定的应用账号」（本地无 token
+  // 也要查），故以 user 为准；直连端口 user 也只在 checkAuth 通过后才设置，
+  // 等价于原来的 !!token && !!user。
   const isAuthenticated = computed(() => !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
 

@@ -324,13 +324,13 @@ func TestComputePaymentDueWindow(t *testing.T) {
 		t.Fatalf("set remind days: %s", w.Body.String())
 	}
 	far := env.seedPayRoom("B1", "远期", payCycleMonthly, 20, -1)
-	if got := computePaymentDue(env.db, 1, today); len(got) != 0 {
+	if got := computePaymentDue(env.db, today); len(got) != 0 {
 		t.Errorf("far due should be filtered, got %+v", got)
 	}
 
 	// 租户覆盖提醒 30 天 → 进入窗口。
 	env.db.Model(&Tenant{}).Where("room_id = ?", far.ID).Update("remind_days", 30)
-	got := computePaymentDue(env.db, 1, today)
+	got := computePaymentDue(env.db, today)
 	if len(got) != 1 || got[0].RoomNo != "B1" {
 		t.Errorf("remind 30 should include B1, got %+v", got)
 	}
@@ -339,7 +339,7 @@ func TestComputePaymentDueWindow(t *testing.T) {
 	overdue := env.seedPayRoom("B2", "逾期", payCycleMonthly, 1, 0)
 	env.db.Create(&Bill{UserID: 1, RoomID: overdue.ID, Period: "2026-09", RoomNo: "B2",
 		Rent: 1000, TotalAmount: 1000, Status: billStatusUnpaid})
-	got = computePaymentDue(env.db, 1, today)
+	got = computePaymentDue(env.db, today)
 	if len(got) != 2 || got[0].RoomNo != "B2" || got[0].DaysLeft >= 0 {
 		t.Errorf("overdue should come first with negative days, got %+v", got)
 	}

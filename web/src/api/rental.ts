@@ -573,3 +573,39 @@ export interface Analytics {
 export function getAnalytics(months = 12) {
   return request.get('/api/rental/analytics', { params: { months } })
 }
+
+// ---------- 业务权限（数据共享后管理员按用户授权） ----------
+
+/** 业务权限等级：none 无 / readonly 只读 / edit 录入 / full 完全（与后端 access.go 同词） */
+export type AccessLevel = 'none' | 'readonly' | 'edit' | 'full'
+
+/** 当前登录用户的业务权限 */
+export function getMyAccess() {
+  return request.get('/api/rental/access/me')
+}
+
+/** 全部非管理员用户的授权清单（仅管理员） */
+export function getAccessList() {
+  return request.get('/api/rental/access')
+}
+
+/** 给用户设置业务权限等级（仅管理员；none = 撤销授权） */
+export function setAccess(userID: number, level: AccessLevel) {
+  return request.put(`/api/rental/access/${userID}`, { level })
+}
+
+/** 共享计费默认值（系统级租房设置；开票/抄表弹窗"跟随全局默认"用） */
+export interface BillingDefaultsPayload {
+  water_mode: 'meter' | 'monthly'
+  water_price: number
+  water_monthly_fee: number
+  pay_cycle: 'monthly' | 'quarterly'
+  pay_day: number
+  elec_price: number
+  gas_price: number
+  remind_days: number
+}
+
+export function getBillingDefaults() {
+  return request.get<{ code: number; data: BillingDefaultsPayload }>('/api/rental/billing-defaults')
+}

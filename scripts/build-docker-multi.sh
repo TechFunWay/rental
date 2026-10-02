@@ -1,6 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+# PUSH=1（或 --push）：除本地 OCI 归档外，把同一份合并 manifest 推到
+# Docker Hub（techfunways/rental 的 v<版本> / <版本> / latest 三个 tag），
+# 需已 docker login。不开时与历史行为完全一致。
+PUSH="${PUSH:-0}"
+for arg in "$@"; do
+  [ "$arg" = "--push" ] && PUSH=1
+done
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -93,10 +101,24 @@ docker buildx build \
   --platform linux/amd64,linux/arm64 \
   --build-arg "VERSION=${VERSION}" \
   -t "${IMAGE_NAME}:v${VERSION}" \
-  -t "${IMAGE_NAME}:${VERSION}" \
   -t "${IMAGE_NAME}:latest" \
   --output "type=oci,dest=${OCI_FILE}" \
   "${CONTEXT_DIR}"
 
 echo "Multi-platform OCI image archive completed: ${OCI_FILE}"
 echo "Load it on a target with: docker load -i ${OCI_FILE}"
+
+# PUSH=1：把同一份多平台合并 manifest 推到 Docker Hub（需已 docker login）
+if [ "${PUSH}" = "1" ]; then
+  echo ""
+  echo "Pushing multi-platform image to Docker Hub: ${IMAGE_NAME}:v${VERSION} / :latest"
+  docker buildx build \
+    --builder "${BUILDER_NAME}" \
+    --platform linux/amd64,linux/arm64 \
+    --push \
+    --build-arg "VERSION=${VERSION}" \
+    -t "${IMAGE_NAME}:v${VERSION}" \
+    -t "${IMAGE_NAME}:latest" \
+    "${CONTEXT_DIR}"
+  echo "Pushed ${IMAGE_NAME}:v${VERSION} and ${IMAGE_NAME}:latest (amd64+arm64 merged manifest)"
+fi

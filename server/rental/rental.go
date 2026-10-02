@@ -1,7 +1,9 @@
 // Package rental — 租房管理系统业务模块。
 //
 // 提供房源、租户、月度抄表账单（水电气费用自动计算）、收款与欠缴跟踪、
-// CSV 模板导入导出与收费单据数据。业务数据全部按登录用户（user_id）隔离。
+// CSV 模板导入导出与收费单据数据。业务数据全员共享（user_id 列只作
+// 录入人溯源，不再隔离数据），谁能看、谁能录由管理员按用户授权
+// （access.go：无/只读/录入/完全）。
 package rental
 
 import (
@@ -58,9 +60,10 @@ func parseWaterMode(v string) string {
 }
 
 // Room 房源：一个可出租的房间，位置由小区/楼栋/单元/楼层/房号构成，
-// (用户, 小区, 房号) 唯一——不同小区允许相同房号。
+// (小区, 房号) 唯一——不同小区允许相同房号。UserID 是「录入人」戳：
+// 数据全员共享后它只作溯源，不再隔离数据。
 // Default* 为开票默认值；ElecPrice/GasPrice 为按房间覆盖的单价，
-// 0 表示使用用户级全局默认价；Initial* 为首次开账前的抄表底数。
+// 0 表示使用全局默认价；Initial* 为首次开账前的抄表底数。
 //
 // Deprecated: WaterMode/WaterPrice/WaterMonthlyFee/PayCycle/PayDay/RemindDays
 // 自 v0.2.3 起搬到租户（Tenant）上——每个租户的计费方式与缴费周期可能不同。
@@ -68,9 +71,9 @@ func parseWaterMode(v string) string {
 // 迁移 rental_tenant_billing_backfill 已把它们的值复制到在租租户并清零。
 type Room struct {
 	ID                   uint      `gorm:"primarykey" json:"id"`
-	UserID               uint      `gorm:"index;uniqueIndex:idx_rental_room_user_no" json:"-"`
-	Community            string    `gorm:"uniqueIndex:idx_rental_room_user_no" json:"community"` // 小区（单小区可留空）
-	RoomNo               string    `gorm:"not null;uniqueIndex:idx_rental_room_user_no" json:"room_no"`
+	UserID               uint      `gorm:"index" json:"-"`
+	Community            string    `json:"community"` // 小区（单小区可留空）
+	RoomNo               string    `gorm:"not null" json:"room_no"`
 	Building             string    `json:"building"`
 	Unit                 string    `json:"unit"`
 	Floor                string    `json:"floor"`
@@ -98,7 +101,7 @@ type Room struct {
 //
 // 计费与缴费设置（v0.2.3 起从房源搬到这里）：每个租户的水费计费方式、
 // 水费金额、缴费周期、缴费日与提前提醒天数都可以不一样；未设置时回退到
-// 用户级全局默认（偏好设置 → 租房设置）。房间账单按该房在租租户的设置生成，
+// 系统级全局默认（系统配置 → 租房设置）。房间账单按该房在租租户的设置生成，
 // 同房多名在租租户时逐项取"第一个显式设置"的租户（见 effectiveRoomBilling）。
 //
 // ExcludedFees 是该租户不参与计费的收费项目 key（JSON 数组，如
@@ -107,7 +110,7 @@ type Room struct {
 // 自定义收费项目默认参与全部租户计费，不用逐租户补勾。
 type Tenant struct {
 	ID              uint    `gorm:"primarykey" json:"id"`
-	UserID          uint    `gorm:"index" json:"-"`
+	UserID          uint    `gorm:"index" json:"-"` // 录入人戳，仅溯源
 	RoomID          uint    `gorm:"index" json:"room_id"`
 	Name            string  `gorm:"not null" json:"name"`
 	Phone           string  `json:"phone"`
@@ -132,7 +135,8 @@ type Tenant struct {
 }
 
 // Bill 月度账单（核心实体）。租户名、单价在开票时快照到行内，
-// 历史账单不随房源/租户后续修改而变化；(user, room, period) 唯一。
+// 历史账单不随房源/租户后续修改而变化；(room, period) 唯一。
+// UserID 是「录入人」戳：数据全员共享后只作溯源。
 //
 // 水费按开票时的 WaterMode 快照计费：meter（按吨）时 WaterPrice 是元/吨单价、
 // 水费 = 用量 × 单价；monthly（包月）时 WaterPrice 是包月金额（元/月）、
@@ -144,9 +148,9 @@ type Tenant struct {
 // 租户后续改动勾选而变化。
 type Bill struct {
 	ID            uint       `gorm:"primarykey" json:"id"`
-	UserID        uint       `gorm:"index;uniqueIndex:idx_rental_bill_unique" json:"-"`
-	RoomID        uint       `gorm:"index;uniqueIndex:idx_rental_bill_unique" json:"room_id"`
-	Period        string     `gorm:"not null;index;uniqueIndex:idx_rental_bill_unique" json:"period"` // YYYY-MM
+	UserID        uint       `gorm:"index" json:"-"`
+	RoomID        uint       `gorm:"index" json:"room_id"`
+	Period        string     `gorm:"not null;index" json:"period"` // YYYY-MM
 	RoomNo        string     `gorm:"not null" json:"room_no"`
 	TenantName    string     `json:"tenant_name"`
 	Rent          float64    `json:"rent"`
@@ -314,33 +318,58 @@ func init() {
 		},
 	})
 
+	// 0.3.3：业务数据全员共享 + 租房设置升系统级（随共享数据与员工权限发布）。
+	// 三步：
+	//  1. 租房设置（rental_*）从用户级偏好升为系统级：把登记最早用户（通常是
+	//     管理员）的值写入系统级（user_id=0），再删除全部用户级行。
+	//  2. 共享化去重：不同录入人可能建过同小区同房号的房源、同房同月的账单
+	//     与抄表、同 key 的收费项目——唯一键不再含 user_id，先并重复行，
+	//     否则新唯一索引建不起来。
+	//  3. 重建唯一索引（不再含 user_id）。
+	database.Upgrades = append(database.Upgrades, database.Upgrade{
+		Version: "0.3.3",
+		Name:    "rental_shared_data",
+		Upgrade: func(db *gorm.DB) error {
+			if err := migrateConfigsToSystem(db); err != nil {
+				return err
+			}
+			if err := dedupeSharedData(db); err != nil {
+				return err
+			}
+			for _, idx := range []string{
+				"idx_rental_room_user_no", "idx_rental_bill_unique",
+				"idx_meter_record_unique", "idx_rental_fee_item_user_key",
+			} {
+				if err := db.Exec("DROP INDEX IF EXISTS " + idx).Error; err != nil {
+					return err
+				}
+			}
+			for _, stmt := range []string{
+				"CREATE UNIQUE INDEX IF NOT EXISTS idx_rental_room_location ON rooms(community, room_no)",
+				"CREATE UNIQUE INDEX IF NOT EXISTS idx_rental_bill_room_period ON bills(room_id, period)",
+				"CREATE UNIQUE INDEX IF NOT EXISTS idx_meter_record_room_period ON meter_records(room_id, period)",
+				"CREATE UNIQUE INDEX IF NOT EXISTS idx_rental_fee_item_key ON fee_items(`key`)",
+			} {
+				if err := db.Exec(stmt).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	})
+
 	registerConfigs()
 
-	// 名下还有房源/账单的用户不允许被框架删除，业务数据仍被引用。
+	// 数据共享后业务数据不属于任何个人：删除用户不再受名下业务数据限制，
+	// 也不清理业务数据（房源/租户/账单是全员共享的台账）；只清这个人自己的
+	// 授权行与录入人戳保留在原行上（历史溯源）。
 	database.RegisterUserDeleteGuard(func(db *gorm.DB, userID uint) (bool, error) {
-		var rooms, bills int64
-		if err := db.Model(&Room{}).Where("user_id = ?", userID).Count(&rooms).Error; err != nil {
-			return false, err
-		}
-		if err := db.Model(&Bill{}).Where("user_id = ?", userID).Count(&bills).Error; err != nil {
-			return false, err
-		}
-		return rooms > 0 || bills > 0, nil
+		return false, nil
 	})
 	database.RegisterUserDeleteCleanup(func(db *gorm.DB, userID uint) error {
-		// 删用户时连同其名下租户与合同文件一并清理：
-		// 合同先按租户删磁盘文件，再统一清行（含无租户归属的孤儿行）。
-		tenantIDs := make([]uint, 0)
-		if err := db.Model(&Tenant{}).Where("user_id = ?", userID).Pluck("id", &tenantIDs).Error; err != nil {
-			return err
-		}
-		for _, tenantID := range tenantIDs {
-			deleteTenantContracts(db, tenantID)
-		}
-		if err := db.Where("user_id = ?", userID).Delete(&Tenant{}).Error; err != nil {
-			return err
-		}
-		return db.Where("user_id = ?", userID).Delete(&Contract{}).Error
+		// 通知渠道绑定等个人配置随账号清理；合同挂在租户（共享数据）名下，
+		// 不随用户删除。
+		return db.Where("user_id = ?", userID).Delete(&RentalAccess{}).Error
 	})
 
 	apps.Register(apps.App{
@@ -350,6 +379,8 @@ func init() {
 		RoutePrefix: "/api/rental",
 		NavPosition: 10,
 		SetupAuth:   setupRoutes,
+		// 授权管理只给管理员：列出各用户业务权限、按用户设置等级。
+		SetupAdmin: setupAccessAdminRoutes,
 		// Migrate 在框架迁移阶段调用一次：把 db 注入给缴费提醒的调度任务
 		// 与通知渠道层（QQ 网关等）。
 		Migrate: func(db *gorm.DB) error {
@@ -360,9 +391,11 @@ func init() {
 	})
 }
 
-// setupRoutes 挂载全部业务路由，均在框架 authGroup 下（登录后可用），
-// 且自带审计中间件；数据按登录用户隔离。
+// setupRoutes 挂载全部业务路由（框架 authGroup，登录后可用）。数据全员共享，
+// 每条路由按业务权限等级放行（requireAccess：读 readonly、写 edit、
+// 删除与导入 full），无权限的用户统一 403。
 func setupRoutes(api *gin.RouterGroup, db *gorm.DB) {
+	setupAccessMeRoutes(api, db)
 	setupRoomRoutes(api, db)
 	setupTenantRoutes(api, db)
 	setupContractRoutes(api, db)
@@ -371,65 +404,70 @@ func setupRoutes(api *gin.RouterGroup, db *gorm.DB) {
 	setupDataRoutes(api, db)
 	setupStatsRoutes(api, db)
 	setupFeeRoutes(api, db)
-	notify.SetupRoutes(api, db)
+	// 共享计费默认值：设置升为系统级后，员工在偏好设置里看不到租房设置组，
+	// 开票/抄表弹窗的"跟随全局默认"改走这个接口。
+	api.GET("/rental/billing-defaults", requireAccess(db, AccessReadonly), handleBillingDefaults(db))
+	notify.SetupRoutes(api, db, requireAccess(db, AccessReadonly))
 }
 
-// registerConfigs 注册用户级偏好：默认单价与单据抬头，偏好设置页自动渲染。
+// registerConfigs 注册系统级共享设置：默认单价与单据抬头。数据共享后这些
+// 口径全员一套，由管理员在系统配置 → 租房设置里维护（v0.3.3 起从用户级
+// 偏好升级而来，迁移把原用户级值搬进系统级）。
 func registerConfigs() {
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_water_price", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_water_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "5.00", Group: "租房设置", Label: "水费单价（元/吨）",
 		Description: "按吨计费时的默认水价，可在租户或账单中覆盖",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_water_mode", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeSelect,
+		Key: "rental_water_mode", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeSelect,
 		Default: waterModeMeter, Options: []string{waterModeMeter, waterModeMonthly},
 		Group: "租房设置", Label: "水费计费方式",
 		Description: "按吨按用量计费，包月每月固定金额；租户可单独设置",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_water_monthly_fee", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_water_monthly_fee", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "0.00", Group: "租房设置", Label: "水费包月金额（元/月）",
 		Description: "计费方式为包月时的默认金额，租户可单独设置（如 40）",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_pay_cycle", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeSelect,
+		Key: "rental_pay_cycle", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeSelect,
 		Default: payCycleMonthly, Options: []string{payCycleMonthly, payCycleQuarterly},
 		Group: "租房设置", Label: "缴费周期",
 		Description: "月付每月一张账单、季付每 3 个月一张；租户可单独设置",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_pay_day", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeInt,
+		Key: "rental_pay_day", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeInt,
 		Default: "0", Group: "租房设置", Label: "缴费日（每月几号）",
 		Description: "默认每期收租的日期（1-28 号，0=不提醒）；租户可单独设置",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_elec_price", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_elec_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "1.20", Group: "租房设置", Label: "电费单价（元/度）",
 		Description: "生成账单时的默认电价，可在房间或账单中覆盖",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_gas_price", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_gas_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "3.50", Group: "租房设置", Label: "燃气单价（元/方）",
 		Description: "生成账单时的默认气价，可在房间或账单中覆盖",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_remind_days", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeInt,
+		Key: "rental_remind_days", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeInt,
 		Default: "3", Group: "租房设置", Label: "缴费提前提醒天数",
 		Description: "缴费日前 N 天开始在总览与通知中提醒（0=当天提醒），每个租户可单独覆盖",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_property_name", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_property_name", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "", Group: "租房设置", Label: "单据抬头（出租方名称）",
 		Description: "打印收费单据时显示的出租方/物业名称",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_contact", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_contact", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "", Group: "租房设置", Label: "单据联系电话",
 		Description: "打印收费单据时显示的联系电话",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key: "rental_receipt_note", Scope: sysconfig.ScopeUser, Type: sysconfig.TypeString,
+		Key: "rental_receipt_note", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "", Group: "租房设置", Label: "单据底部备注",
 		Description: "打印收费单据时显示在底部的提示文字",
 	})

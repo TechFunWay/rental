@@ -676,26 +676,90 @@ func TestStats(t *testing.T) {
 	}
 }
 
-func TestDataIsolationBetweenUsers(t *testing.T) {
+// TestSharedDataAndAccessLevels：业务数据全员共享 + 管理员按人授权。
+// 未授权（none）的业务请求一律 403；授权只读后能看到全部共享数据但不能写；
+// 授权录入后能写；删除仍要完全权限。
+func TestSharedDataAndAccessLevels(t *testing.T) {
 	env := setupEnv(t)
 	roomID := env.seedRoom("801", 1000, 0)
-	env.seedTenant(roomID, "隔离甲")
+	env.seedTenant(roomID, "共享租户")
 	env.createBill("801", "2026-09")
 
-	// 第二个用户（普通用户）。
+	// 注册员工账号（普通用户，默认无业务权限）。
 	w := doJSON(env.r, http.MethodPost, "/api/auth/register", "", map[string]interface{}{
-		"username": "other", "password": "secret123",
+		"username": "employee", "password": "secret123",
 	})
-	otherToken := field(t, decodeBody(t, w), "data", "token").(string)
+	empToken := field(t, decodeBody(t, w), "data", "token").(string)
 
-	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", otherToken, nil)
-	if got := len(itemsOf(t, w)); got != 0 {
-		t.Fatalf("other user rooms = %d, want 0", got)
+	// 未授权：业务接口一律 403，权限查询返回 none。
+	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized rooms = %d, want 403", w.Code)
 	}
-	// 直接访问他人账单 → 404。
-	w = doJSON(env.r, http.MethodGet, "/api/rental/bills/1", otherToken, nil)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("other user bill = %d, want 404", w.Code)
+	w = doJSON(env.r, http.MethodGet, "/api/rental/bills/1", empToken, nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized bill detail = %d, want 403", w.Code)
+	}
+	w = doJSON(env.r, http.MethodGet, "/api/rental/access/me", empToken, nil)
+	if got := field(t, decodeBody(t, w), "data", "level").(string); got != AccessNone {
+		t.Fatalf("default level = %q, want none", got)
+	}
+
+	// 管理员授权只读：能看到共享数据，但不能写、不能删。
+	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessReadonly})
+	if w.Code != http.StatusOK {
+		t.Fatalf("grant readonly: %d %s", w.Code, w.Body.String())
+	}
+	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil)
+	if got := len(itemsOf(t, w)); got != 1 {
+		t.Fatalf("readonly rooms = %d, want 1 (shared data)", got)
+	}
+	w = doJSON(env.r, http.MethodGet, "/api/rental/bills/1", empToken, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("readonly bill detail = %d, want 200", w.Code)
+	}
+	w = doJSON(env.r, http.MethodPost, "/api/rental/rooms", empToken, map[string]interface{}{"room_no": "802"})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("readonly create room = %d, want 403", w.Code)
+	}
+
+	// 授权录入：能新增房源，但删除仍要完全权限。
+	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessEdit})
+	if w.Code != http.StatusOK {
+		t.Fatalf("grant edit: %d %s", w.Code, w.Body.String())
+	}
+	w = doJSON(env.r, http.MethodPost, "/api/rental/rooms", empToken, map[string]interface{}{"room_no": "802"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("edit create room = %d %s, want 200", w.Code, w.Body.String())
+	}
+	w = doJSON(env.r, http.MethodDelete, "/api/rental/rooms/1", empToken, nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("edit delete room = %d, want 403", w.Code)
+	}
+
+	// 授权完全：删除放行（802 是无账单的房，801 有账单会被删除保护拦截）；
+	// 撤销授权（none）后回到全 403。
+	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessFull})
+	if w.Code != http.StatusOK {
+		t.Fatalf("grant full: %d %s", w.Code, w.Body.String())
+	}
+	w = doJSON(env.r, http.MethodDelete, "/api/rental/rooms/2", empToken, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("full delete room = %d %s, want 200", w.Code, w.Body.String())
+	}
+	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessNone})
+	if w.Code != http.StatusOK {
+		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
+	}
+	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("revoked rooms = %d, want 403", w.Code)
+	}
+
+	// 授权接口本身仅管理员可调。
+	w = doJSON(env.r, http.MethodPut, "/api/rental/access/2", empToken, map[string]interface{}{"level": AccessFull})
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("non-admin grant = %d, want 403", w.Code)
 	}
 }
 

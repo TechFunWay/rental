@@ -10,7 +10,7 @@
     <div class="vignette"></div>
 
     <!-- Content -->
-    <div class="relative z-10 min-h-screen flex flex-col items-center justify-center px-6 py-12">
+    <div class="auth-content relative z-10 flex flex-col items-center justify-center px-6 py-12">
       <div class="w-full max-w-md">
         <!-- Brand -->
         <div class="flex flex-col items-center text-center mb-7 animate-fade-in">
@@ -63,25 +63,38 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 .auth-root {
   position: relative;
   min-height: 100vh;
+  min-height: 100dvh; /* 手机端浏览器工具栏收展时 100vh 会超出可视区，dvh 跟随可视高度 */
   overflow: hidden;
   background: #05050b;
   color: #fff;
 }
 
+/* content：与 auth-root 同高，dvh 跟随手机端可视高度（键盘弹出/工具栏收展不抖） */
+.auth-content {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
 /* base radial wash */
 .bg-base {
-  position: fixed;
+  position: absolute;
   inset: 0;
   background:
     radial-gradient(125% 125% at 50% -10%, #14142a 0%, #0a0a16 45%, #05050b 100%);
 }
 
-/* drifting aurora orbs */
+/* drifting aurora orbs。背景层一律 absolute（auth-root 是 relative 满屏容器），
+   不用 fixed：手机 WebView 里 fixed 层在键盘弹出等视口变化时会重锚定，
+   表现为局部闪烁；absolute 随文档定位，不参与视口重排。
+   模糊滤镜只在桌面端保留（大半径 blur 在弱 WebView 里栅格化慢，局部画面
+   迟迟出不来）；径向渐变本身是软边，去掉滤镜观感几乎无差。 */
 .aurora {
-  position: fixed;
+  position: absolute;
   border-radius: 9999px;
-  filter: blur(90px);
   will-change: transform;
+}
+@media (min-width: 641px) {
+  .aurora { filter: blur(90px); }
 }
 .aurora-1 {
   width: 42rem;
@@ -122,7 +135,7 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 
 /* faint grid that fades toward the edges */
 .grid-overlay {
-  position: fixed;
+  position: absolute;
   inset: 0;
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
@@ -134,7 +147,7 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 
 /* fine film grain */
 .grain {
-  position: fixed;
+  position: absolute;
   inset: 0;
   opacity: 0.16;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
@@ -142,7 +155,7 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 
 /* edge darkening */
 .vignette {
-  position: fixed;
+  position: absolute;
   inset: 0;
   pointer-events: none;
   background: radial-gradient(125% 110% at 50% 50%, transparent 48%, rgba(0, 0, 0, 0.55) 100%);
@@ -158,7 +171,10 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
   z-index: 0;
   border-radius: 40px;
   background: radial-gradient(60% 55% at 50% 0%, rgba(124, 92, 255, 0.45), transparent 72%);
-  filter: blur(46px);
+}
+@media (min-width: 641px) {
+  /* 卡片辉光的模糊同样只在桌面端做（一次性栅格化，手机端省掉首帧延迟） */
+  .card-glow { filter: blur(46px); }
 }
 .auth-card {
   position: relative;
@@ -218,5 +234,33 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 @media (prefers-reduced-motion: reduce) {
   .aurora { animation: none; }
   .auth-card::before { animation: none; }
+}
+
+/* 手机端降噪（v0.4.0）：登录页是手机上的第一屏，此前三团极光带 blur(90px)
+   无限漂浮、卡片实时毛玻璃叠在会动的背景上（每帧重算）、流光边框动画的是
+   CSS 自定义属性（无法 GPU 合成，每帧重绘），三者叠加让页面永远满负荷渲染，
+   手机上明显卡顿。640px 以下停掉无限动画与 backdrop-filter，用静态渐变保住
+   观感；桌面端维持完整效果。飞牛手机 App 的内嵌 WebView 更弱：fixed 大图层
+   在键盘弹出时重锚定会局部闪烁、大半径模糊栅格化慢会局部迟迟不出画面，
+   因此背景层 absolute（见上）、模糊滤镜全部只留桌面端，网格与噪点纹理层
+   在手机端直接不渲染。 */
+@media (max-width: 640px) {
+  .aurora {
+    animation: none;
+    will-change: auto;
+  }
+  .auth-card::before {
+    animation: none;
+  }
+  .auth-card {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    /* 毛玻璃撤掉后把底色加实，保持卡片与背景的层次 */
+    background: rgba(15, 15, 26, 0.92);
+  }
+  .grid-overlay,
+  .grain {
+    display: none;
+  }
 }
 </style>

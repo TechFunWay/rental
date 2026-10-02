@@ -20,13 +20,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// MeterRecord 每房每月的三表读数。(user, room, period) 唯一，
-// 重复录入按覆盖处理（改数即重新保存）。
+// MeterRecord 每房每月的三表读数。(room, period) 唯一，
+// 重复录入按覆盖处理（改数即重新保存）。UserID 是「录入人」戳。
 type MeterRecord struct {
 	ID     uint    `gorm:"primarykey" json:"id"`
-	UserID uint    `gorm:"index;uniqueIndex:idx_meter_record_unique" json:"-"`
-	RoomID uint    `gorm:"index;uniqueIndex:idx_meter_record_unique" json:"room_id"`
-	Period string  `gorm:"not null;index;uniqueIndex:idx_meter_record_unique" json:"period"` // YYYY-MM
+	UserID uint    `gorm:"index" json:"-"`
+	RoomID uint    `gorm:"index" json:"room_id"`
+	Period string  `gorm:"not null;index" json:"period"` // YYYY-MM
 	Water  float64 `gorm:"default:0" json:"water"`
 	Elec   float64 `gorm:"default:0" json:"elec"`
 	Gas    float64 `gorm:"default:0" json:"gas"`
@@ -53,9 +53,12 @@ func init() {
 }
 
 func setupMeterRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/meter-records", handleMeterList(db))
-	api.POST("/rental/meter-records", handleMeterUpsert(db))
-	api.DELETE("/rental/meter-records/:id", handleMeterDelete(db))
+	read := requireAccess(db, AccessReadonly)
+	edit := requireAccess(db, AccessEdit)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/meter-records", read, handleMeterList(db))
+	api.POST("/rental/meter-records", edit, handleMeterUpsert(db))
+	api.DELETE("/rental/meter-records/:id", full, handleMeterDelete(db))
 }
 
 func handleMeterList(db *gorm.DB) gin.HandlerFunc {
@@ -64,7 +67,7 @@ func handleMeterList(db *gorm.DB) gin.HandlerFunc {
 		period := strings.TrimSpace(c.Query("period"))
 		roomID := utils.Atoi(c.Query("room_id"), 0)
 
-		query := db.Model(&MeterRecord{}).Where("user_id = ?", currentUserID(c))
+		query := db.Model(&MeterRecord{})
 		if period != "" {
 			query = query.Where("period = ?", period)
 		}
@@ -186,8 +189,8 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		var rec MeterRecord
-		err := db.Where("user_id = ? AND room_id = ? AND period = ?",
-			currentUserID(c), room.ID, req.Period).First(&rec).Error
+		err := db.Where("room_id = ? AND period = ?",
+			room.ID, req.Period).First(&rec).Error
 		if err == nil {
 			rec.Water, rec.Elec, rec.Gas, rec.Note = req.Water, req.Elec, req.Gas, strings.TrimSpace(req.Note)
 			if err := db.Save(&rec).Error; err != nil {
@@ -198,7 +201,7 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		rec = MeterRecord{
-			UserID: currentUserID(c), RoomID: room.ID, Period: req.Period,
+			UserID: currentUserID(c), RoomID: room.ID, Period: req.Period, // UserID 录入人戳
 			Water: req.Water, Elec: req.Elec, Gas: req.Gas, Note: strings.TrimSpace(req.Note),
 		}
 		if err := db.Create(&rec).Error; err != nil {
@@ -216,7 +219,7 @@ func handleMeterDelete(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorBadRequest(c, "无效的记录 ID")
 			return
 		}
-		result := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).Delete(&MeterRecord{})
+		result := db.Delete(&MeterRecord{}, id)
 		if result.Error != nil {
 			response.ErrorInternal(c, "删除抄表记录失败")
 			return
@@ -233,8 +236,8 @@ func handleMeterDelete(db *gorm.DB) gin.HandlerFunc {
 // （台账是抄表时点的原始记录），失败不影响开票主流程。
 func settleMeterRecord(db *gorm.DB, bill *Bill) {
 	var n int64
-	db.Model(&MeterRecord{}).Where("user_id = ? AND room_id = ? AND period = ?",
-		bill.UserID, bill.RoomID, bill.Period).Count(&n)
+	db.Model(&MeterRecord{}).Where("room_id = ? AND period = ?",
+		bill.RoomID, bill.Period).Count(&n)
 	if n > 0 {
 		return
 	}

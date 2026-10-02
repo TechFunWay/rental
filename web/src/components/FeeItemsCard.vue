@@ -5,7 +5,7 @@
         <h3 class="text-sm sm:text-base font-bold text-foreground">收费项目</h3>
         <p class="text-xs text-muted-foreground mt-0.5">内置项目不可删除可停用；自定义项目（宽带费、停车费等）按各自周期出账</p>
       </div>
-      <button class="btn-brand !px-3 !py-2 text-xs shrink-0" @click="openCreate">＋ 新增项目</button>
+      <button v-if="accessStore.canEdit" class="btn-brand !px-3 !py-2 text-xs shrink-0" @click="openCreate">＋ 新增项目</button>
     </div>
 
     <!-- 桌面端：表格 -->
@@ -32,8 +32,8 @@
               <span v-else class="badge bg-muted text-muted-foreground">已停用</span>
             </td>
             <td class="py-2.5 px-3 text-right whitespace-nowrap">
-              <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(it)">编辑</button>
-              <button v-if="!it.built_in" class="text-destructive hover:underline" @click="remove(it)">删除</button>
+              <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(it)">编辑</button>
+              <button v-if="accessStore.canFull && !it.built_in" class="text-destructive hover:underline" @click="remove(it)">删除</button>
             </td>
           </tr>
         </tbody>
@@ -50,8 +50,8 @@
         <div class="flex items-center gap-3 text-xs shrink-0">
           <span v-if="it.enabled" class="badge !px-1.5 !py-0.5 text-[11px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">启用</span>
           <span v-else class="badge !px-1.5 !py-0.5 text-[11px] bg-muted text-muted-foreground">停用</span>
-          <button class="text-brand-600 dark:text-brand-300" @click="openEdit(it)">编辑</button>
-          <button v-if="!it.built_in" class="text-destructive" @click="remove(it)">删除</button>
+          <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300" @click="openEdit(it)">编辑</button>
+          <button v-if="accessStore.canFull && !it.built_in" class="text-destructive" @click="remove(it)">删除</button>
         </div>
       </div>
     </div>
@@ -101,11 +101,13 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRentalAccessStore } from '../stores/rentalAccess'
 import ConfirmDialog from './ConfirmDialog.vue'
 import Modal from './Modal.vue'
 import { toast } from '../utils/toast'
 import { createFeeItem, deleteFeeItem, getFeeItems, updateFeeItem, type FeeItem } from '../api/rental'
 
+const accessStore = useRentalAccessStore()
 const items = ref<FeeItem[]>([])
 const showModal = ref(false)
 const editing = ref<FeeItem | null>(null)

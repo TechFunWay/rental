@@ -1,4 +1,5 @@
-// routes.go — 缴费通知渠道的设置页接口，全部挂在登录组下、按登录用户隔离。
+// routes.go — 缴费通知渠道的设置页接口。渠道绑定按登录用户隔离；
+// 供应商配置（SMTP/短信网关/QQ 应用）是全局凭证，仅管理员可读写。
 package notify
 
 import (
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"smallgo/server/middleware"
 	"smallgo/server/response"
 
 	"github.com/gin-gonic/gin"
@@ -16,17 +18,19 @@ import (
 
 func currentUserID(c *gin.Context) uint { return c.GetUint("userID") }
 
-// SetupRoutes 挂载渠道设置接口（宿主应用在登录组上调用）。
-func SetupRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/notify/channels", handleChannelStatuses(db))
-	api.PUT("/rental/notify/bind/:channel", handleBindChannel(db))
-	api.DELETE("/rental/notify/bind/:channel", handleUnbindChannel(db))
-	api.DELETE("/rental/notify/bind/:channel/:id", handleDeleteChannelBinding(db))
-	api.POST("/rental/notify/toggle/:channel", handleToggleChannel(db))
-	api.POST("/rental/notify/test/:channel", handleTestChannel(db))
-	api.GET("/rental/notify/provider/:provider", handleProviderStatus(db))
-	api.POST("/rental/notify/provider/:provider", handleSaveProvider(db))
-	api.POST("/rental/notify/qq/bindcode", handleCreateQQBindCode(db))
+// SetupRoutes 挂载渠道设置接口（宿主应用在登录组上调用）。gate 是宿主的
+// 业务权限门禁：提醒内容是业务数据，无业务权限的用户连个人渠道也不开放；
+// 供应商凭证接口只给管理员。
+func SetupRoutes(api *gin.RouterGroup, db *gorm.DB, gate gin.HandlerFunc) {
+	api.GET("/rental/notify/channels", gate, handleChannelStatuses(db))
+	api.PUT("/rental/notify/bind/:channel", gate, handleBindChannel(db))
+	api.DELETE("/rental/notify/bind/:channel", gate, handleUnbindChannel(db))
+	api.DELETE("/rental/notify/bind/:channel/:id", gate, handleDeleteChannelBinding(db))
+	api.POST("/rental/notify/toggle/:channel", gate, handleToggleChannel(db))
+	api.POST("/rental/notify/test/:channel", gate, handleTestChannel(db))
+	api.GET("/rental/notify/provider/:provider", gate, middleware.RequireAdmin(), handleProviderStatus(db))
+	api.POST("/rental/notify/provider/:provider", gate, middleware.RequireAdmin(), handleSaveProvider(db))
+	api.POST("/rental/notify/qq/bindcode", gate, handleCreateQQBindCode(db))
 }
 
 func handleChannelStatuses(db *gorm.DB) gin.HandlerFunc {

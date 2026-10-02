@@ -6,7 +6,7 @@
 #   docker compose up -d
 #
 # 镜像说明：
-#   - 本机已构建：make build-docker-multi 生成 techfunways/rental:<VERSION>（amd64+arm64 合并）
+#   - 本机已构建：make build-docker-multi 生成 techfunways/rental:v<版本>（amd64+arm64 合并）
 #   - 远程部署：需先将对应版本镜像推送到镜像仓库后再拉取
 #
 # 升级方式：
@@ -15,7 +15,7 @@
 version: '3.8'
 services:
   rental:
-    image: techfunways/rental:v0.3.0
+    image: techfunways/rental:v0.4.0
     container_name: techfunway-rental
     ports:
       - "8910:8910"

@@ -50,11 +50,14 @@ type tenantRow struct {
 }
 
 func setupTenantRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/tenants", handleTenantList(db))
-	api.POST("/rental/tenants", handleTenantCreate(db))
-	api.PUT("/rental/tenants/:id", handleTenantUpdate(db))
-	api.POST("/rental/tenants/:id/checkout", handleTenantCheckout(db))
-	api.DELETE("/rental/tenants/:id", handleTenantDelete(db))
+	read := requireAccess(db, AccessReadonly)
+	edit := requireAccess(db, AccessEdit)
+	full := requireAccess(db, AccessFull)
+	api.GET("/rental/tenants", read, handleTenantList(db))
+	api.POST("/rental/tenants", edit, handleTenantCreate(db))
+	api.PUT("/rental/tenants/:id", edit, handleTenantUpdate(db))
+	api.POST("/rental/tenants/:id/checkout", edit, handleTenantCheckout(db))
+	api.DELETE("/rental/tenants/:id", full, handleTenantDelete(db))
 }
 
 func handleTenantList(db *gorm.DB) gin.HandlerFunc {
@@ -64,7 +67,7 @@ func handleTenantList(db *gorm.DB) gin.HandlerFunc {
 		active := c.Query("active") // "1" 在租 / "0" 已退租 / 空=全部
 		roomID := utils.Atoi(c.Query("room_id"), 0)
 
-		query := db.Model(&Tenant{}).Where("user_id = ?", currentUserID(c))
+		query := db.Model(&Tenant{})
 		if keyword != "" {
 			like := "%" + keyword + "%"
 			query = query.Where("name LIKE ? OR phone LIKE ?", like, like)
@@ -151,6 +154,7 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		tenant := Tenant{
+			// UserID 录入人戳，仅溯源；业务数据全员共享。
 			UserID:       currentUserID(c),
 			RoomID:       req.RoomID,
 			Name:         req.Name,
@@ -294,7 +298,8 @@ func findUserTenant(db *gorm.DB, c *gin.Context) (*Tenant, bool) {
 		return nil, false
 	}
 	var tenant Tenant
-	if err := db.Where("id = ? AND user_id = ?", id, currentUserID(c)).First(&tenant).Error; err != nil {
+	// 数据共享后按 ID 直取，不再限定录入人。
+	if err := db.First(&tenant, id).Error; err != nil {
 		response.ErrorNotFound(c, "租户不存在")
 		return nil, false
 	}

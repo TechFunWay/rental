@@ -31,7 +31,7 @@
         <!-- Nav -->
         <nav class="flex-1 overflow-y-auto px-4 py-5 space-y-1">
           <RouterLink
-            v-for="item in mainNav"
+            v-for="item in visibleMainNav"
             :key="item.to"
             :to="item.to"
             class="nav-link group"
@@ -83,7 +83,7 @@
             </div>
             <div class="min-w-0 flex-1">
               <div class="text-sm font-semibold text-foreground truncate">{{ authStore.user?.username }}</div>
-              <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : '普通用户' }}</div>
+              <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : `普通用户 · ${accessStore.levelLabel}` }}</div>
             </div>
             <button
               @click="handleLogout"
@@ -150,7 +150,7 @@
                 <div v-if="menuOpen" class="absolute right-0 mt-2 w-56 rounded-2xl surface shadow-card p-2 origin-top-right">
                   <div class="px-3 py-2.5 mb-1 border-b border-border">
                     <div class="text-sm font-semibold text-foreground truncate">{{ authStore.user?.username }}</div>
-                    <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : '普通用户' }}</div>
+                    <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : `普通用户 · ${accessStore.levelLabel}` }}</div>
                   </div>
                   <RouterLink to="/admin/profile" @click="menuOpen = false" class="menu-item">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
@@ -194,15 +194,16 @@
       </main>
     </div>
 
-    <!-- 手机底部导航（lg 以下显示）：高频业务页一键直达 -->
+    <!-- 手机底部导航（lg 以下显示）：高频业务页一键直达；无业务权限时不渲染 -->
     <nav
+      v-if="visibleMobileNav.length"
       class="fixed bottom-0 inset-x-0 z-30 lg:hidden surface border-t border-border"
       style="padding-bottom: env(safe-area-inset-bottom)"
       aria-label="手机端主导航"
     >
       <div class="grid grid-cols-5">
         <RouterLink
-          v-for="item in mobileNav"
+          v-for="item in visibleMobileNav"
           :key="item.to"
           :to="item.to"
           class="flex flex-col items-center justify-center gap-0.5 py-2.5 text-[11px] font-medium transition-colors"
@@ -255,6 +256,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute, RouterLink, RouterView } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
+import { useRentalAccessStore } from '../stores/rentalAccess'
 import { getVersion } from '../api/config'
 import { getStats } from '../api/rental'
 import { useSupportStore } from '../stores/support'
@@ -267,6 +269,9 @@ const route = useRoute()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const supportStore = useSupportStore()
+// 业务权限：数据共享后按管理员授权决定菜单与按钮（access store 在路由守卫
+// 里也会拉取，这里主要供导航渲染与角标轮询判断）。
+const accessStore = useRentalAccessStore()
 const sidebarOpen = ref(false)
 const menuOpen = ref(false)
 const menuRef = ref<HTMLElement | null>(null)
@@ -278,6 +283,11 @@ const paymentDueCount = ref(0)
 let paymentTimer: number | undefined
 
 async function refreshPaymentBadge() {
+  // 无业务权限的用户拿不到统计接口，角标直接清零不再轮询。
+  if (!accessStore.canRead) {
+    paymentDueCount.value = 0
+    return
+  }
   try {
     const res = await getStats()
     if (res.data?.code === 0) {
@@ -296,6 +306,7 @@ onMounted(async () => {
   } catch {}
   // 赞赏提示与新版本检查：仅管理员可见（store 内部只对管理员生效）
   await authStore.init()
+  await accessStore.ensureLoaded()
   supportStore.init(authStore.isAdmin)
   // 缴费提醒角标：立即拉一次，之后每 5 分钟刷新
   refreshPaymentBadge()
@@ -324,6 +335,14 @@ const mobileNav = [
   { to: '/admin/meters', label: '抄表', icon: mainNavIcons.meters },
   { to: '/admin/bills', label: '账单', icon: mainNavIcons.bills },
 ]
+
+// 无业务权限（none）的用户只保留个人入口，业务页一律不进菜单；
+// 路由守卫兜底防直敲 URL。只读用户看得到全部业务页，按钮另行隐藏。
+const personalNavTos = ['/admin/profile', '/admin/settings']
+const visibleMainNav = computed(() =>
+  accessStore.canRead ? mainNav : mainNav.filter((i) => personalNavTos.includes(i.to)))
+const visibleMobileNav = computed(() =>
+  accessStore.canRead ? mobileNav : [])
 
 const mainNav = [
   { to: '/admin', label: '总览', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },

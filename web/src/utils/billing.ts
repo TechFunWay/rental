@@ -5,7 +5,7 @@
 // 顺序解析（见 server/rental/billing.go）；这里只负责表单默认值、列表文案
 // 与单位换算，保证各页面口径一致。
 
-import { getUserConfigMeta } from '../api/config'
+import { getBillingDefaults } from '../api/rental'
 import type { RoomBilling } from '../api/rental'
 import { cycleLabel, normalizeCycle, type PayCycle } from './cycle'
 
@@ -52,22 +52,23 @@ function toNumber(v: string, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback
 }
 
-// fetchBillingDefaults 读取用户偏好中的全局计费与缴费默认；失败时退回内置默认，
+// fetchBillingDefaults 读取系统级共享计费默认（租房设置 v0.3.3 起由管理员在
+// 系统配置维护，员工看不到系统配置页，走应用的专用接口）；失败时退回内置默认，
 // 不阻塞页面。租户表单用它做"跟随全局默认"的展示值与新建时的预填值。
 export async function fetchBillingDefaults(): Promise<BillingDefaults> {
   try {
-    const res = await getUserConfigMeta()
-    const list = (res.data?.data ?? []) as { key: string; value: string }[]
-    const val = (key: string) => list.find((c) => c.key === key)?.value ?? ''
-    const payDay = Number(val('rental_pay_day'))
-    const remindDays = Number(val('rental_remind_days'))
+    const res = await getBillingDefaults()
+    const d = res.data?.data
+    if (!d) return { ...defaultBilling }
+    const payDay = Number(d.pay_day)
+    const remindDays = Number(d.remind_days)
     return {
-      waterMode: normalizeWaterMode(val('rental_water_mode')),
-      waterMeterPrice: toNumber(val('rental_water_price'), defaultBilling.waterMeterPrice),
-      waterMonthlyFee: toNumber(val('rental_water_monthly_fee'), defaultBilling.waterMonthlyFee),
-      elecPrice: toNumber(val('rental_elec_price'), defaultBilling.elecPrice),
-      gasPrice: toNumber(val('rental_gas_price'), defaultBilling.gasPrice),
-      payCycle: normalizeCycle(val('rental_pay_cycle')),
+      waterMode: normalizeWaterMode(d.water_mode),
+      waterMeterPrice: toNumber(String(d.water_price), defaultBilling.waterMeterPrice),
+      waterMonthlyFee: toNumber(String(d.water_monthly_fee), defaultBilling.waterMonthlyFee),
+      elecPrice: toNumber(String(d.elec_price), defaultBilling.elecPrice),
+      gasPrice: toNumber(String(d.gas_price), defaultBilling.gasPrice),
+      payCycle: normalizeCycle(d.pay_cycle),
       payDay: Number.isFinite(payDay) && payDay >= 0 && payDay <= 28 ? payDay : defaultBilling.payDay,
       remindDays: Number.isFinite(remindDays) && remindDays >= 0 ? remindDays : defaultBilling.remindDays,
     }

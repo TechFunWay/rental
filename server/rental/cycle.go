@@ -107,7 +107,7 @@ func monthsBetween(a, b string) int {
 // lastBillPeriod 返回房间最近一张账单的账期;没有账单时 ok=false。
 func lastBillPeriod(db *gorm.DB, room *Room) (string, Bill, bool) {
 	var last Bill
-	if err := db.Where("user_id = ? AND room_id = ?", room.UserID, room.ID).
+	if err := db.Where("room_id = ?", room.ID).
 		Order("period DESC").First(&last).Error; err != nil {
 		return "", Bill{}, false
 	}
@@ -181,8 +181,8 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 			}
 			next := addMonths(last.Period, months)
 			var nb Bill
-			if err := db.Where("user_id = ? AND room_id = ? AND period = ?",
-				room.UserID, room.ID, next).First(&nb).Error; err != nil {
+			if err := db.Where("room_id = ? AND period = ?",
+				room.ID, next).First(&nb).Error; err != nil {
 				period = next
 				break
 			}
@@ -219,8 +219,8 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 	}
 	item.ExpectedAmount = expectedBillAmount(room, cfg)
 	var existing Bill
-	if err := db.Where("user_id = ? AND room_id = ? AND period = ?",
-		room.UserID, room.ID, period).First(&existing).Error; err == nil {
+	if err := db.Where("room_id = ? AND period = ?",
+		room.ID, period).First(&existing).Error; err == nil {
 		item.BillID = existing.ID
 	}
 	return item
@@ -248,15 +248,14 @@ func clampRemindDays(days int) int {
 	return days
 }
 
-// computePaymentDue 汇总某用户全部待提醒的缴费项:已逾期恒提醒,
-// 未逾期只在提前提醒窗口内出现。按缴费日升序,最多 20 条。
+// computePaymentDue 汇总全部待提醒的缴费项（数据共享后只有一套台账）:
+// 已逾期恒提醒,未逾期只在提前提醒窗口内出现。按缴费日升序,最多 20 条。
 // 只有存在在租租户的房间才可能有缴费提醒（缴费设置挂在租户上）。
-func computePaymentDue(db *gorm.DB, userID uint, today time.Time) []PaymentDueItem {
+func computePaymentDue(db *gorm.DB, today time.Time) []PaymentDueItem {
 	items := make([]PaymentDueItem, 0)
 	var rooms []Room
 	if err := db.Where(
-		"user_id = ? AND id IN (SELECT room_id FROM tenants WHERE user_id = ? AND active = ?)",
-		userID, userID, true).Find(&rooms).Error; err != nil {
+		"id IN (SELECT room_id FROM tenants WHERE active = ?)", true).Find(&rooms).Error; err != nil {
 		return items
 	}
 	for i := range rooms {
