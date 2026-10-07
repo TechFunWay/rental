@@ -13,7 +13,9 @@ export const useAuthStore = defineStore('auth', () => {
   const requireLogin = ref(true)
   const allowRegister = ref(true)
   const setupRequired = ref(false)
-  const siteTitle = ref('smallgo')
+  // 站名兜底值：服务端 /api/configs/public 返回前的首屏用它，必须是本应用的中文名，
+  // 否则侧栏与浏览器标题会先闪出框架默认的英文名。
+  const siteTitle = ref('租房管理')
   // 当前登录态从哪来，由服务端在 checkAuth 里判定（只有服务端知道这次请求是
   // 不是走网关 socket、以及有没有应用自己的凭证）：
   //   gateway —— 仅凭网关注入的 NAS 身份成立，会话实际归 NAS 所有，NAS 那侧
