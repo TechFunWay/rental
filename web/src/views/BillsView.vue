@@ -4,7 +4,8 @@
       <template #actions>
         <button class="btn-ghost" @click="downloadTemplate">下载模板</button>
         <button class="btn-ghost" @click="doExport">导出</button>
-        <button v-if="accessStore.canFull" class="btn-ghost" @click="showImport = true">导入</button>
+        <button class="btn-ghost" @click="openBatchPrint">打印单据</button>
+        <button v-if="accessStore.canFull('bills')" class="btn-ghost" @click="showImport = true">导入</button>
       </template>
     </PageHeader>
 
@@ -94,11 +95,11 @@
               </td>
               <td class="py-2.5 px-3 text-right whitespace-nowrap">
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openDetail(b)">详情</button>
-                <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReading(b)">抄表</button>
+                <button v-if="accessStore.canEdit('bills')" class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReading(b)">抄表</button>
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReceipt(b)">单据</button>
-                <button v-if="accessStore.canEdit" class="text-foreground hover:underline mr-2.5" @click="openEdit(b)">编辑</button>
-                <button v-if="accessStore.canEdit && isArrears(b)" class="text-emerald-600 dark:text-emerald-400 hover:underline mr-2.5" @click="openPay(b)">收款</button>
-                <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(b)">删除</button>
+                <button v-if="accessStore.canEdit('bills')" class="text-foreground hover:underline mr-2.5" @click="openEdit(b)">编辑</button>
+                <button v-if="accessStore.canEdit('bills') && isArrears(b)" class="text-emerald-600 dark:text-emerald-400 hover:underline mr-2.5" @click="openPay(b)">收款</button>
+                <button v-if="accessStore.canFull('bills')" class="text-destructive hover:underline" @click="remove(b)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -137,11 +138,11 @@
 
           <div class="flex items-center gap-4 pt-1.5 border-t border-border/60 text-xs">
             <button class="text-brand-600 dark:text-brand-300" @click="openDetail(b)">详情</button>
-            <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300" @click="openReading(b)">抄表</button>
+            <button v-if="accessStore.canEdit('bills')" class="text-brand-600 dark:text-brand-300" @click="openReading(b)">抄表</button>
             <button class="text-brand-600 dark:text-brand-300" @click="openReceipt(b)">单据</button>
-            <button v-if="accessStore.canEdit" class="text-foreground" @click="openEdit(b)">编辑</button>
-            <button v-if="accessStore.canEdit && isArrears(b)" class="text-emerald-600 dark:text-emerald-400" @click="openPay(b)">收款</button>
-            <button v-if="accessStore.canFull" class="text-destructive ml-auto" @click="remove(b)">删除</button>
+            <button v-if="accessStore.canEdit('bills')" class="text-foreground" @click="openEdit(b)">编辑</button>
+            <button v-if="accessStore.canEdit('bills') && isArrears(b)" class="text-emerald-600 dark:text-emerald-400" @click="openPay(b)">收款</button>
+            <button v-if="accessStore.canFull('bills')" class="text-destructive ml-auto" @click="remove(b)">删除</button>
           </div>
         </div>
       </div>
@@ -328,13 +329,82 @@
       </form>
     </Modal>
 
+    <!-- 批量导入（v1.0.0 引入，重构中模板块丢失导致按钮点开无弹窗，现恢复） -->
+    <Modal v-model="showImport" title="导入账单（CSV 模板）">
+      <div class="space-y-4">
+        <p class="text-sm text-muted-foreground leading-relaxed">
+          请使用系统提供的模板填写后上传（.csv，≤2MB）。房号不存在将自动建房；同房同月已有账单将更新。
+        </p>
+        <FilePick
+          accept=".csv"
+          :disabled="importing"
+          :label="importFileName || '点击选择 CSV 文件'"
+          hint="仅支持 .csv（Excel/WPS 编辑后另存为 CSV），≤2MB"
+          @change="onPickImportFile"
+        />
+        <div v-if="importResult" class="rounded-xl border border-border p-4 text-sm space-y-2">
+          <div class="flex gap-4">
+            <span class="text-emerald-600 dark:text-emerald-400">新建 {{ importResult.created }}</span>
+            <span class="text-brand-600 dark:text-brand-300">更新 {{ importResult.updated }}</span>
+            <span class="text-destructive">失败 {{ importResult.failed }}</span>
+          </div>
+          <ul v-if="importResult.errors.length" class="text-xs text-destructive space-y-1 max-h-32 overflow-auto">
+            <li v-for="(e, i) in importResult.errors" :key="i">第 {{ e.line }} 行：{{ e.reason }}</li>
+          </ul>
+        </div>
+        <p v-if="importError" class="text-sm text-destructive">{{ importError }}</p>
+        <div class="flex gap-3">
+          <button class="btn-ghost flex-1" @click="showImport = false">关闭</button>
+          <button class="btn-brand flex-1" :disabled="importing" @click="doImport">{{ importing ? '导入中…' : '开始导入' }}</button>
+        </div>
+      </div>
+    </Modal>
+
     <!-- 单据 -->
     <Modal v-model="showReceipt" title="收费单据">
       <div v-if="receiptBill">
         <RentalReceipt :bill="receiptBill" :property="receiptProperty" :items="receiptItems" />
-        <div class="flex justify-end gap-3 mt-4 print:hidden">
+        <div class="flex flex-wrap items-center justify-end gap-3 mt-4 print:hidden">
+          <label class="text-xs text-muted-foreground flex items-center gap-1.5">
+            单据纸张
+            <select v-model="receiptPaper" class="input-field !py-1.5 !w-auto text-xs" @change="onPaperChange">
+              <option v-for="p in receiptPapers" :key="p.value" :value="p.value">{{ p.label }}</option>
+            </select>
+          </label>
           <button class="btn-ghost" @click="showReceipt = false">关闭</button>
           <button class="btn-brand" @click="printReceipt">🖨 打印 / 另存 PDF</button>
+        </div>
+      </div>
+    </Modal>
+
+    <!-- 批量打印单据：选账期区间 → 预览数量 → 逐张分页打印 -->
+    <Modal v-model="showBatchPrint" title="批量打印收费单据">
+      <div class="space-y-4">
+        <p class="text-sm text-muted-foreground leading-relaxed">
+          按账期区间批量打印收费单据（每张一页，区间两端可留空表示不限）。导出数据用右上角「导出」。
+        </p>
+        <div class="flex flex-wrap items-center gap-2">
+          <DateField v-model="batchFrom" type="month" class="!py-2 !w-[140px]" placeholder="起始账期" />
+          <span class="text-xs text-muted-foreground shrink-0">至</span>
+          <DateField v-model="batchTo" type="month" class="!py-2 !w-[140px]" placeholder="截止账期" />
+          <button class="btn-brand !py-2" :disabled="batchLoading" @click="previewReceipts">{{ batchLoading ? '查询中…' : '查询预览' }}</button>
+        </div>
+        <p v-if="batchError" class="text-sm text-destructive">{{ batchError }}</p>
+        <div v-if="batchQueried" class="rounded-xl bg-muted/60 px-3 py-2.5 text-sm text-foreground">
+          共 <strong class="tabular-nums">{{ batchBills.length }}</strong> 张单据
+          <span v-if="batchBills.length >= 500" class="text-amber-600 dark:text-amber-300 text-xs ml-1">已达单批上限 500 张，请缩小区间分批打印</span>
+          <span v-else-if="batchBills.length === 0" class="text-muted-foreground text-xs ml-1">区间内没有账单</span>
+        </div>
+        <label class="text-xs text-muted-foreground flex items-center gap-1.5">
+          单据纸张
+          <select v-model="receiptPaper" class="input-field !py-1.5 !w-auto text-xs" @change="onPaperChange">
+            <option v-for="p in receiptPapers" :key="p.value" :value="p.value">{{ p.label }}</option>
+          </select>
+          <span class="text-[11px]">（设置保存在本机）</span>
+        </label>
+        <div class="flex gap-3">
+          <button class="btn-ghost flex-1" @click="showBatchPrint = false">关闭</button>
+          <button class="btn-brand flex-1" :disabled="batchLoading || batchBills.length === 0" @click="startBatchPrint">开始打印</button>
         </div>
       </div>
     </Modal>
@@ -349,6 +419,26 @@
       </div>
     </Modal>
 
+    <!-- 批量打印层：预览全部单据，打印时每张一页（工具栏不参与打印） -->
+    <div v-if="batchPrinting" class="batch-print fixed inset-0 z-50 overflow-auto bg-white">
+      <div class="sticky top-0 z-10 flex items-center justify-end gap-2 px-4 py-2.5 bg-white border-b border-border shadow-sm">
+        <span class="text-xs text-muted-foreground mr-auto">共 {{ batchBills.length }} 张单据 · 纸张 {{ receiptPapers.find((p) => p.value === receiptPaper)?.label }}</span>
+        <label class="text-xs text-muted-foreground flex items-center gap-1.5">
+          纸张
+          <select v-model="receiptPaper" class="input-field !py-1 !w-auto text-xs" @change="onPaperChange">
+            <option v-for="p in receiptPapers" :key="p.value" :value="p.value">{{ p.label }}</option>
+          </select>
+        </label>
+        <button class="btn-brand !py-1.5 !px-3 text-xs" @click="printBatch">🖨 打印</button>
+        <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="batchPrinting = false">关闭</button>
+      </div>
+      <div class="max-w-3xl mx-auto py-5 space-y-6">
+        <div v-for="(r, i) in batchBills" :key="i" class="receipt-page">
+          <RentalReceipt :bill="r.bill" :property="batchProperty" :items="r.items" />
+        </div>
+      </div>
+    </div>
+
     <ConfirmDialog
       v-model="confirmState.show"
       :title="confirmState.title"
@@ -360,7 +450,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DateField from '../components/DateField.vue'
@@ -375,13 +465,16 @@ import { useRentalAccessStore } from '../stores/rentalAccess'
 import RentalReceipt from '../components/RentalReceipt.vue'
 import { toast } from '../utils/toast'
 import {
+  applyReceiptPaper, loadReceiptPaper, receiptPapers, saveReceiptPaper, type ReceiptPaper,
+} from '../utils/receiptPaper'
+import {
   defaultBilling, fetchBillingDefaults, meterUnit, roomBillingSummary, type BillingDefaults,
 } from '../utils/billing'
 import { coveredPeriodText, cycleMonths } from '../utils/cycle'
 import {
   arrearsOf, createBill, currentPeriod, deleteBill, downloadTemplate, exportBills, fmtMoney,
-  getBillDetail, getBills, getFeeItems, getRooms, importBills, isArrears, payBill, updateBill,
-  type Bill, type BillItemDetail, type FeeItem, type ImportResult, type PropertyMeta, type RoomView,
+  getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears, payBill, updateBill,
+  type Bill, type BillItemDetail, type FeeItem, type ImportResult, type PropertyMeta, type ReceiptEntry, type RoomView,
 } from '../api/rental'
 
 const accessStore = useRentalAccessStore()
@@ -743,6 +836,67 @@ async function openDetail(b: Bill) {
 }
 
 function printReceipt() {
+  applyReceiptPaper(receiptPaper.value)
+  window.print()
+}
+
+// ---------- 批量打印收费单据 ----------
+
+// 单据纸张：打印设备属性，保存在本机（localStorage），单张与批量共用
+const receiptPaper = ref<ReceiptPaper>(loadReceiptPaper())
+function onPaperChange() {
+  saveReceiptPaper(receiptPaper.value)
+}
+
+const showBatchPrint = ref(false)
+const batchLoading = ref(false)
+const batchError = ref('')
+const batchFrom = ref('')
+const batchTo = ref('')
+const batchQueried = ref(false)
+const batchBills = ref<ReceiptEntry[]>([])
+const batchProperty = ref<PropertyMeta>({ name: '', contact: '', note: '' })
+const batchPrinting = ref(false)
+
+function openBatchPrint() {
+  batchFrom.value = currentPeriod()
+  batchTo.value = currentPeriod()
+  batchQueried.value = false
+  batchBills.value = []
+  batchError.value = ''
+  showBatchPrint.value = true
+}
+
+async function previewReceipts() {
+  batchLoading.value = true
+  batchError.value = ''
+  try {
+    const res = await getBillReceipts(batchFrom.value, batchTo.value)
+    const env = res.data as unknown as { code: number; message: string; data?: { property: PropertyMeta; bills: ReceiptEntry[] } }
+    if (env?.code === 0 && env.data) {
+      batchBills.value = env.data.bills || []
+      batchProperty.value = env.data.property || { name: '', contact: '', note: '' }
+      batchQueried.value = true
+    } else {
+      batchError.value = env?.message || '查询失败'
+    }
+  } catch {
+    batchError.value = '查询失败，请重试'
+  } finally {
+    batchLoading.value = false
+  }
+}
+
+// 进入全屏预览层并直接拉起打印；纸张在打印时写入 @page
+async function startBatchPrint() {
+  if (!batchBills.value.length) return
+  batchPrinting.value = true
+  await nextTick()
+  printBatch()
+}
+
+function printBatch() {
+  applyReceiptPaper(receiptPaper.value)
   window.print()
 }
 
@@ -799,3 +953,23 @@ onMounted(async () => {
   await Promise.all([loadRooms(), load(1)])
 })
 </script>
+
+<style>
+/* 批量打印层：屏幕上是可滚动的全屏预览；打印时解除定位与裁剪，
+   每张单据独立一页（RentalReceipt 内部的可见性/定位规则以这里的高优先级覆盖为准） */
+@media print {
+  .batch-print {
+    position: static !important;
+    overflow: visible !important;
+  }
+  .batch-print .receipt-page {
+    break-after: page;
+  }
+  .batch-print .receipt-page:last-child {
+    break-after: auto;
+  }
+  .batch-print .receipt-wrap {
+    position: static !important;
+  }
+}
+</style>

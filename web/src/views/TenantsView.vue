@@ -2,7 +2,8 @@
   <div class="page-container animate-fade-in">
     <PageHeader title="租户管理" description="入住登记与退租管理，宿舍场景支持一房多名租户">
       <template #actions>
-        <button v-if="accessStore.canEdit" class="btn-brand" @click="openCreate">＋ 登记租户</button>
+        <button v-if="accessStore.canFull('tenants')" class="btn-ghost" @click="showImport = true">导入</button>
+        <button v-if="accessStore.canEdit('tenants')" class="btn-brand" @click="openCreate">＋ 登记租户</button>
       </template>
     </PageHeader>
 
@@ -26,7 +27,7 @@
     <div class="surface rounded-2xl overflow-hidden">
       <div v-if="loading" class="text-sm text-muted-foreground py-12 text-center">加载中…</div>
       <div v-else-if="tenants.length === 0" class="text-sm text-muted-foreground py-12 text-center">
-        暂无租户，点击右上角「登记租户」开始。
+        暂无租户，点击右上角「登记租户」或「导入」批量登记。
       </div>
       <template v-else>
       <!-- 桌面端：表格（列多，最小宽度防挤压竖排，窄桌面走容器横向滚动） -->
@@ -72,9 +73,9 @@
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openContracts(t)">
                   合同<span v-if="t.contracts_count" class="ml-0.5 tabular-nums">{{ t.contracts_count }}</span>
                 </button>
-                <button v-if="accessStore.canEdit && t.active" class="text-amber-600 dark:text-amber-300 hover:underline mr-3" @click="checkout(t)">退租</button>
-                <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(t)">编辑</button>
-                <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(t)">删除</button>
+                <button v-if="accessStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300 hover:underline mr-3" @click="checkout(t)">退租</button>
+                <button v-if="accessStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(t)">编辑</button>
+                <button v-if="accessStore.canFull('tenants')" class="text-destructive hover:underline" @click="remove(t)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -106,9 +107,9 @@
             <button class="text-brand-600 dark:text-brand-300" @click="openContracts(t)">
               合同<span v-if="t.contracts_count" class="ml-0.5 tabular-nums">{{ t.contracts_count }}</span>
             </button>
-            <button v-if="accessStore.canEdit && t.active" class="text-amber-600 dark:text-amber-300" @click="checkout(t)">退租</button>
-            <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300" @click="openEdit(t)">编辑</button>
-            <button v-if="accessStore.canFull" class="text-destructive ml-auto" @click="remove(t)">删除</button>
+            <button v-if="accessStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300" @click="checkout(t)">退租</button>
+            <button v-if="accessStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300" @click="openEdit(t)">编辑</button>
+            <button v-if="accessStore.canFull('tenants')" class="text-destructive ml-auto" @click="remove(t)">删除</button>
           </div>
         </div>
       </div>
@@ -264,7 +265,7 @@
           <span class="font-semibold text-foreground">{{ contractTenantLabel }}</span> ·
           上传合同拍照、扫描件或 PDF（单个 ≤20MB，每租户最多 20 份），退租后记录保留。
         </div>
-        <div v-if="accessStore.canEdit">
+        <div v-if="accessStore.canEdit('tenants')">
           <span class="text-xs font-semibold text-muted-foreground block mb-1.5">上传合同文件</span>
           <FilePick
             accept="image/*,.pdf"
@@ -292,7 +293,7 @@
             </div>
             <button class="text-brand-600 dark:text-brand-300 text-xs shrink-0" @click="previewContract(ct)">预览</button>
             <button class="text-brand-600 dark:text-brand-300 text-xs shrink-0" @click="download(ct)">下载</button>
-            <button v-if="accessStore.canFull" class="text-destructive text-xs shrink-0" @click="removeContract(ct)">删除</button>
+            <button v-if="accessStore.canFull('tenants')" class="text-destructive text-xs shrink-0" @click="removeContract(ct)">删除</button>
           </li>
         </ul>
 
@@ -319,6 +320,38 @@
       </div>
     </Modal>
 
+    <!-- 批量导入弹窗 -->
+    <Modal v-model="showImport" title="导入租客（CSV 模板）">
+      <div class="space-y-4">
+        <p class="text-sm text-muted-foreground leading-relaxed">
+          下载模板填写后上传（.csv，≤2MB）。房源需先在「房源管理」建档（可先用房源导入批量建档）；同房源同名在租租户按“非空覆盖、空值保留”更新，不会重复登记。
+        </p>
+        <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="downloadTenantTemplate">⬇ 下载导入模板</button>
+        <FilePick
+          accept=".csv"
+          :disabled="importing"
+          :label="importFileName || '点击选择 CSV 文件'"
+          hint="仅支持 .csv（Excel/WPS 编辑后另存为 CSV），≤2MB"
+          @change="onPickImportFile"
+        />
+        <div v-if="importResult" class="rounded-xl border border-border p-4 text-sm space-y-2">
+          <div class="flex gap-4">
+            <span class="text-emerald-600 dark:text-emerald-400">新建 {{ importResult.created }}</span>
+            <span class="text-brand-600 dark:text-brand-300">更新 {{ importResult.updated }}</span>
+            <span class="text-destructive">失败 {{ importResult.failed }}</span>
+          </div>
+          <ul v-if="importResult.errors.length" class="text-xs text-destructive space-y-1 max-h-32 overflow-auto">
+            <li v-for="(e, i) in importResult.errors" :key="i">第 {{ e.line }} 行：{{ e.reason }}</li>
+          </ul>
+        </div>
+        <p v-if="importError" class="text-sm text-destructive">{{ importError }}</p>
+        <div class="flex gap-3">
+          <button class="btn-ghost flex-1" @click="showImport = false">关闭</button>
+          <button class="btn-brand flex-1" :disabled="importing" @click="doImport">{{ importing ? '导入中…' : '开始导入' }}</button>
+        </div>
+      </div>
+    </Modal>
+
     <ConfirmDialog
       v-model="confirmState.show"
       :title="confirmState.title"
@@ -341,9 +374,9 @@ import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { toast } from '../utils/toast'
 import {
-  checkoutTenant, createTenant, deleteContract, deleteTenant, downloadContract,
-  fetchContractBlob, getContracts, getFeeItems, getRooms, getTenants, updateTenant, uploadContracts,
-  type Contract, type FeeItem, type RoomView, type Tenant,
+  checkoutTenant, createTenant, deleteContract, deleteTenant, downloadContract, downloadTenantTemplate,
+  fetchContractBlob, getContracts, getFeeItems, getRooms, getTenants, importTenants, updateTenant, uploadContracts,
+  type Contract, type FeeItem, type ImportResult, type RoomView, type Tenant,
 } from '../api/rental'
 import {
   defaultBilling, fetchBillingDefaults, globalBillingText, payDayText,
@@ -388,6 +421,46 @@ const editing = ref<Tenant | null>(null)
 const saving = ref(false)
 const formError = ref('')
 const form = ref<Partial<Tenant>>({})
+
+// ---------- 批量导入 ----------
+
+const showImport = ref(false)
+const importing = ref(false)
+const importError = ref('')
+const importResult = ref<ImportResult | null>(null)
+const importFile = ref<File | null>(null)
+const importFileName = computed(() => importFile.value?.name || '')
+
+function onPickImportFile(files: File[]) {
+  importFile.value = files[0] ?? null
+  importResult.value = null
+  importError.value = ''
+}
+
+async function doImport() {
+  const file = importFile.value
+  if (!file) {
+    importError.value = '请先选择 CSV 文件'
+    return
+  }
+  importing.value = true
+  importError.value = ''
+  importResult.value = null
+  try {
+    const res = await importTenants(file)
+    const env = res.data as unknown as { code: number; message: string; data?: ImportResult }
+    if (env?.code === 0) {
+      importResult.value = env.data ?? { created: 0, updated: 0, failed: 0, errors: [] }
+      await load(1)
+    } else {
+      importError.value = env?.message || '导入失败'
+    }
+  } catch {
+    importError.value = '导入失败，请检查文件格式'
+  } finally {
+    importing.value = false
+  }
+}
 
 // ---------- 收费项目勾选 ----------
 

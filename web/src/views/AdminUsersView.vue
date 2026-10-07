@@ -53,7 +53,7 @@
       <div class="flex flex-wrap items-center justify-between gap-3 p-5 sm:p-6 border-b border-border">
         <div>
           <h2 class="text-lg font-bold text-foreground">用户列表</h2>
-          <p class="text-sm text-muted-foreground">管理账户并按人授权业务权限（无 / 只读 / 录入 / 完全，管理员默认全部）</p>
+          <p class="text-sm text-muted-foreground">管理账户并按人勾选模块权限（查看 / 操作 / 删除，管理员默认全部）</p>
         </div>
         <div class="flex items-center gap-2 w-full sm:w-auto">
           <div class="relative flex-1 sm:flex-none">
@@ -103,21 +103,14 @@
                 <span v-else class="badge bg-muted text-muted-foreground">普通用户</span>
               </td>
               <td class="py-3.5 px-4">
-                <!-- 业务权限（数据共享后按人授权）；管理员恒为全部，不给选择 -->
+                <!-- 业务权限按模块勾选；管理员恒为全部，不弹窗 -->
                 <span v-if="user.role === 'admin'" class="text-xs text-muted-foreground whitespace-nowrap">全部</span>
-                <select
+                <button
                   v-else
-                  :value="accessLevelOf(user)"
-                  class="input-field !py-1.5 !w-auto text-xs"
-                  :disabled="savingAccess === user.id"
-                  title="设置业务权限：无 / 只读 / 录入 / 完全"
-                  @change="changeAccess(user, ($event.target as HTMLSelectElement).value as AccessLevel)"
-                >
-                  <option value="none">无（未授权）</option>
-                  <option value="readonly">只读</option>
-                  <option value="edit">录入</option>
-                  <option value="full">完全</option>
-                </select>
+                  class="text-xs font-semibold text-brand-600 dark:text-brand-300 hover:underline whitespace-nowrap"
+                  title="按模块勾选：查看 / 操作 / 删除"
+                  @click="openPerms(user)"
+                >{{ permsLabel(user) }}</button>
               </td>
               <td class="py-3.5 px-4">
                 <span v-if="user.status === 1" class="badge bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
@@ -194,6 +187,57 @@
       </div>
     </transition>
 
+    <!-- 模块权限勾选弹窗：勾"操作"自动包含查看，勾"删除"自动包含操作 -->
+    <Modal v-model="permsModal" title="设置业务权限">
+      <div v-if="permsTarget" class="space-y-4">
+        <p class="text-xs text-muted-foreground leading-relaxed">
+          给 <span class="font-semibold text-foreground">{{ permsTarget.username }}</span> 按模块勾选权限：
+          勾「操作」自动包含查看，勾「删除」自动包含操作与 CSV 导入；收款登记在账单模块内。
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="applyPreset('view')">预设：只读</button>
+          <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="applyPreset('edit')">预设：录入</button>
+          <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="applyPreset('full')">预设：完全</button>
+          <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="applyPreset(null)">全部清空</button>
+        </div>
+        <div class="overflow-x-auto rounded-xl border border-border">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="bg-muted/60 text-xs text-muted-foreground">
+                <th class="py-2.5 px-4 text-left font-semibold">模块</th>
+                <th class="py-2.5 px-3 text-center font-semibold">查看</th>
+                <th class="py-2.5 px-3 text-center font-semibold">操作</th>
+                <th class="py-2.5 px-3 text-center font-semibold">删除</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in ALL_MODULES" :key="m" class="border-t border-border">
+                <td class="py-2.5 px-4 font-medium text-foreground">{{ MODULE_LABEL[m] }}</td>
+                <td class="py-2.5 px-3 text-center">
+                  <input type="checkbox" class="w-4 h-4 accent-brand-600"
+                         :checked="boxGet(m, 'view')" @change="boxSet(m, 'view', ($event.target as HTMLInputElement).checked)" />
+                </td>
+                <td class="py-2.5 px-3 text-center">
+                  <input type="checkbox" class="w-4 h-4 accent-brand-600"
+                         :checked="boxGet(m, 'edit')" @change="boxSet(m, 'edit', ($event.target as HTMLInputElement).checked)" />
+                </td>
+                <td class="py-2.5 px-3 text-center">
+                  <input type="checkbox" class="w-4 h-4 accent-brand-600"
+                         :checked="boxGet(m, 'full')" @change="boxSet(m, 'full', ($event.target as HTMLInputElement).checked)" />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="flex gap-3 pt-1">
+        <button class="btn-ghost flex-1" @click="permsModal = false">取消</button>
+        <button class="btn-brand flex-1" :disabled="savingAccess !== null" @click="savePerms">
+          {{ savingAccess !== null ? '保存中…' : '保存' }}
+        </button>
+      </div>
+    </Modal>
+
     <ConfirmDialog
       :model-value="!!deleteTarget"
       title="删除用户"
@@ -208,8 +252,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import Modal from '../components/Modal.vue'
 import { getUsers, toggleUserStatus, deleteUser, resetUserPassword } from '../api/user'
-import { getAccessList, setAccess, type AccessLevel } from '../api/rental'
+import { getAccessList, setAccess, type ModuleKey, type ModulePerm, type ModulePerms } from '../api/rental'
+import { ALL_MODULES, MODULE_LABEL } from '../stores/rentalAccess'
 import { passwordValidationError } from '../utils/password'
 import { toast } from '../utils/toast'
 
@@ -220,35 +266,86 @@ const pageSize = ref(10)
 const total = ref(0)
 const totalPages = computed(() => Math.ceil(total.value / pageSize.value) || 1)
 
-// ---- 业务权限授权（数据共享后管理员按用户设置等级） ----
-const accessMap = ref<Record<number, AccessLevel>>({})
+// ---- 业务权限授权（数据共享后按人按模块勾选） ----
+const PERM_RANK: Record<ModulePerm, number> = { view: 1, edit: 2, full: 3 }
+const accessMap = ref<Record<number, ModulePerms>>({})
 const savingAccess = ref<number | null>(null)
+const permsModal = ref(false)
+const permsTarget = ref<any>(null)
+const permsDraft = ref<ModulePerms>({})
 
-function accessLevelOf(user: any): AccessLevel {
-  return accessMap.value[user.id] ?? 'none'
+// 列表里的摘要：常见勾选组合给可读名，混合勾选叫「自定义」。
+function permsLabel(user: any): string {
+  const p = accessMap.value[user.id] ?? {}
+  const entries = Object.entries(p)
+  if (entries.length === 0) return '未授权'
+  const all = (t: ModulePerm) => ALL_MODULES.every((m) => p[m] === t)
+  if (all('full')) return '完全'
+  if (all('edit')) return '录入'
+  if (all('view')) return '只读'
+  if (entries.length === 2 && p.meters === 'edit' && p.rooms === 'view') return '抄表'
+  return '自定义'
+}
+
+function openPerms(user: any) {
+  permsTarget.value = user
+  permsDraft.value = { ...(accessMap.value[user.id] ?? {}) }
+  permsModal.value = true
+}
+
+function tierOf(m: ModuleKey): ModulePerm | null {
+  return permsDraft.value[m] ?? null
+}
+function setTier(m: ModuleKey, tier: ModulePerm | null) {
+  const next = { ...permsDraft.value }
+  if (tier) next[m] = tier
+  else delete next[m]
+  permsDraft.value = next
+}
+function boxGet(m: ModuleKey, tier: ModulePerm): boolean {
+  const cur = tierOf(m)
+  return cur !== null && PERM_RANK[cur] >= PERM_RANK[tier]
+}
+function boxSet(m: ModuleKey, tier: ModulePerm, on: boolean) {
+  if (on) {
+    if (PERM_RANK[tierOf(m) ?? 'view'] < PERM_RANK[tier]) setTier(m, tier)
+    return
+  }
+  // 取消勾选：只降到该档的前一档（勾选包含关系同步收窄）。
+  if (PERM_RANK[tierOf(m) ?? 'view'] >= PERM_RANK[tier]) {
+    const below: ModulePerm | null = tier === 'full' ? 'edit' : tier === 'edit' ? 'view' : null
+    setTier(m, below)
+  }
+}
+function applyPreset(tier: ModulePerm | null) {
+  const next: ModulePerms = {}
+  if (tier) for (const m of ALL_MODULES) next[m] = tier
+  permsDraft.value = next
 }
 
 async function loadAccess() {
   try {
     const res = await getAccessList()
     if (res.data?.code === 0) {
-      const map: Record<number, AccessLevel> = {}
+      const map: Record<number, ModulePerms> = {}
       for (const row of res.data.data ?? []) {
-        map[row.user_id] = row.level as AccessLevel
+        map[row.user_id] = (row.perms ?? {}) as ModulePerms
       }
       accessMap.value = map
     }
   } catch { /* 读取失败按未授权展示 */ }
 }
 
-async function changeAccess(user: any, level: AccessLevel) {
+async function savePerms() {
+  const user = permsTarget.value
+  if (!user) return
   savingAccess.value = user.id
   try {
-    const res = await setAccess(user.id, level)
+    const res = await setAccess(user.id, permsDraft.value)
     if (res.data?.code === 0) {
-      accessMap.value = { ...accessMap.value, [user.id]: level }
-      const label = { none: '已撤销授权', readonly: '已设为只读', edit: '已设为录入', full: '已设为完全' }[level]
-      toast(`${user.username} ${label}`)
+      accessMap.value = { ...accessMap.value, [user.id]: permsDraft.value }
+      toast(`已保存 ${user.username} 的权限`)
+      permsModal.value = false
     } else {
       toast(res.data?.message || '授权失败', 'error')
     }

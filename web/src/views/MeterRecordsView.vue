@@ -2,9 +2,10 @@
   <div class="page-container animate-fade-in">
     <PageHeader title="抄表记录" description="每月水/电/燃气表读数台账，独立于账单：空置房、季付房的中间月份也能记">
       <template #actions>
-        <template v-if="accessStore.canEdit">
+        <!-- 录入读数按「抄表」模块的操作档开放；抄表开票生成账单，要账单操作档 -->
+        <template v-if="accessStore.canEdit('meters')">
           <button class="btn-ghost" @click="openForm()">录入读数</button>
-          <button class="btn-brand" @click="showMetering = true">⚡ 抄表开票</button>
+          <button v-if="accessStore.canEdit('bills')" class="btn-brand" @click="showMetering = true">⚡ 抄表开票</button>
         </template>
       </template>
     </PageHeader>
@@ -57,8 +58,8 @@
                 </td>
                 <td class="py-2.5 px-4 text-muted-foreground max-w-[200px] truncate" :title="r.note">{{ r.note || '—' }}</td>
                 <td class="py-2.5 px-4 text-right whitespace-nowrap">
-                  <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openForm(r)">修改</button>
-                  <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(r)">删除</button>
+                  <button v-if="accessStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openForm(r)">修改</button>
+                  <button v-if="accessStore.canFull('meters')" class="text-destructive hover:underline" @click="remove(r)">删除</button>
                 </td>
               </tr>
             </tbody>
@@ -74,8 +75,8 @@
                 <span class="text-[11px] text-muted-foreground ml-1.5 tabular-nums">{{ r.period }}</span>
               </div>
               <div class="flex items-center gap-3 text-xs shrink-0">
-                <button class="text-brand-600 dark:text-brand-300" @click="openForm(r)">修改</button>
-                <button v-if="accessStore.canFull" class="text-destructive" @click="remove(r)">删除</button>
+                <button v-if="accessStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300" @click="openForm(r)">修改</button>
+                <button v-if="accessStore.canFull('meters')" class="text-destructive" @click="remove(r)">删除</button>
               </div>
             </div>
             <div class="text-[11px] leading-5 text-muted-foreground rounded-md bg-muted/50 px-2 py-1.5 tabular-nums">

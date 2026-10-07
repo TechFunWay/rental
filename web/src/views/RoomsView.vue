@@ -3,7 +3,8 @@
     <PageHeader title="房源管理" description="房号、默认租金与费用、单价覆盖及抄表底数">
       <template #actions>
         <button class="btn-ghost" @click="exportRooms">导出房源</button>
-        <button v-if="accessStore.canEdit" class="btn-brand" @click="openCreate">＋ 新增房源</button>
+        <button v-if="accessStore.canFull('rooms')" class="btn-ghost" @click="showImport = true">导入</button>
+        <button v-if="accessStore.canEdit('rooms')" class="btn-brand" @click="openCreate">＋ 新增房源</button>
       </template>
     </PageHeader>
 
@@ -24,7 +25,7 @@
     <div class="surface rounded-2xl overflow-hidden">
       <div v-if="loading" class="text-sm text-muted-foreground py-12 text-center">加载中…</div>
       <div v-else-if="rooms.length === 0" class="text-sm text-muted-foreground py-12 text-center">
-        暂无房源，点击右上角「新增房源」开始。
+        暂无房源，点击右上角「新增房源」或「导入」批量建档。
       </div>
       <template v-else>
       <!-- 桌面端：表格 -->
@@ -62,8 +63,8 @@
                 <span v-else class="badge bg-muted text-muted-foreground">空闲</span>
               </td>
               <td class="py-3 px-4 text-right whitespace-nowrap">
-                <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(r)">编辑</button>
-                <button v-if="accessStore.canFull" class="text-destructive hover:underline" @click="remove(r)">删除</button>
+                <button v-if="accessStore.canEdit('rooms')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(r)">编辑</button>
+                <button v-if="accessStore.canFull('rooms')" class="text-destructive hover:underline" @click="remove(r)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -91,8 +92,8 @@
           </div>
 
           <div class="flex items-center gap-3 pt-0.5 border-t border-border/60 text-xs">
-            <button v-if="accessStore.canEdit" class="text-brand-600 dark:text-brand-300" @click="openEdit(r)">编辑</button>
-            <button v-if="accessStore.canFull" class="text-destructive ml-auto" @click="remove(r)">删除</button>
+            <button v-if="accessStore.canEdit('rooms')" class="text-brand-600 dark:text-brand-300" @click="openEdit(r)">编辑</button>
+            <button v-if="accessStore.canFull('rooms')" class="text-destructive ml-auto" @click="remove(r)">删除</button>
           </div>
         </div>
       </div>
@@ -201,6 +202,38 @@
       </form>
     </Modal>
 
+    <!-- 批量导入弹窗 -->
+    <Modal v-model="showImport" title="导入房源（CSV 模板）">
+      <div class="space-y-4">
+        <p class="text-sm text-muted-foreground leading-relaxed">
+          下载模板填写后上传（.csv，≤2MB）。同小区同房号已存在时更新（只覆盖填了值的列，不会清空旧数据），不会重复建档。
+        </p>
+        <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="downloadRoomTemplate">⬇ 下载导入模板</button>
+        <FilePick
+          accept=".csv"
+          :disabled="importing"
+          :label="importFileName || '点击选择 CSV 文件'"
+          hint="仅支持 .csv（Excel/WPS 编辑后另存为 CSV），≤2MB"
+          @change="onPickImportFile"
+        />
+        <div v-if="importResult" class="rounded-xl border border-border p-4 text-sm space-y-2">
+          <div class="flex gap-4">
+            <span class="text-emerald-600 dark:text-emerald-400">新建 {{ importResult.created }}</span>
+            <span class="text-brand-600 dark:text-brand-300">更新 {{ importResult.updated }}</span>
+            <span class="text-destructive">失败 {{ importResult.failed }}</span>
+          </div>
+          <ul v-if="importResult.errors.length" class="text-xs text-destructive space-y-1 max-h-32 overflow-auto">
+            <li v-for="(e, i) in importResult.errors" :key="i">第 {{ e.line }} 行：{{ e.reason }}</li>
+          </ul>
+        </div>
+        <p v-if="importError" class="text-sm text-destructive">{{ importError }}</p>
+        <div class="flex gap-3">
+          <button class="btn-ghost flex-1" @click="showImport = false">关闭</button>
+          <button class="btn-brand flex-1" :disabled="importing" @click="doImport">{{ importing ? '导入中…' : '开始导入' }}</button>
+        </div>
+      </div>
+    </Modal>
+
     <ConfirmDialog
       v-model="confirmState.show"
       title="删除房源"
@@ -214,6 +247,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import FilePick from '../components/FilePick.vue'
 import FilterPanel from '../components/FilterPanel.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -225,8 +259,8 @@ import {
   type BillingDefaults,
 } from '../utils/billing'
 import {
-  createRoom, deleteRoom, exportRooms, fmtMoney, getRooms, updateRoom,
-  type Room, type RoomView,
+  createRoom, deleteRoom, downloadRoomTemplate, exportRooms, fmtMoney, getRooms, importRooms, updateRoom,
+  type ImportResult, type Room, type RoomView,
 } from '../api/rental'
 
 const accessStore = useRentalAccessStore()
@@ -366,6 +400,46 @@ async function save() {
 }
 
 const confirmState = ref({ show: false, message: '', action: null as null | (() => Promise<void>) })
+
+// 批量导入：选文件 → 上传 → 展示新建/更新/失败与错误行明细
+const showImport = ref(false)
+const importing = ref(false)
+const importError = ref('')
+const importResult = ref<ImportResult | null>(null)
+const importFile = ref<File | null>(null)
+const importFileName = computed(() => importFile.value?.name || '')
+
+function onPickImportFile(files: File[]) {
+  importFile.value = files[0] ?? null
+  importResult.value = null
+  importError.value = ''
+}
+
+async function doImport() {
+  const file = importFile.value
+  if (!file) {
+    importError.value = '请先选择 CSV 文件'
+    return
+  }
+  importing.value = true
+  importError.value = ''
+  importResult.value = null
+  try {
+    const res = await importRooms(file)
+    const env = res.data as unknown as { code: number; message: string; data?: ImportResult }
+    if (env?.code === 0) {
+      importResult.value = env.data ?? { created: 0, updated: 0, failed: 0, errors: [] }
+      await loadAllRooms()
+      await load(1)
+    } else {
+      importError.value = env?.message || '导入失败'
+    }
+  } catch {
+    importError.value = '导入失败，请检查文件格式'
+  } finally {
+    importing.value = false
+  }
+}
 
 function remove(r: RoomView) {
   confirmState.value = {

@@ -6,7 +6,7 @@
         "type": "text",
         "field": "wizard_service_port",
         "label": "服务端口（1024-65535）",
-        "initValue": "8900",
+        "initValue": "8910",
         "rules": [
           {
             "required": true,

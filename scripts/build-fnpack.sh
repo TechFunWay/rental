@@ -51,19 +51,33 @@ for ARCH in "amd64" "arm64"; do
   fi
   echo "Building fnOS package for ${ARCH}..."
 
-  echo "  Compiling Go binary via Docker (CGO_ENABLED=1, linux/${ARCH})..."
-  # 优先清华镜像；镜像不可用（如 403/断网）时回退官方 dl-cdn，避免整包构建中断。
-  # 注意：这行注释必须留在 docker run 的续行之外，否则会把续行切断。
-  docker run --rm \
-    -v "${ROOT_DIR}/server:/src" \
-    -v "go-build-cache:/root/.cache/go-build" \
-    -v "go-mod-cache:/go/pkg/mod" \
-    -w /src \
-    --platform "linux/${ARCH}" \
-    -e "LDFLAGS=${LDFLAGS}" \
-    -e "ARCH=${ARCH}" \
-    golang:1.26-alpine \
-    sh -c '(sed -i "s|dl-cdn.alpinelinux.org|mirrors.tuna.tsinghua.edu.cn|" /etc/apk/repositories && apk add --no-cache gcc musl-dev) || (sed -i "s|mirrors.tuna.tsinghua.edu.cn|dl-cdn.alpinelinux.org|" /etc/apk/repositories && apk add --no-cache gcc musl-dev) && CGO_ENABLED=1 go build -ldflags "$LDFLAGS -extldflags -static" -o "rental-linux-${ARCH}" .'
+  # 用 zig cc 在本机交叉编译 linux/${ARCH} 静态二进制：容器路线要在 alpine 里
+  # apk 装 gcc 并拉 Go 模块，实测单次 apk update 3 分 37 秒、两架构各卡十几分钟。
+  # zig 路径可由 ZIG 环境变量覆盖，默认在仓库同级 tmp/tools 下找解压目录。
+  if [ -z "${ZIG:-}" ]; then
+    for cand in "$ROOT_DIR"/../tmp/tools/zig-*/zig "$HOME/tools/zig/zig"; do
+      if [ -x "$cand" ]; then ZIG="$cand"; break; fi
+    done
+  fi
+  if [ -z "${ZIG:-}" ] || [ ! -x "$ZIG" ]; then
+    echo "错误：未找到 zig（可设 ZIG=/path/to/zig，或在 $ROOT_DIR/../tmp/tools/ 下放 zig-* 目录）"
+    exit 1
+  fi
+  export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$ROOT_DIR/../tmp/tools/zig-cache}"
+  export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-$ROOT_DIR/../tmp/tools/zig-cache-local}"
+  mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR"
+
+  if [ "$ARCH" = "amd64" ]; then
+    ZIG_TARGET="x86_64-linux-musl"
+  else
+    ZIG_TARGET="aarch64-linux-musl"
+  fi
+
+  echo "  Compiling Go binary with zig cc (CGO_ENABLED=1, linux/${ARCH}, target ${ZIG_TARGET})..."
+  cd "$ROOT_DIR/server"
+  CGO_ENABLED=1 GOOS=linux GOARCH="$ARCH" CC="$ZIG cc -target $ZIG_TARGET" \
+    go build -ldflags "${LDFLAGS} -extldflags -static" -o "rental-linux-${ARCH}" .
+  cd "$ROOT_DIR"
 
   # Prepare build directory
   BUILD_PACK="${BUILD_DIR}/${APP_NAME}_${PKG_ARCH}"

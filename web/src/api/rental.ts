@@ -429,6 +429,48 @@ export function exportRooms() {
   download('/api/rental/rooms/export')
 }
 
+export function downloadRoomTemplate() {
+  download('/api/rental/rooms/template')
+}
+
+export function importRooms(file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  return request.post('/api/rental/rooms/import', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+export function downloadTenantTemplate() {
+  download('/api/rental/tenants/template')
+}
+
+export function importTenants(file: File) {
+  const form = new FormData()
+  form.append('file', file)
+  return request.post('/api/rental/tenants/import', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+// 批量打印单据：按账期区间一次取回全部账单与费用明细（上限 500 张）
+export interface ReceiptEntry {
+  bill: Bill
+  items: BillItemDetail[]
+}
+
+export interface ReceiptBundle {
+  property: PropertyMeta
+  bills: ReceiptEntry[]
+}
+
+export function getBillReceipts(from: string, to: string) {
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+  return request.get(`/api/rental/bills/receipts?${params.toString()}`)
+}
+
 export function importBills(file: File) {
   const form = new FormData()
   form.append('file', file)
@@ -576,10 +618,12 @@ export function getAnalytics(months = 12) {
 
 // ---------- 业务权限（数据共享后管理员按用户授权） ----------
 
-/** 业务权限等级：none 无 / readonly 只读 / edit 录入 / full 完全（与后端 access.go 同词） */
-export type AccessLevel = 'none' | 'readonly' | 'edit' | 'full'
+/** 业务权限按模块勾选：模块 × 档位（查看/操作/管理），与后端 access.go 同词 */
+export type ModuleKey = 'rooms' | 'tenants' | 'meters' | 'bills' | 'payments' | 'analytics'
+export type ModulePerm = 'view' | 'edit' | 'full'
+export type ModulePerms = Partial<Record<ModuleKey, ModulePerm>>
 
-/** 当前登录用户的业务权限 */
+/** 当前登录用户的业务权限勾选 */
 export function getMyAccess() {
   return request.get('/api/rental/access/me')
 }
@@ -589,9 +633,9 @@ export function getAccessList() {
   return request.get('/api/rental/access')
 }
 
-/** 给用户设置业务权限等级（仅管理员；none = 撤销授权） */
-export function setAccess(userID: number, level: AccessLevel) {
-  return request.put(`/api/rental/access/${userID}`, { level })
+/** 给用户设置模块权限勾选（仅管理员；空勾选 = 撤销全部授权） */
+export function setAccess(userID: number, perms: ModulePerms) {
+  return request.put(`/api/rental/access/${userID}`, { perms })
 }
 
 /** 共享计费默认值（系统级租房设置；开票/抄表弹窗"跟随全局默认"用） */

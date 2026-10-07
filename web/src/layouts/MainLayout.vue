@@ -257,6 +257,7 @@ import { useRouter, useRoute, RouterLink, RouterView } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
 import { useRentalAccessStore } from '../stores/rentalAccess'
+import type { ModuleKey } from '../api/rental'
 import { getVersion } from '../api/config'
 import { getStats } from '../api/rental'
 import { useSupportStore } from '../stores/support'
@@ -283,8 +284,8 @@ const paymentDueCount = ref(0)
 let paymentTimer: number | undefined
 
 async function refreshPaymentBadge() {
-  // 无业务权限的用户拿不到统计接口，角标直接清零不再轮询。
-  if (!accessStore.canRead) {
+  // 没有统计分析查看权的用户拿不到统计接口，角标直接清零不再轮询。
+  if (!accessStore.canView('analytics')) {
     paymentDueCount.value = 0
     return
   }
@@ -329,29 +330,29 @@ const mainNavIcons = {
 }
 
 const mobileNav = [
-  { to: '/admin', label: '总览', icon: mainNavIcons.overview },
-  { to: '/admin/rooms', label: '房源', icon: mainNavIcons.rooms },
-  { to: '/admin/tenants', label: '租户', icon: mainNavIcons.tenants },
-  { to: '/admin/meters', label: '抄表', icon: mainNavIcons.meters },
-  { to: '/admin/bills', label: '账单', icon: mainNavIcons.bills },
+  { to: '/admin', label: '总览', module: 'analytics', icon: mainNavIcons.overview },
+  { to: '/admin/rooms', label: '房源', module: 'rooms', icon: mainNavIcons.rooms },
+  { to: '/admin/tenants', label: '租户', module: 'tenants', icon: mainNavIcons.tenants },
+  { to: '/admin/meters', label: '抄表', module: 'meters', icon: mainNavIcons.meters },
+  { to: '/admin/bills', label: '账单', module: 'bills', icon: mainNavIcons.bills },
 ]
 
-// 无业务权限（none）的用户只保留个人入口，业务页一律不进菜单；
-// 路由守卫兜底防直敲 URL。只读用户看得到全部业务页，按钮另行隐藏。
-const personalNavTos = ['/admin/profile', '/admin/settings']
+// 菜单即岗位：业务导航项挂模块键，按用户的模块勾选显隐（多人分工时
+// 抄表员只见抄表、会计只见账单收款）；个人入口不挂模块，恒可见。
+// 没有任何模块勾选的用户就只剩个人入口，路由守卫兜底防直敲 URL。
 const visibleMainNav = computed(() =>
-  accessStore.canRead ? mainNav : mainNav.filter((i) => personalNavTos.includes(i.to)))
+  mainNav.filter((i) => !i.module || accessStore.canView(i.module as ModuleKey)))
 const visibleMobileNav = computed(() =>
-  accessStore.canRead ? mobileNav : [])
+  mobileNav.filter((i) => accessStore.canView(i.module as ModuleKey)))
 
 const mainNav = [
-  { to: '/admin', label: '总览', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
-  { to: '/admin/rooms', label: '房源管理', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
-  { to: '/admin/tenants', label: '租户管理', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zm7 2a4 4 0 014 4v2h-4m-4-9.5a2.5 2.5 0 11-3 4.1"/></svg>' },
-  { to: '/admin/meters', label: '抄表记录', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>' },
-  { to: '/admin/bills', label: '抄表账单', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3"/></svg>' },
-  { to: '/admin/payments', label: '收款记录', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"/></svg>' },
-  { to: '/admin/analytics', label: '统计分析', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' },
+  { to: '/admin', label: '总览', module: 'analytics', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
+  { to: '/admin/rooms', label: '房源管理', module: 'rooms', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
+  { to: '/admin/tenants', label: '租户管理', module: 'tenants', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zm7 2a4 4 0 014 4v2h-4m-4-9.5a2.5 2.5 0 11-3 4.1"/></svg>' },
+  { to: '/admin/meters', module: 'meters', label: '抄表记录', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>' },
+  { to: '/admin/bills', module: 'bills', label: '抄表账单', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3"/></svg>' },
+  { to: '/admin/payments', module: 'payments', label: '收款记录', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"/></svg>' },
+  { to: '/admin/analytics', module: 'analytics', label: '统计分析', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>' },
   { to: '/admin/profile', label: '个人资料', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>' },
   { to: '/admin/settings', label: '偏好设置', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75"/></svg>' },
 ]

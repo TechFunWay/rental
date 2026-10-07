@@ -19,7 +19,7 @@
 
     <!-- 收费项目（共享业务数据）：无业务权限的用户不展示；
          租房设置（水价电价等）已升级为系统级，管理员到「系统配置」页维护 -->
-    <FeeItemsCard v-if="accessStore.canRead" class="mt-4" />
+    <FeeItemsCard v-if="accessStore.canView('bills')" class="mt-4" />
 
     <!-- 缴费提醒通知：钉钉 / 邮箱 / 短信 / QQ 机器人渠道绑定与测试 -->
     <NotifyChannelsCard v-if="accessStore.canRead" class="mt-4" />

@@ -52,6 +52,8 @@ for PLATFORM in "${PLATFORMS[@]}"; do
 
   if [ "$GOOS" = "linux" ]; then
     # Use Docker for Linux targets (CGO cross-compilation)
+    # GOPROXY 默认走 goproxy.cn：容器内直连 proxy.golang.org 会超时（本机实测
+    # dial tcp ... i/o timeout），模块缓存未命中时会整个构建失败。
     docker run --rm \
       -v "${ROOT_DIR}/server:/src" \
       -v "go-build-cache:/root/.cache/go-build" \
@@ -61,20 +63,36 @@ for PLATFORM in "${PLATFORMS[@]}"; do
       -e "LDFLAGS=${LDFLAGS}" \
       -e "GOARCH=${GOARCH}" \
       -e "APP_NAME=${APP_NAME}" \
+      -e "GOPROXY=${GOPROXY:-https://goproxy.cn,direct}" \
       golang:1.26-alpine \
       sh -c 'apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go build -ldflags "$LDFLAGS -extldflags -static" -o "${APP_NAME}-linux-${GOARCH}" .'
   elif [ "$GOOS" = "windows" ]; then
     # Windows 也必须开 CGO：SQLite 驱动是 mattn/go-sqlite3，没有纯 Go 实现。交叉编译
     # 时 CGO_ENABLED 默认是 0，编出来的是官方 stub——程序能启动，一碰数据库就报
     # "go-sqlite3 requires cgo to work"。改用 mingw-w64 编真正的 CGO 二进制。
-    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-      echo "错误：未找到 x86_64-w64-mingw32-gcc，请先安装：brew install mingw-w64"
-      exit 1
+    if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+      cd server
+      CGO_ENABLED=1 GOOS=$GOOS GOARCH=$GOARCH CC=x86_64-w64-mingw32-gcc \
+        go build -ldflags "${LDFLAGS} -extldflags -static" -o ${BINARY_NAME}.exe .
+      cd "$ROOT_DIR"
+    else
+      # 本机没有 mingw-w64（如 macOS 上 Homebrew 不可写装不上）时，改用 Debian 容器
+      # 里的 gcc-mingw-w64-x86-64 编译，产物与宿主机 mingw 编出的等价。
+      echo "  本机未找到 x86_64-w64-mingw32-gcc，改用 Docker 容器（gcc-mingw-w64-x86-64）编译 Windows 版..."
+      docker run --rm \
+        -v "${ROOT_DIR}/server:/src" \
+        -v "go-build-cache:/root/.cache/go-build" \
+        -v "go-mod-cache:/go/pkg/mod" \
+        -w /src \
+        -e "LDFLAGS=${LDFLAGS}" \
+        -e "BINARY_NAME=${BINARY_NAME}" \
+        golang:1.26-bookworm \
+        sh -c 'apt-get update -qq && apt-get install -y -qq gcc-mingw-w64-x86-64 >/dev/null 2>&1 && CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -ldflags "$LDFLAGS -extldflags -static" -o "${BINARY_NAME}.exe" .'
+      if [ ! -f "server/${BINARY_NAME}.exe" ]; then
+        echo "错误：Windows 二进制未生成（容器内 mingw 编译失败）"
+        exit 1
+      fi
     fi
-    cd server
-    CGO_ENABLED=1 GOOS=$GOOS GOARCH=$GOARCH CC=x86_64-w64-mingw32-gcc \
-      go build -ldflags "${LDFLAGS} -extldflags -static" -o ${BINARY_NAME}.exe .
-    cd "$ROOT_DIR"
   else
     cd server
     CGO_ENABLED=1 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "${LDFLAGS}" -o ${BINARY_NAME} .
