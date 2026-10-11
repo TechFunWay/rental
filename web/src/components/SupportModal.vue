@@ -56,7 +56,7 @@
               <button
                 class="flex-1 px-3 py-2 rounded-lg text-sm font-semibold bg-brand-gradient text-white shadow-glow hover:opacity-90 transition-opacity disabled:opacity-50 flex items-center justify-center gap-1.5"
                 :disabled="support.sending"
-                @click="support.confirmSupported()"
+                @click="openAmount"
               >
                 <svg v-if="!support.sending" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                 {{ support.sending ? '发送中…' : '已支持' }}
@@ -66,12 +66,96 @@
         </div>
       </div>
     </Transition>
+
+    <!-- 金额输入弹窗（点击「已支持」后出现）。
+         独立于主弹窗、直接挂到 body：卡片上的 backdrop-blur 会让内部
+         fixed 元素相对卡片定位，嵌在卡片里会导致弹窗错位。 -->
+    <div v-if="amountDialog" class="fixed inset-0 z-[80] overflow-y-auto overscroll-contain bg-black/50 backdrop-blur-sm" @click="closeAmount">
+      <div class="flex min-h-full items-center justify-center p-4">
+        <div class="relative surface rounded-2xl shadow-card w-full max-w-[300px] p-4 text-center" @click.stop>
+          <h4 class="text-sm font-bold text-foreground">填写赞赏金额</h4>
+          <p class="mt-1 text-[11px] text-muted-foreground">仅用于统计，不做支付核验</p>
+          <div class="mt-2.5 flex flex-wrap justify-center gap-1.5">
+            <button
+              v-for="p in presets" :key="p"
+              class="rounded-full border border-border bg-muted/40 px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+              :class="{ '!border-brand-500 !bg-brand-500/10 !text-brand-600 dark:!text-brand-300': amount === p }"
+              @click="selectPreset(p)"
+            >
+              {{ p }} 元
+            </button>
+          </div>
+          <div class="mt-2.5 flex items-center justify-center gap-1.5">
+            <span class="text-xs text-muted-foreground">或输入</span>
+            <input
+              v-model.number="customAmount"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="金额（元）"
+              class="input-field w-24 text-center text-sm"
+              @input="amount = Number(customAmount) || 0"
+            />
+          </div>
+          <p v-if="amount === 0" class="mt-1.5 text-[11px] text-amber-500">未填写将以 0 元上报</p>
+          <p v-if="support.errorText" class="mt-1.5 text-xs text-destructive">{{ support.errorText }}</p>
+          <div class="mt-3 flex gap-2">
+            <button class="btn-ghost flex-1 text-sm py-1.5" :disabled="support.sending" @click="closeAmount">返回</button>
+            <button class="btn-brand flex-1 text-sm py-1.5" :disabled="support.sending" @click="confirmAmount">
+              {{ support.sending ? '发送中…' : '确定' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </Teleport>
 </template>
 
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import { useSupportStore } from '../stores/support'
 import donateQr from '../assets/donate-wechat.png'
 
 const support = useSupportStore()
+
+// 金额输入弹窗状态
+const amountDialog = ref(false)
+const presets = [1, 5, 10, 50]
+const customAmount = ref<number | ''>('')
+const amount = ref<number>(0)
+
+// 主弹窗关闭时（含关闭按钮/遮罩/发送成功）一并复位金额弹窗
+watch(
+  () => support.show,
+  (visible) => {
+    if (!visible) resetAmount()
+  },
+)
+
+function resetAmount() {
+  amountDialog.value = false
+  customAmount.value = ''
+  amount.value = 0
+}
+
+function openAmount() {
+  resetAmount()
+  support.errorText = ''
+  amountDialog.value = true
+}
+
+function selectPreset(p: number) {
+  amount.value = p
+  customAmount.value = ''
+}
+
+function closeAmount() {
+  if (support.sending) return
+  resetAmount()
+}
+
+function confirmAmount() {
+  if (support.sending) return
+  void support.confirmSupported(amount.value || 0)
+}
 </script>

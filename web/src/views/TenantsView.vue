@@ -2,23 +2,35 @@
   <div class="page-container animate-fade-in">
     <PageHeader title="租户管理" description="入住登记与退租管理，宿舍场景支持一房多名租户">
       <template #actions>
-        <button v-if="accessStore.canFull('tenants')" class="btn-ghost" @click="showImport = true">导入</button>
-        <button v-if="accessStore.canEdit('tenants')" class="btn-brand" @click="openCreate">＋ 登记租户</button>
+        <button class="btn-ghost relative" @click="openApplications">
+          入住申请
+          <span v-if="pendingCount" class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">{{ pendingCount > 9 ? '9+' : pendingCount }}</span>
+        </button>
+        <button v-if="ledgerStore.canFull('tenants')" class="btn-ghost" @click="showImport = true">导入</button>
+        <button v-if="ledgerStore.canEdit('tenants')" class="btn-brand" @click="openCreate">＋ 登记租户</button>
       </template>
     </PageHeader>
 
     <!-- 筛选：桌面平铺，手机收成一行摘要 -->
     <FilterPanel ref="filterRef" :summary="tenantsFilterSummary" :active-count="tenantsFilterCount">
       <div class="flex flex-wrap items-center gap-3">
-        <input v-model="keyword" class="input-field flex-1 min-w-[200px] !py-2" placeholder="搜索姓名或电话…" @keyup.enter="applyFilters" />
+        <input v-model="keyword" class="input-field flex-1 min-w-[200px] !py-2" placeholder="搜索姓名 / 电话 / 标签…" @keyup.enter="applyFilters" />
         <select v-model="active" class="input-field !py-2 !w-auto" @change="load(1)">
           <option value="">全部</option>
           <option value="1">在租</option>
           <option value="0">已退租</option>
         </select>
-        <select v-model="roomId" class="input-field !py-2 !w-auto" @change="load(1)">
+        <select v-model="community" class="input-field !py-2 !w-auto max-w-[150px]" @change="onCommunityChange">
+          <option value="">全部小区</option>
+          <option v-for="c in communityOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
+        <select v-model="roomId" class="input-field !py-2 !w-auto max-w-[150px]" @change="load(1)">
           <option :value="0">全部房源</option>
-          <option v-for="r in allRooms" :key="r.id" :value="r.id">{{ r.room_no }}</option>
+          <option v-for="r in roomOptions" :key="r.id" :value="r.id">{{ r.room_no }}</option>
+        </select>
+        <select v-model="filterTag" class="input-field !py-2 !w-auto max-w-[130px]" @change="load(1)">
+          <option value="">全部标签</option>
+          <option v-for="t in tagOptions" :key="t" :value="t">{{ t }}</option>
         </select>
         <button class="btn-brand !py-2" @click="applyFilters">搜索</button>
       </div>
@@ -50,7 +62,12 @@
           </thead>
           <tbody class="divide-y divide-border">
             <tr v-for="t in tenants" :key="t.id" class="hover:bg-muted/30 transition-colors">
-              <td class="py-3 px-4 font-semibold text-foreground">{{ t.name }}</td>
+              <td class="py-3 px-4">
+                <div class="font-semibold text-foreground">{{ t.name }}</div>
+                <div v-if="t.tags?.length" class="flex flex-wrap gap-1 mt-1">
+                  <span v-for="tag in t.tags" :key="tag" class="badge !px-1.5 !py-0.5 text-[11px] bg-brand-500/10 text-brand-600 dark:text-brand-300">{{ tag }}</span>
+                </div>
+              </td>
               <td class="py-3 px-4 text-muted-foreground tabular-nums">{{ t.phone || '—' }}</td>
               <td class="py-3 px-4 text-foreground" :title="t.room_label">{{ t.room_label || t.room_no || '—' }}</td>
               <td class="py-3 px-4 text-muted-foreground text-xs">{{ tenantBillingSummary(t, billingDefaults) }}<span v-if="tenantExcludedText(t)">{{ tenantExcludedText(t) }}</span></td>
@@ -73,9 +90,12 @@
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openContracts(t)">
                   合同<span v-if="t.contracts_count" class="ml-0.5 tabular-nums">{{ t.contracts_count }}</span>
                 </button>
-                <button v-if="accessStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300 hover:underline mr-3" @click="checkout(t)">退租</button>
-                <button v-if="accessStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(t)">编辑</button>
-                <button v-if="accessStore.canFull('tenants')" class="text-destructive hover:underline" @click="remove(t)">删除</button>
+                <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openAttachments(t)">
+                  附件<span v-if="t.attachments_count" class="ml-0.5 tabular-nums">{{ t.attachments_count }}</span>
+                </button>
+                <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300 hover:underline mr-3" @click="checkout(t)">退租</button>
+                <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(t)">编辑</button>
+                <button v-if="ledgerStore.canFull('tenants')" class="text-destructive hover:underline" @click="remove(t)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -89,6 +109,9 @@
             <div class="min-w-0">
               <span class="text-sm font-semibold text-foreground">{{ t.name }}</span>
               <span class="text-[11px] text-muted-foreground ml-1.5 tabular-nums">{{ t.phone || '' }}</span>
+              <div v-if="t.tags?.length" class="flex flex-wrap gap-1 mt-1">
+                <span v-for="tag in t.tags" :key="tag" class="badge !px-1.5 !py-0.5 text-[11px] bg-brand-500/10 text-brand-600 dark:text-brand-300">{{ tag }}</span>
+              </div>
             </div>
             <span v-if="t.active" class="badge shrink-0 !px-1.5 !py-0.5 text-[11px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">在租</span>
             <span v-else class="badge shrink-0 !px-1.5 !py-0.5 text-[11px] bg-muted text-muted-foreground">已退租</span>
@@ -107,9 +130,12 @@
             <button class="text-brand-600 dark:text-brand-300" @click="openContracts(t)">
               合同<span v-if="t.contracts_count" class="ml-0.5 tabular-nums">{{ t.contracts_count }}</span>
             </button>
-            <button v-if="accessStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300" @click="checkout(t)">退租</button>
-            <button v-if="accessStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300" @click="openEdit(t)">编辑</button>
-            <button v-if="accessStore.canFull('tenants')" class="text-destructive ml-auto" @click="remove(t)">删除</button>
+            <button class="text-brand-600 dark:text-brand-300" @click="openAttachments(t)">
+              附件<span v-if="t.attachments_count" class="ml-0.5 tabular-nums">{{ t.attachments_count }}</span>
+            </button>
+            <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300" @click="checkout(t)">退租</button>
+            <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300" @click="openEdit(t)">编辑</button>
+            <button v-if="ledgerStore.canFull('tenants')" class="text-destructive ml-auto" @click="remove(t)">删除</button>
           </div>
         </div>
       </div>
@@ -134,6 +160,11 @@
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">身份证号</label>
           <input v-model="form.id_card" class="input-field" placeholder="选填" />
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-muted-foreground block mb-1.5">标签</label>
+          <TagInput v-model="formTags" :suggestions="tagOptions" placeholder="如 优质 / 中介介绍 / 长租，回车添加" />
+          <p class="text-[11px] text-muted-foreground mt-1">自由打标，方便按标签分组和筛选租户。</p>
         </div>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">所属房源 *</label>
@@ -258,6 +289,135 @@
       </form>
     </Modal>
 
+    <!-- 入住申请审核：租客通过登记链接提交（公开页），确认后转入租户 -->
+    <Modal v-model="showApplications" title="入住申请">
+      <div class="space-y-3">
+        <p class="text-xs text-muted-foreground leading-relaxed">
+          登记链接在「房源管理 → 登记链接」生成，发给租客后其提交的资料出现在这里。
+          「转入登记」会带出姓名/电话/证件并预选房源，补齐计费设置后保存即入库，身份证照片自动存入租户附件。
+        </p>
+        <div v-if="applicationsLoading" class="py-8 text-center text-sm text-muted-foreground">加载中…</div>
+        <div v-else-if="applications.length === 0" class="py-8 text-center text-sm text-muted-foreground">
+          暂无申请。把登记链接发给租客，等 TA 提交后这里就会出现。
+        </div>
+        <div v-else class="space-y-2.5 max-h-[60vh] overflow-auto pr-0.5">
+          <div v-for="a in applications" :key="a.id" class="rounded-xl border border-border p-3">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="text-sm font-semibold text-foreground">
+                  {{ a.name }}
+                  <span class="text-muted-foreground font-normal text-xs tabular-nums ml-1">{{ a.phone }}</span>
+                </div>
+                <div class="text-[11px] text-muted-foreground mt-0.5">房源 {{ a.room_label || '—' }} · {{ fmtAppTime(a.created_at) }}</div>
+                <div v-if="a.id_card" class="text-[11px] text-muted-foreground mt-0.5 tabular-nums">证件 {{ a.id_card }}</div>
+                <div v-if="a.address" class="text-[11px] text-muted-foreground mt-0.5">住址 {{ a.address }}</div>
+                <div v-if="a.remark" class="text-[11px] text-muted-foreground mt-0.5">留言：{{ a.remark }}</div>
+              </div>
+              <span class="badge shrink-0 !px-1.5 !py-0.5 text-[11px]"
+                :class="a.status === 'pending' ? 'bg-amber-500/10 text-amber-600 dark:text-amber-300' : a.status === 'approved' ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : 'bg-muted text-muted-foreground'">
+                {{ a.status === 'pending' ? '待审核' : a.status === 'approved' ? '已入库' : '已拒绝' }}
+              </span>
+            </div>
+            <div v-if="a.photo_url" class="mt-2">
+              <img v-if="photoUrls[a.id]" :src="photoUrls[a.id]" class="max-h-52 rounded-lg border border-border" alt="身份证照片" />
+              <button v-else class="text-xs text-brand-600 dark:text-brand-300" @click="loadApplicationPhoto(a)">📷 查看身份证照片</button>
+            </div>
+            <div v-if="a.status === 'pending'" class="flex items-center gap-4 pt-2 mt-2 border-t border-border/60 text-xs">
+              <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 font-medium" @click="convertToTenant(a)">转入登记</button>
+              <button v-if="ledgerStore.canEdit('tenants')" class="text-destructive" @click="rejectApplication(a)">拒绝</button>
+            </div>
+            <div v-else-if="a.status === 'approved'" class="pt-2 mt-2 border-t border-border/60 text-[11px] text-emerald-600 dark:text-emerald-400">已转入租户</div>
+            <div v-else class="pt-2 mt-2 border-t border-border/60 text-[11px] text-muted-foreground">已拒绝{{ a.review_note ? `：${a.review_note}` : '' }}</div>
+          </div>
+        </div>
+        <div class="flex justify-end">
+          <button class="btn-ghost !py-2 !px-4 text-sm" @click="showApplications = false">关闭</button>
+        </div>
+      </div>
+    </Modal>
+
+    <!-- 租户资料附件弹窗：租房协议、汽车车牌、租客本人照片、身份证等 -->
+    <Modal v-model="showAttachments" title="租户资料附件">
+      <div class="space-y-4">
+        <div class="rounded-xl bg-muted/60 px-3 py-2.5 text-xs text-muted-foreground leading-relaxed">
+          <span class="font-semibold text-foreground">{{ attachmentTenantLabel }}</span> ·
+          存放租房协议、汽车车牌、租客本人照片、身份证等留档材料，支持拍照、图片与 PDF。
+          单个 ≤20MB，每租户最多 40 个；删租户时一并清理。
+        </div>
+
+        <div v-if="ledgerStore.canEdit('tenants')" class="space-y-2">
+          <!-- 用途备注：整批打一个标签，方便以后在一堆图里认出哪张是什么。
+               用按钮组而不是输入框——常见用途就这几类，点一下比打字快。 -->
+          <div>
+            <span class="text-xs font-semibold text-muted-foreground block mb-1.5">用途备注（选填）</span>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="opt in ATTACHMENT_LABELS"
+                :key="opt"
+                type="button"
+                class="px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors"
+                :class="attachmentLabel === opt
+                  ? 'bg-brand-500/15 border-brand-500/40 text-brand-600 dark:text-brand-300'
+                  : 'bg-surface/70 border-border text-muted-foreground hover:bg-muted'"
+                @click="attachmentLabel = attachmentLabel === opt ? '' : opt"
+              >{{ opt }}</button>
+            </div>
+          </div>
+          <FilePick
+            accept="image/*,.pdf"
+            multiple
+            :disabled="attachmentUploading"
+            :label="attachmentUploading ? '上传中…' : '点击选择图片或 PDF'"
+            hint="支持拍照、相册图片或 PDF，可多选；单个 ≤20MB，每租户最多 40 个"
+            @change="uploadAttachmentFiles"
+          />
+        </div>
+
+        <div v-if="attachmentLoading" class="py-6 text-center text-sm text-muted-foreground">加载中…</div>
+        <div v-else-if="attachments.length === 0" class="py-6 text-center text-sm text-muted-foreground">
+          还没有上传资料。用手机拍下协议、车牌、租客照片或身份证即可留档。
+        </div>
+        <ul v-else class="space-y-1.5">
+          <li v-for="at in attachments" :key="at.id" class="flex items-center gap-2 rounded-lg bg-muted/60 px-2.5 py-2">
+            <span
+              class="badge shrink-0 !px-1.5 !py-0.5 text-[11px]"
+              :class="at.mime_type === 'application/pdf' ? 'bg-rose-500/10 text-rose-600 dark:text-rose-300' : 'bg-sky-500/10 text-sky-600 dark:text-sky-300'"
+            >{{ at.mime_type === 'application/pdf' ? 'PDF' : '图片' }}</span>
+            <div class="min-w-0 flex-1">
+              <div class="text-xs font-medium text-foreground truncate" :title="at.file_name">{{ at.file_name }}</div>
+              <div class="text-[11px] text-muted-foreground tabular-nums">
+                <span v-if="at.label" class="text-brand-600 dark:text-brand-300">{{ at.label }} · </span>{{ fmtSize(at.file_size) }} · {{ fmtDate(at.created_at) }}
+              </div>
+            </div>
+            <button class="text-brand-600 dark:text-brand-300 text-xs shrink-0" @click="previewAttachment(at)">预览</button>
+            <button class="text-brand-600 dark:text-brand-300 text-xs shrink-0" @click="downloadAttachmentFile(at)">下载</button>
+            <button v-if="ledgerStore.canFull('tenants')" class="text-destructive text-xs shrink-0" @click="removeAttachment(at)">删除</button>
+          </li>
+        </ul>
+
+        <p v-if="attachmentError" class="text-sm text-destructive">{{ attachmentError }}</p>
+
+        <!-- 应用内预览：图片直接渲染，PDF 内嵌 -->
+        <div v-if="attachmentPreviewing && attachmentPreviewUrl" class="space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-foreground truncate">预览：{{ attachmentPreviewing.file_name }}</span>
+            <button class="text-muted-foreground hover:text-foreground text-xs" @click="closeAttachmentPreview">收起预览</button>
+          </div>
+          <iframe
+            v-if="attachmentPreviewing.mime_type === 'application/pdf'"
+            :src="attachmentPreviewUrl"
+            class="w-full h-[420px] rounded-xl border border-border bg-white"
+            title="附件预览"
+          ></iframe>
+          <img v-else :src="attachmentPreviewUrl" class="w-full max-h-[420px] object-contain rounded-xl border border-border bg-muted/40" alt="附件预览" />
+        </div>
+
+        <div class="flex gap-3 pt-1">
+          <button class="btn-ghost flex-1" @click="closeAttachments">关闭</button>
+        </div>
+      </div>
+    </Modal>
+
     <!-- 合同存档弹窗 -->
     <Modal v-model="showContracts" title="租赁合同">
       <div class="space-y-4">
@@ -265,7 +425,7 @@
           <span class="font-semibold text-foreground">{{ contractTenantLabel }}</span> ·
           上传合同拍照、扫描件或 PDF（单个 ≤20MB，每租户最多 20 份），退租后记录保留。
         </div>
-        <div v-if="accessStore.canEdit('tenants')">
+        <div v-if="ledgerStore.canEdit('tenants')">
           <span class="text-xs font-semibold text-muted-foreground block mb-1.5">上传合同文件</span>
           <FilePick
             accept="image/*,.pdf"
@@ -293,7 +453,7 @@
             </div>
             <button class="text-brand-600 dark:text-brand-300 text-xs shrink-0" @click="previewContract(ct)">预览</button>
             <button class="text-brand-600 dark:text-brand-300 text-xs shrink-0" @click="download(ct)">下载</button>
-            <button v-if="accessStore.canFull('tenants')" class="text-destructive text-xs shrink-0" @click="removeContract(ct)">删除</button>
+            <button v-if="ledgerStore.canFull('tenants')" class="text-destructive text-xs shrink-0" @click="removeContract(ct)">删除</button>
           </li>
         </ul>
 
@@ -364,7 +524,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRentalAccessStore } from '../stores/rentalAccess'
+import { useLedgerStore } from '../stores/ledger'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DateField from '../components/DateField.vue'
 import FilePick from '../components/FilePick.vue'
@@ -372,11 +532,14 @@ import FilterPanel from '../components/FilterPanel.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
+import TagInput from '../components/TagInput.vue'
 import { toast } from '../utils/toast'
 import {
-  checkoutTenant, createTenant, deleteContract, deleteTenant, downloadContract, downloadTenantTemplate,
-  fetchContractBlob, getContracts, getFeeItems, getRooms, getTenants, importTenants, updateTenant, uploadContracts,
-  type Contract, type FeeItem, type ImportResult, type RoomView, type Tenant,
+  checkoutTenant, createTenant, deleteAttachment, deleteContract, deleteTenant, downloadAttachment,
+  downloadContract, downloadTenantTemplate, fetchAttachmentBlob, fetchContractBlob, getAttachments,
+  getContracts, getFeeItems, getAllRooms, getAllTenants, getTenants, getTenantApplications, fetchApplicationPhoto,
+  rejectTenantApplication, importTenants, updateTenant, uploadAttachments, uploadContracts,
+  type Contract, type FeeItem, type ImportResult, type RoomView, type Tenant, type TenantApplication, type TenantAttachment,
 } from '../api/rental'
 import {
   defaultBilling, fetchBillingDefaults, globalBillingText, payDayText,
@@ -384,7 +547,7 @@ import {
 } from '../utils/billing'
 import { cycleLabel } from '../utils/cycle'
 
-const accessStore = useRentalAccessStore()
+const ledgerStore = useLedgerStore()
 
 const tenants = ref<Tenant[]>([])
 const allRooms = ref<RoomView[]>([])
@@ -395,16 +558,20 @@ const loading = ref(false)
 const keyword = ref('')
 const active = ref('')
 const roomId = ref(0)
+const community = ref('')
+const filterTag = ref('')
 
 // 手机端筛选摘要行与非默认条件数（徽标）
 const tenantsFilterSummary = computed(() =>
   [
     keyword.value ? `“${keyword.value}”` : '未搜索',
     active.value === '1' ? '在租' : active.value === '0' ? '已退租' : '全部状态',
+    community.value || '全部小区',
     roomId.value ? (allRooms.value.find((r) => r.id === roomId.value)?.room_no || '指定房源') : '全部房源',
+    filterTag.value ? `#${filterTag.value}` : '全部标签',
   ].join(' · '),
 )
-const tenantsFilterCount = computed(() => (keyword.value ? 1 : 0) + (active.value ? 1 : 0) + (roomId.value ? 1 : 0))
+const tenantsFilterCount = computed(() => (keyword.value ? 1 : 0) + (active.value ? 1 : 0) + (community.value ? 1 : 0) + (roomId.value ? 1 : 0) + (filterTag.value ? 1 : 0))
 
 const filterRef = ref<InstanceType<typeof FilterPanel> | null>(null)
 
@@ -549,6 +716,7 @@ function onWaterModeChange() {
 
 function openCreate() {
   editing.value = null
+  convertingId.value = 0
   form.value = {
     name: '', phone: '', id_card: '', room_id: allRooms.value[0]?.id,
     move_in_date: '', lease_end_date: '', deposit: 0,
@@ -556,6 +724,7 @@ function openCreate() {
     water_mode: '', water_price: billingDefaults.value.waterMeterPrice,
     water_monthly_fee: billingDefaults.value.waterMonthlyFee,
     pay_cycle: '', pay_day: -1, remind_days: -1,
+    tags: [],
     notes: '',
   }
   // 新租户默认全部收费项目参与
@@ -564,10 +733,107 @@ function openCreate() {
   showModal.value = true
 }
 
+// 表单标签的 v-model 桥：form.tags 在 Partial<Tenant> 里可缺省，TagInput 需要确定的数组
+const formTags = computed<string[]>({
+  get: () => form.value.tags ?? [],
+  set: (v) => { form.value.tags = v },
+})
+
 // 房源完整位置：小区 楼栋 单元 N层 房号
 function roomLabelOf(r: RoomView): string {
   const parts = [r.community, r.building, r.unit, r.floor ? r.floor + '层' : '', r.room_no]
   return parts.filter(Boolean).join(' ')
+}
+
+// ------- 入住申请审核（租客自助登记） -------
+
+const showApplications = ref(false)
+const applications = ref<TenantApplication[]>([])
+const applicationsLoading = ref(false)
+const photoUrls = ref<Record<number, string>>({})
+// 待审核申请数：既要支撑弹窗里的徽标，也要在**页面加载时**就显示红点。
+// 此前只由 applications 派生，而 applications 只在点开弹窗时才拉，页面首屏
+// 永远没有角标（2026-10-11 审计）。这里改成独立计数：挂载时轻量拉一次
+// （status=pending），打开弹窗/处理完申请后再刷新。
+const pendingCount = ref(0)
+async function loadPendingCount() {
+  try {
+    const res = await getTenantApplications('pending')
+    const rows = res.data?.data?.items || res.data?.data || []
+    pendingCount.value = Array.isArray(rows) ? rows.length : 0
+  } catch {
+    /* 角标失败不影响页面 */
+  }
+}
+// 正在转入登记的申请 id：保存租户时带给服务端（标记已入库 + 照片转附件）
+const convertingId = ref(0)
+
+function openApplications() {
+  showApplications.value = true
+  loadApplications()
+}
+
+async function loadApplications() {
+  applicationsLoading.value = true
+  try {
+    const res = await getTenantApplications()
+    if (res.data?.code === 0) {
+      applications.value = res.data.data ?? []
+      pendingCount.value = applications.value.filter((a) => a.status === 'pending').length
+      // 已不在列表里的照片 objectURL 顺手释放
+      for (const id of Object.keys(photoUrls.value)) {
+        if (!applications.value.some((a) => a.id === Number(id))) {
+          URL.revokeObjectURL(photoUrls.value[Number(id)])
+          delete photoUrls.value[Number(id)]
+        }
+      }
+    }
+  } finally {
+    applicationsLoading.value = false
+  }
+}
+
+async function loadApplicationPhoto(a: TenantApplication) {
+  try {
+    photoUrls.value[a.id] = await fetchApplicationPhoto(a.id)
+  } catch {
+    toast('照片加载失败', 'error')
+  }
+}
+
+function fmtAppTime(s: string): string {
+  return (s || '').slice(5, 16).replace('T', ' ')
+}
+
+// 转入登记：带出申请资料，预选房源，走现有登记租户弹窗（计费设置照常配置）
+function convertToTenant(a: TenantApplication) {
+  showApplications.value = false
+  editing.value = null
+  convertingId.value = a.id
+  form.value = {
+    name: a.name, phone: a.phone, id_card: a.id_card,
+    room_id: a.room_id || allRooms.value[0]?.id,
+    move_in_date: '', lease_end_date: '', deposit: 0,
+    water_mode: '', water_price: billingDefaults.value.waterMeterPrice,
+    water_monthly_fee: billingDefaults.value.waterMonthlyFee,
+    pay_cycle: '', pay_day: -1, remind_days: -1,
+    tags: [], notes: '',
+  }
+  excludedInput.value = []
+  formError.value = ''
+  showModal.value = true
+}
+
+function rejectApplication(a: TenantApplication) {
+  askConfirm('拒绝申请', `拒绝 ${a.name}（${a.phone}）的入住申请？其身份证照片会一并删除。`, async () => {
+    const res = await rejectTenantApplication(a.id, '')
+    if (res.data?.code === 0) {
+      toast('已拒绝')
+      await loadApplications()
+    } else {
+      toast(res.data?.message || '操作失败', 'error')
+    }
+  })
 }
 
 // 押金显示：带千分位，0 不显示（在列表里以 — 呈现）
@@ -593,8 +859,28 @@ function openEdit(t: Tenant) {
 }
 
 async function loadRooms() {
-  const res = await getRooms({ page: 1, pageSize: 100 })
-  if (res.data?.code === 0) allRooms.value = res.data.data.items || []
+  // 跨页拉全（服务端 pageSize 上限 100，写死会让多房源的小区从下拉里消失）。
+  allRooms.value = await getAllRooms()
+}
+
+// 小区/村组下拉候选；房源下拉按所选小区联动收窄
+const communityOptions = computed(() => [...new Set(allRooms.value.map((r) => r.community).filter(Boolean))])
+const roomOptions = computed(() =>
+  community.value ? allRooms.value.filter((r) => r.community === community.value) : allRooms.value,
+)
+
+// 标签筛选候选 + 表单打标建议：跨页拉全所有租户的已用标签（此前只取前 100 个，
+// 租户多了以后新标签在筛选下拉里看不到）。
+const tagOptions = ref<string[]>([])
+async function loadTagOptions() {
+  const rows = await getAllTenants()
+  tagOptions.value = [...new Set<string>(rows.flatMap((t: Tenant) => t.tags ?? []))].sort()
+}
+
+function onCommunityChange() {
+  // 已选房源不在新小区里时清掉，避免「小区 + 别的小区的房」矛盾组合
+  if (roomId.value && !roomOptions.value.some((r) => r.id === roomId.value)) roomId.value = 0
+  load(1)
 }
 
 async function load(p = page.value) {
@@ -603,6 +889,8 @@ async function load(p = page.value) {
     const res = await getTenants({
       page: p, pageSize, keyword: keyword.value,
       active: active.value, room_id: roomId.value || undefined,
+      community: community.value || undefined,
+      tag: filterTag.value || undefined,
     })
     if (res.data?.code === 0) {
       tenants.value = res.data.data.items || []
@@ -627,13 +915,15 @@ async function save() {
     const mode = form.value.water_mode
     // 未勾选的收费项目（排除项）落库；存量排除里已停用/已删除的项目一并清掉。
     const excluded = billableFeeItems.value.filter((f) => !feeChecked(f.key)).map((f) => f.key)
-    const payload: Partial<Tenant> = {
+    const payload: Partial<Tenant> & { application_id?: number } = {
       ...form.value,
       water_price: mode === 'meter' ? Number(form.value.water_price) || 0 : 0,
       water_monthly_fee: mode === 'monthly' ? Number(form.value.water_monthly_fee) || 0 : 0,
       pay_day: Number(form.value.pay_day ?? -1),
       remind_days: Number(form.value.remind_days ?? -1),
       excluded_fees: excluded,
+      // 租客自助登记转入：带上申请 id，服务端标记已入库并把身份证照片转进附件
+      application_id: editing.value ? undefined : convertingId.value || undefined,
     }
     const res = editing.value
       ? await updateTenant(editing.value.id, payload)
@@ -641,6 +931,13 @@ async function save() {
     if (res.data?.code === 0) {
       showModal.value = false
       await load(1)
+      // 标签候选取自租户列表，打完新标签要重取，筛选下拉才能立刻选到
+      loadTagOptions()
+      // 转入登记完成：刷新申请队列（徽标数同步减少）
+      if (convertingId.value) {
+        convertingId.value = 0
+        loadApplications()
+      }
     } else {
       formError.value = res.data?.message || '保存失败'
     }
@@ -792,12 +1089,122 @@ function removeContract(ct: Contract) {
   })
 }
 
+// ---------- 租户资料附件 ----------
+// 与合同存档分开的另一套留档：租房协议、汽车车牌、租客本人照片、身份证等。
+const showAttachments = ref(false)
+const attachmentTenant = ref<Tenant | null>(null)
+const attachments = ref<TenantAttachment[]>([])
+const attachmentLoading = ref(false)
+const attachmentUploading = ref(false)
+const attachmentError = ref('')
+const attachmentLabel = ref('')
+const attachmentPreviewing = ref<TenantAttachment | null>(null)
+const attachmentPreviewUrl = ref('')
+
+// 常见用途，点选比手打快；也允许不选（留空）。
+const ATTACHMENT_LABELS = ['身份证', '汽车车牌', '租房协议', '租客照片', '其他']
+
+const attachmentTenantLabel = computed(() => {
+  const t = attachmentTenant.value
+  if (!t) return ''
+  return `${t.name} · ${t.room_label || t.room_no || ''}`
+})
+
+function openAttachments(t: Tenant) {
+  attachmentTenant.value = t
+  attachments.value = []
+  attachmentError.value = ''
+  attachmentLabel.value = ''
+  showAttachments.value = true
+  loadAttachments(t.id)
+}
+
+async function loadAttachments(tenantId: number) {
+  attachmentLoading.value = true
+  try {
+    const res = await getAttachments(tenantId)
+    if (res.data?.code === 0) attachments.value = res.data.data ?? []
+  } catch {
+    attachmentError.value = '加载附件失败'
+  } finally {
+    attachmentLoading.value = false
+  }
+}
+
+async function uploadAttachmentFiles(files: File[]) {
+  const t = attachmentTenant.value
+  if (!t || files.length === 0) return
+  attachmentUploading.value = true
+  attachmentError.value = ''
+  try {
+    const res = await uploadAttachments(t.id, files, attachmentLabel.value)
+    if (res.data?.code === 0) {
+      const n = res.data.data?.uploaded ?? files.length
+      toast(`已上传 ${n} 个附件`)
+      await loadAttachments(t.id)
+    } else {
+      attachmentError.value = res.data?.message || '上传失败'
+    }
+  } catch (err: any) {
+    attachmentError.value = err.response?.data?.message || '上传失败，请重试'
+  } finally {
+    attachmentUploading.value = false
+  }
+}
+
+function previewAttachment(at: TenantAttachment) {
+  attachmentError.value = ''
+  fetchAttachmentBlob(at.id)
+    .then((blob) => {
+      releaseAttachmentPreviewUrl()
+      attachmentPreviewing.value = at
+      attachmentPreviewUrl.value = URL.createObjectURL(blob)
+    })
+    .catch(() => toast('预览失败，请重试', 'error'))
+}
+
+function closeAttachmentPreview() {
+  releaseAttachmentPreviewUrl()
+  attachmentPreviewing.value = null
+}
+
+function releaseAttachmentPreviewUrl() {
+  if (attachmentPreviewUrl.value) {
+    URL.revokeObjectURL(attachmentPreviewUrl.value)
+    attachmentPreviewUrl.value = ''
+  }
+}
+
+function closeAttachments() {
+  closeAttachmentPreview()
+  showAttachments.value = false
+}
+
+async function downloadAttachmentFile(at: TenantAttachment) {
+  try {
+    await downloadAttachment(at.id, at.file_name)
+  } catch {
+    toast('下载失败，请重试', 'error')
+  }
+}
+
+function removeAttachment(at: TenantAttachment) {
+  askConfirm('删除附件', `确定删除「${at.file_name}」？删除后不可恢复。`, async () => {
+    const res = await deleteAttachment(at.id)
+    if (res.data?.code !== 0) {
+      toast(res.data?.message || '删除失败', 'error')
+      return
+    }
+    toast('已删除')
+    if (attachmentTenant.value) await loadAttachments(attachmentTenant.value.id)
+  })
+}
+
 function fmtSize(v: number): string {
   if (v >= 1 << 20) return `${(v / (1 << 20)).toFixed(1)} MB`
   if (v >= 1 << 10) return `${(v / (1 << 10)).toFixed(0)} KB`
   return `${v} B`
 }
-
 function fmtDate(v: string): string {
   return (v || '').slice(0, 10)
 }
@@ -814,6 +1221,8 @@ async function loadFeeItems() {
 onMounted(async () => {
   billingDefaults.value = await fetchBillingDefaults()
   await Promise.all([loadRooms(), loadFeeItems()])
+  loadTagOptions()
+  void loadPendingCount()
   await load(1)
 })
 </script>

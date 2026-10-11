@@ -7,13 +7,21 @@
     </PageHeader>
 
     <!-- 筛选：桌面平铺，手机收成一行摘要 -->
-    <FilterPanel :summary="paymentsFilterSummary">
+    <FilterPanel ref="filterRef" :summary="paymentsFilterSummary">
       <div class="flex flex-wrap items-center gap-3">
         <DateField v-model="periodFrom" type="month" class="!py-2 !w-[140px]" @change="load(1)" />
         <span class="text-xs text-muted-foreground shrink-0">至</span>
         <DateField v-model="periodTo" type="month" class="!py-2 !w-[140px]" @change="load(1)" />
-        <input v-model="keyword" class="input-field flex-1 min-w-[160px] !py-2" placeholder="搜索房号 / 租户 / 备注…" @keyup.enter="load(1)" />
-        <button class="btn-brand !py-2" @click="load(1)">查询</button>
+        <select v-model="community" class="input-field !py-2 !w-auto max-w-[150px]" @change="onCommunityChange">
+          <option value="">全部小区</option>
+          <option v-for="c in communityOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
+        <select v-model="roomId" class="input-field !py-2 !w-auto max-w-[150px]" @change="load(1)">
+          <option :value="0">全部房源</option>
+          <option v-for="r in roomOptions" :key="r.id" :value="r.id">{{ r.room_no }}</option>
+        </select>
+        <input v-model="keyword" class="input-field flex-1 min-w-[160px] !py-2" placeholder="搜索房号 / 租户 / 备注…" @keyup.enter="applyFilters" />
+        <button class="btn-brand !py-2" @click="applyFilters">查询</button>
         <div class="sm:ml-auto text-sm text-muted-foreground whitespace-nowrap w-full sm:w-auto">
           本页合计：<strong class="text-emerald-600 dark:text-emerald-400 tabular-nums">{{ fmt(pageSum) }}</strong> 元
         </div>
@@ -96,7 +104,15 @@ import DateField from '../components/DateField.vue'
 import FilterPanel from '../components/FilterPanel.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
-import { getPayments, type PaymentRecord } from '../api/rental'
+import { getAllRooms, getPayments, getRooms, type PaymentRecord, type RoomView } from '../api/rental'
+
+const filterRef = ref<InstanceType<typeof FilterPanel> | null>(null)
+
+// 查询后手机端收起筛选面板，与其他列表页一致
+function applyFilters() {
+  load(1)
+  filterRef.value?.collapse()
+}
 
 const rows = ref<PaymentRecord[]>([])
 const total = ref(0)
@@ -106,11 +122,26 @@ const loading = ref(false)
 const periodFrom = ref('')
 const periodTo = ref('')
 const keyword = ref('')
+// 小区/村组 + 房源筛选：房源选项随小区收窄（收款挂账单，服务端按账单的房源反查）
+const allRooms = ref<RoomView[]>([])
+const community = ref('')
+const roomId = ref(0)
+const communityOptions = computed(() => [...new Set(allRooms.value.map((r) => r.community).filter(Boolean))])
+const roomOptions = computed(() =>
+  community.value ? allRooms.value.filter((r) => r.community === community.value) : allRooms.value,
+)
+
+function onCommunityChange() {
+  if (roomId.value && !roomOptions.value.some((r) => r.id === roomId.value)) roomId.value = 0
+  load(1)
+}
 
 const paymentsFilterSummary = computed(() =>
   [
     periodFrom.value || '开始不限',
     periodTo.value ? `至 ${periodTo.value}` : null,
+    community.value || null,
+    roomId.value ? (allRooms.value.find((r) => r.id === roomId.value)?.room_no || '指定房源') : null,
     keyword.value ? `“${keyword.value}”` : null,
   ].filter(Boolean).join(' · ') || '全部收款',
 )
@@ -133,6 +164,8 @@ async function load(p = page.value) {
       period_from: periodFrom.value || undefined,
       period_to: periodTo.value || undefined,
       keyword: keyword.value,
+      community: community.value || undefined,
+      room_id: roomId.value || undefined,
     })
     if (res.data?.code === 0) {
       rows.value = res.data.data.items || []
@@ -144,5 +177,9 @@ async function load(p = page.value) {
   }
 }
 
-onMounted(() => load(1))
+onMounted(() => {
+  // 房源下拉数据：跨页拉全（服务端 pageSize 上限 100，写死会漏房）。
+  getAllRooms().then((rooms) => { allRooms.value = rooms })
+  load(1)
+})
 </script>

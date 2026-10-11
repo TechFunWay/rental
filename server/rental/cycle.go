@@ -105,10 +105,14 @@ func monthsBetween(a, b string) int {
 }
 
 // lastBillPeriod 返回房间最近一张账单的账期;没有账单时 ok=false。
+// v0.6.0：只在房间所属台账内找，别台账的同房号账单不能当作本期锚点。
 func lastBillPeriod(db *gorm.DB, room *Room) (string, Bill, bool) {
 	var last Bill
-	if err := db.Where("room_id = ?", room.ID).
-		Order("period DESC").First(&last).Error; err != nil {
+	q := db.Where("room_id = ?", room.ID)
+	if ledgerColumnReady(db, "bills") {
+		q = q.Where("org_id = ?", room.LedgerID)
+	}
+	if err := q.Order("period DESC").First(&last).Error; err != nil {
 		return "", Bill{}, false
 	}
 	return last.Period, last, true
@@ -164,7 +168,12 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 	// 归一到今天零点,让 DaysLeft 是精确的整天差(与租约到期提醒同口径)。
 	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
 	var tenants int64
-	db.Model(&Tenant{}).Where("room_id = ? AND active = ?", room.ID, true).Count(&tenants)
+	tq := db.Model(&Tenant{}).Where("room_id = ? AND active = ?", room.ID, true)
+	if ledgerColumnReady(db, "tenants") {
+		// 在租判定限定同台账：跨台账孤儿租户不该让本台账的房产生缴费提醒。
+		tq = tq.Where("org_id = ?", room.LedgerID)
+	}
+	tq.Count(&tenants)
 	if tenants == 0 {
 		return nil
 	}
@@ -181,8 +190,11 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 			}
 			next := addMonths(last.Period, months)
 			var nb Bill
-			if err := db.Where("room_id = ? AND period = ?",
-				room.ID, next).First(&nb).Error; err != nil {
+			nq := db.Where("room_id = ? AND period = ?", room.ID, next)
+			if ledgerColumnReady(db, "bills") {
+				nq = nq.Where("org_id = ?", room.LedgerID)
+			}
+			if err := nq.First(&nb).Error; err != nil {
 				period = next
 				break
 			}
@@ -209,7 +221,7 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 		RoomID:     room.ID,
 		RoomNo:     room.RoomNo,
 		Community:  room.Community,
-		TenantName: activeTenantNames(db, room.ID),
+		TenantName: activeTenantNames(db, room.ID, room.LedgerID),
 		PayCycle:   cfg.PayCycle,
 		PayDay:     cfg.PayDay,
 		Period:     period,
@@ -219,8 +231,11 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 	}
 	item.ExpectedAmount = expectedBillAmount(room, cfg)
 	var existing Bill
-	if err := db.Where("room_id = ? AND period = ?",
-		room.ID, period).First(&existing).Error; err == nil {
+	eq := db.Where("room_id = ? AND period = ?", room.ID, period)
+	if ledgerColumnReady(db, "bills") {
+		eq = eq.Where("org_id = ?", room.LedgerID)
+	}
+	if err := eq.First(&existing).Error; err == nil {
 		item.BillID = existing.ID
 	}
 	return item
@@ -248,14 +263,34 @@ func clampRemindDays(days int) int {
 	return days
 }
 
-// computePaymentDue 汇总全部待提醒的缴费项（数据共享后只有一套台账）:
+// computePaymentDue 汇总全部待提醒的缴费项（**不限台账**，nil 口径）:
 // 已逾期恒提醒,未逾期只在提前提醒窗口内出现。按缴费日升序,最多 20 条。
 // 只有存在在租租户的房间才可能有缴费提醒（缴费设置挂在租户上）。
+//
+// 只给「确实要跨台账汇总」的调用方使用（当前仅单测）；任何**请求内**的统计
+// 都必须走 computePaymentDueInLedgers 并传入 visibleLedgerIDs(c)，否则就是
+// 跨房东泄漏催收信息（2026-10-11 stats.go 曾误用本函数）。
 func computePaymentDue(db *gorm.DB, today time.Time) []PaymentDueItem {
+	return computePaymentDueInLedgers(db, today, nil)
+}
+
+// computePaymentDueInLedgers 与 computePaymentDue 同口径，但把范围收窄到
+// 指定台账；ledgerIDs 为 nil 表示不限台账（全部）。
+//
+// v0.6.0 起缴费提醒按台账隔离：只提醒「这个人有权限的台账」里到期的账单，
+// 不能把别人台账的租户催收信息推给他。
+func computePaymentDueInLedgers(db *gorm.DB, today time.Time, ledgerIDs []uint) []PaymentDueItem {
 	items := make([]PaymentDueItem, 0)
+	query := db.Where(
+		"id IN (SELECT room_id FROM tenants WHERE active = ?)", true)
+	if ledgerIDs != nil {
+		if len(ledgerIDs) == 0 {
+			return items
+		}
+		query = query.Where("org_id IN ?", ledgerIDs)
+	}
 	var rooms []Room
-	if err := db.Where(
-		"id IN (SELECT room_id FROM tenants WHERE active = ?)", true).Find(&rooms).Error; err != nil {
+	if err := query.Find(&rooms).Error; err != nil {
 		return items
 	}
 	for i := range rooms {

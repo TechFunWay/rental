@@ -122,8 +122,8 @@ func Start() {
 
 	r := NewRouter(cfg, db, jwtSecret)
 
-	// 匿名使用统计心跳：-disable-stats / DISABLE_STATS=1 可完全退出，
-	// 运行时也可由管理员通过 stats_enabled 配置关闭。
+	// 匿名使用统计心跳：默认开启、应用内不提供关闭入口（2026-10-11 用户定调），
+	// 只有部署层面的 -disable-stats / DISABLE_STATS=1 能整体退出。
 	if !cfg.DisableStats {
 		stats.Start(version.AppName, version.Version, cfg.DeviceType, cfg.DataDir)
 		defer stats.Stop()
@@ -344,6 +344,8 @@ func NewRouter(cfg config.Config, db *gorm.DB, jwtSecret string) *gin.Engine {
 
 	// 版本检查（升级提示条）：需要登录，检查失败优雅降级。
 	update.RegisterRoutes(authGroup)
+	// 一键自更新（下载发行包 → 替换自身 → 原地重启）只允许管理员触发
+	update.RegisterApplyRoutes(adminGroup)
 
 	// 赞赏支持计数：需要登录（前端入口仅对管理员显示）。
 	stats.RegisterRoutes(authGroup, db)

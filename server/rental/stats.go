@@ -11,7 +11,7 @@ import (
 )
 
 func setupStatsRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	api.GET("/rental/stats", requireAccess(db, AccessReadonly), handleStats(db))
+	api.GET("/rental/stats", requireModule(db, ModuleAnalytics, PermView), handleStats(db))
 }
 
 func handleStats(db *gorm.DB) gin.HandlerFunc {
@@ -21,44 +21,63 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 			period = p
 		}
 
+		// v0.6.0：总览所有统计都限定在本次请求的可见台账内。
+		// 无一台账可见时直接返回零值结构，避免退化成「看到全部台账」。
+		ledgerIDs := visibleLedgerIDs(c)
+		if len(ledgerIDs) == 0 {
+			response.Success(c, gin.H{
+				"lease_due": []gin.H{}, "payment_due": []PaymentDueItem{}, "arrears_list": []gin.H{},
+				"rooms_total": 0, "rooms_occupied": 0, "rooms_vacant": 0, "tenants_active": 0,
+				"month": gin.H{
+					"period": period, "total": 0, "paid": 0, "outstanding": 0,
+					"bill_count": 0, "arrears_count": 0,
+				},
+				"overall":      gin.H{"outstanding": 0, "arrears_count": 0},
+				"recent_bills": []Bill{},
+			})
+			return
+		}
+
 		var roomsTotal, tenantsActive, occupied int64
-		db.Model(&Room{}).Count(&roomsTotal)
-		db.Model(&Tenant{}).Where("active = ?", true).Count(&tenantsActive)
+		db.Model(&Room{}).Where("org_id IN ?", ledgerIDs).Count(&roomsTotal)
+		db.Model(&Tenant{}).Where("active = ? AND org_id IN ?", true, ledgerIDs).Count(&tenantsActive)
+		// 在租判定同样限定台账：跨台账的孤儿租户不能让本台账的房算作「已出租」。
 		db.Model(&Room{}).Where(
-			"id IN (SELECT room_id FROM tenants WHERE active = ?)", true).Count(&occupied)
+			"org_id IN ? AND id IN (SELECT room_id FROM tenants WHERE active = ? AND org_id IN ?)",
+			ledgerIDs, true, ledgerIDs).Count(&occupied)
 
 		// 指定月应收/实收/欠缴户数——每次聚合都用全新查询链，避免条件串扰。
 		var monthTotal, monthPaid float64
 		var monthBillCount, monthArrearsCount int64
-		db.Model(&Bill{}).Where("period = ?", period).
+		db.Model(&Bill{}).Where("period = ? AND org_id IN ?", period, ledgerIDs).
 			Select("COALESCE(SUM(total_amount), 0)").Scan(&monthTotal)
-		db.Model(&Bill{}).Where("period = ?", period).
+		db.Model(&Bill{}).Where("period = ? AND org_id IN ?", period, ledgerIDs).
 			Select("COALESCE(SUM(paid_amount), 0)").Scan(&monthPaid)
-		db.Model(&Bill{}).Where("period = ?", period).Count(&monthBillCount)
-		db.Model(&Bill{}).Where("period = ? AND status <> ?", period, "paid").
+		db.Model(&Bill{}).Where("period = ? AND org_id IN ?", period, ledgerIDs).Count(&monthBillCount)
+		db.Model(&Bill{}).Where("period = ? AND status <> ? AND org_id IN ?", period, "paid", ledgerIDs).
 			Count(&monthArrearsCount)
 
-		// 历史累计欠缴（全部月份）。
+		// 历史累计欠缴（可见台账的全部月份）。
 		var overallArrears float64
 		var overallArrearsCount int64
-		db.Model(&Bill{}).Where("status <> ?", "paid").
+		db.Model(&Bill{}).Where("status <> ? AND org_id IN ?", "paid", ledgerIDs).
 			Select("COALESCE(SUM(total_amount - paid_amount), 0)").Scan(&overallArrears)
-		db.Model(&Bill{}).Where("status <> ?", "paid").
+		db.Model(&Bill{}).Where("status <> ? AND org_id IN ?", "paid", ledgerIDs).
 			Count(&overallArrearsCount)
 
 		recent := make([]Bill, 0)
-		db.Order("updated_at DESC").Limit(8).Find(&recent)
+		db.Where("org_id IN ?", ledgerIDs).Order("updated_at DESC").Limit(8).Find(&recent)
 
 		// 租约到期提醒：在租租户中 60 天内到期（含已过期），按到期日升序。
 		deadline := time.Now().AddDate(0, 0, 60).Format("2006-01-02")
 		leaseDue := make([]gin.H, 0)
 		var dueTenants []Tenant
-		db.Where("active = ? AND lease_end_date <> '' AND lease_end_date <= ?",
-			true, deadline).Order("lease_end_date ASC").Limit(20).Find(&dueTenants)
+		db.Where("active = ? AND lease_end_date <> '' AND lease_end_date <= ? AND org_id IN ?",
+			true, deadline, ledgerIDs).Order("lease_end_date ASC").Limit(20).Find(&dueTenants)
 		if len(dueTenants) > 0 {
 			roomNoOf := map[uint]string{}
 			var rooms []Room
-			db.Find(&rooms)
+			db.Where("org_id IN ?", ledgerIDs).Find(&rooms)
 			for _, r := range rooms {
 				roomNoOf[r.ID] = r.RoomNo
 			}
@@ -83,7 +102,7 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 		// 欠缴户名单：当前统计账期未缴清的账单（房号/租户/欠缴额），按欠缴额降序。
 		arrearsList := make([]gin.H, 0)
 		var arrearsBills []Bill
-		db.Where("period = ? AND status <> ?", period, "paid").
+		db.Where("period = ? AND status <> ? AND org_id IN ?", period, "paid", ledgerIDs).
 			Order("total_amount - paid_amount DESC").Limit(50).Find(&arrearsBills)
 		for _, b := range arrearsBills {
 			arrears := b.TotalAmount - b.PaidAmount
@@ -101,7 +120,12 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 
 		// 缴费提醒：每间设置了缴费日且有在租租户的房，缴费日落在提前提醒
 		// 窗口内（或已逾期）的待收项，按缴费日升序。口径见 cycle.go。
-		paymentDue := computePaymentDue(db, time.Now())
+		//
+		// 必须传本次请求的可见台账（2026-10-11 修）：此前调的是不限台账的
+		// computePaymentDue（ledgerIDs 为 nil = 全库），与本页其它字段
+		// 「按 visibleLedgerIDs 收窄」的口径不一致——任何已审核账号打开总览，
+		// 都能看到全站房东的房号、租户姓名与应缴金额（审计实测复现）。
+		paymentDue := computePaymentDueInLedgers(db, time.Now(), visibleLedgerIDs(c))
 
 		response.Success(c, gin.H{
 			"lease_due":      leaseDue,

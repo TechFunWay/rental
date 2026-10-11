@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -30,7 +31,11 @@ var (
 	// keep the user (its business data still references the account).
 	ErrUserDeleteBlocked = errors.New("该用户在应用中已有数据，不能删除；可改为禁用账号")
 	ErrFnOSNotBound      = errors.New("此飞牛 NAS 账号尚未绑定应用账号")
-	ErrFnOSAlreadyBound = errors.New("此飞牛 NAS 账号已绑定其他应用账号")
+	ErrFnOSAlreadyBound  = errors.New("此飞牛 NAS 账号已绑定其他应用账号")
+	// ErrPhoneRequired / ErrPhoneInvalid 只在系统配置要求手机号时才会出现。
+	// 手机号仅作联系与认人用途，不做唯一校验（同一家人共用一个号是常见场景）。
+	ErrPhoneRequired = errors.New("请填写手机号")
+	ErrPhoneInvalid  = errors.New("手机号格式不正确")
 )
 
 // FnOSIdentity is the trusted identity context added by the fnOS unified
@@ -85,7 +90,63 @@ func loginTokenTTL(db *gorm.DB) time.Duration {
 	return time.Duration(days) * 24 * time.Hour
 }
 
-func Register(db *gorm.DB, username string, password string, jwtSecret string) (map[string]interface{}, error) {
+// RegisterPhonePolicy 是注册手机号的两个开关，供注册页与后台配置共用。
+// Enabled=false 时注册页不显示手机号输入框，也不校验；Required=true 时必填。
+type RegisterPhonePolicy struct {
+	Enabled  bool
+	Required bool
+}
+
+// GetRegisterPhonePolicy 读取注册手机号策略。
+// 默认：**显示且必填**（2026-10-11 粉丝需求——管理员要能一眼看出谁是谁）。
+// 超管可在后台「访问控制」里关掉显示、或改成选填。
+// Required 只在 Enabled 为真时有意义：隐藏了就不该再要求填。
+func GetRegisterPhonePolicy(db *gorm.DB) RegisterPhonePolicy {
+	p := RegisterPhonePolicy{Enabled: true, Required: true}
+	if v, err := sysconfig.GetConfig(db, "register_phone_enabled", 0); err == nil && v != "" {
+		p.Enabled = v == "true"
+	}
+	if v, err := sysconfig.GetConfig(db, "register_phone_required", 0); err == nil && v != "" {
+		p.Required = v == "true"
+	}
+	if !p.Enabled {
+		p.Required = false
+	}
+	return p
+}
+
+// normalizePhone 去掉手机号里的空格与常见分隔符（用户常写成 138-1234-5678）。
+func normalizePhone(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case ' ', '\t', '-', '·', '(', ')', '+':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// validatePhone 只在「填写了手机号」时校验格式，不在必填判断里；
+// 必填由 GetRegisterPhonePolicy 决定。允许 11 位手机号，也允许带国际区号的
+// 更长号码（如 8613812345678），因为这是联系信息而非账号标识。
+func validatePhone(phone string) error {
+	if phone == "" {
+		return nil
+	}
+	for _, r := range phone {
+		if r < '0' || r > '9' {
+			return ErrPhoneInvalid
+		}
+	}
+	if len(phone) < 7 || len(phone) > 15 {
+		return ErrPhoneInvalid
+	}
+	return nil
+}
+
+func Register(db *gorm.DB, username string, password string, phone string, jwtSecret string) (map[string]interface{}, error) {
 	var result map[string]interface{}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var userCount int64
@@ -113,6 +174,20 @@ func Register(db *gorm.DB, username string, password string, jwtSecret string) (
 		if err := validatePassword(password); err != nil {
 			return err
 		}
+
+		// 手机号策略只对「非首个账号」生效：第一个账号是实例初始化的人，
+		// 那时还没有管理员能去后台改配置，强制必填会把人堵在门外。
+		phone = normalizePhone(phone)
+		if userCount > 0 {
+			policy := GetRegisterPhonePolicy(tx)
+			if policy.Enabled && policy.Required && phone == "" {
+				return ErrPhoneRequired
+			}
+		}
+		if err := validatePhone(phone); err != nil {
+			return err
+		}
+
 		hashedPassword, err := auth.HashPassword(password)
 		if err != nil {
 			return err
@@ -123,15 +198,34 @@ func Register(db *gorm.DB, username string, password string, jwtSecret string) (
 			role = "admin"
 		}
 
+		// v0.6.0：注册审核。开启 register_need_approval 时，新注册账号为
+		// 「待审核」（status=2）——可以登录，但业务接口全部 403，等管理员
+		// 审核通过（见 rental/approval.go 与 rental/ledger_api.go）。
+		// 首个用户是管理员（初始化实例的人），不设待审核，否则没人能审核。
+		status := 1
+		if userCount > 0 {
+			if needApproval, err := sysconfig.GetConfig(tx, "register_need_approval", 0); err == nil && needApproval == "true" {
+				status = 2
+			}
+		}
+
 		user := database.User{
 			Username:    username,
 			Password:    hashedPassword,
+			Phone:       phone,
 			Role:        role,
-			Status:      1,
+			Status:      status,
 			APIKey:      auth.GenerateAPIKey(),
 			AuthVersion: 1,
 		}
 		if err := tx.Create(&user).Error; err != nil {
+			return err
+		}
+
+		// 让应用挂上自己的「用户创建后」元数据（如租房管理的默认台账归属）。
+		// 放在注册事务里：应用侧失败则整个注册回滚，不会留下「注册成功但
+		// 无所属台账」的半残账号。
+		if err := database.RunUserCreateHooks(tx, user.ID); err != nil {
 			return err
 		}
 
@@ -146,6 +240,9 @@ func Register(db *gorm.DB, username string, password string, jwtSecret string) (
 				"id":       user.ID,
 				"username": user.Username,
 				"role":     user.Role,
+				// v0.6.0：新注册账号可能是「待审核」（status=2），前端需据此
+				// 直接显示「等待审核」页，而不是进去一堆 403。
+				"status": user.Status,
 			},
 		}
 		return nil
@@ -159,7 +256,11 @@ func Login(db *gorm.DB, username string, password string, passwordMd5 string, jw
 		return nil, fmt.Errorf("用户名或密码错误")
 	}
 
-	if user.Status != 1 {
+	// v0.6.0：允许「待审核」（status=2）登录——登录本身不报错，否则用户会
+	// 误以为注册失败而反复重试；业务接口由 middleware.RequireAuth 的待审核
+	// 门禁拦下（403 + 明确提示），前端据 user.status 渲染「等待审核」页。
+	// status=0（停用）仍然一律拒绝。
+	if user.Status != 1 && user.Status != 2 {
 		// Generic error — masking disabled accounts as "wrong credentials"
 		// prevents username enumeration via response inspection.
 		return nil, fmt.Errorf("用户名或密码错误")
@@ -201,6 +302,8 @@ func Login(db *gorm.DB, username string, password string, passwordMd5 string, jw
 			"id":       user.ID,
 			"username": user.Username,
 			"role":     user.Role,
+			// v0.6.0：前端据 status 渲染「等待审核」页（2=待审核）。
+			"status": user.Status,
 		},
 	}, nil
 }
@@ -321,12 +424,29 @@ func BindFnOSAccount(db *gorm.DB, identity FnOSIdentity, username, password, mod
 			if userCount == 0 {
 				role = "admin"
 			}
-			user = database.User{Username: username, Password: hashedPassword, Role: role, Status: 1, APIKey: auth.GenerateAPIKey(), AuthVersion: 1}
+			// v0.6.0：飞牛注册通道同样遵守「注册需审核」开关，否则从 NAS 一侧
+			// 注册就能绕过审核直接拿到业务数据（安全口子）。首个用户是管理员
+			// （初始化实例的人），不设待审核。
+			status := 1
+			if userCount > 0 {
+				if needApproval, err := sysconfig.GetConfig(tx, "register_need_approval", 0); err == nil && needApproval == "true" {
+					status = 2
+				}
+			}
+			user = database.User{Username: username, Password: hashedPassword, Role: role, Status: status, APIKey: auth.GenerateAPIKey(), AuthVersion: 1}
 			if err := tx.Create(&user).Error; err != nil {
 				return err
 			}
+			if err := database.RunUserCreateHooks(tx, user.ID); err != nil {
+				return err
+			}
 		case "bind":
-			if err := tx.Where("username = ?", username).First(&user).Error; err != nil || user.Status != 1 {
+			// v0.6.0：允许「待审核」（2）账号绑定——绑定只是把这个 NAS 身份与
+			// 已有应用账号关联，不等于获得业务权限（待审核仍旧处处 403）。
+			// 只拒停用（0）。若这里只认 1，用户在等待审核期间会发现自己的
+			// NAS 账号「绑不上」，以为是绑定功能坏了。
+			if err := tx.Where("username = ?", username).First(&user).Error; err != nil ||
+				(user.Status != 1 && user.Status != 2) {
 				return fmt.Errorf("用户名或密码错误")
 			}
 			verified, needsRehash := verifyStoredPassword(user.Password, password, "")
@@ -431,6 +551,10 @@ type UserResponse struct {
 	Role      string `json:"role"`
 	Status    int    `json:"status"`
 	CreatedAt string `json:"created_at"`
+	// Phone 是注册时填的手机号（只作联系/认人用途）。2026-10-11 用户反馈：
+	// 手机号默认必填，却在任何界面都看不到，等于白收——现在随用户列表下发，
+	// 管理后台的用户列表与「等待审核」列表都能看到。
+	Phone string `json:"phone"`
 }
 
 func GetAllUsers(db *gorm.DB, page int, pageSize int, search string) ([]UserResponse, int64, error) {
@@ -459,6 +583,7 @@ func GetAllUsers(db *gorm.DB, page int, pageSize int, search string) ([]UserResp
 			Role:      u.Role,
 			Status:    u.Status,
 			CreatedAt: u.CreatedAt.Format("2006-01-02 15:04:05"),
+			Phone:     u.Phone,
 		})
 	}
 
@@ -625,12 +750,20 @@ func CheckAuth(db *gorm.DB, userID uint, requireLogin string) map[string]interfa
 
 	if userID > 0 {
 		var user database.User
-		if err := db.First(&user, userID).Error; err == nil && user.Status == 1 {
+		// v0.6.0：待审核（status=2）也算「已认证」——他确实拿着有效凭证登录了，
+		// 只是没有业务权限。若这里只认 1，前端刷新时 /auth/check 会返回
+		// authenticated:false，把待审核用户当成未登录而清 token、踢回登录页，
+		// 于是永远看不到「等待审核」页（2026-10-08 实测踩到：前端一度只能靠
+		// 白名单接口自行兜底恢复会话）。业务接口的拦截在
+		// middleware.RequireAuth 的待审核门禁，不在这里。
+		if err := db.First(&user, userID).Error; err == nil && user.Status != 0 {
 			result["authenticated"] = true
 			result["user"] = map[string]interface{}{
 				"id":       user.ID,
 				"username": user.Username,
 				"role":     user.Role,
+				// 前端据 status 判定是否跳「等待审核」页。
+				"status": user.Status,
 			}
 		}
 	}
@@ -652,6 +785,7 @@ func GetCurrentUser(db *gorm.DB, userID uint) (map[string]interface{}, error) {
 		"username":               user.Username,
 		"role":                   user.Role,
 		"api_key":                user.APIKey,
+		"phone":                  user.Phone, // 个人资料页展示自己的手机号（只读）
 		"has_security_questions": hasQuestions,
 	}, nil
 }

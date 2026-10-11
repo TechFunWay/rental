@@ -1,7 +1,7 @@
 <template>
   <AuthShell title="登录" :subtitle="fnosBindingRequired ? '登录已有应用账号并绑定当前飞牛 NAS 用户' : '输入账号信息以访问控制台'">
-    <form @submit.prevent="handleLogin" class="space-y-5">
-      <div v-if="fnosBindingRequired" class="rounded-2xl border border-brand-400/30 bg-brand-400/10 px-5 py-4 text-sm leading-6 text-white/85">
+    <form @submit.prevent="handleLogin" class="space-y-3 sm:space-y-5">
+      <div v-if="fnosBindingRequired" class="rounded-xl sm:rounded-2xl border border-brand-400/30 bg-brand-400/10 px-3.5 py-2.5 sm:px-5 sm:py-4 text-xs sm:text-sm leading-5 sm:leading-6 text-white/85">
         当前飞牛 NAS 用户 <span class="font-semibold text-brand-200">{{ fnosUsername || '已登录用户' }}</span> 尚未绑定。
         系统中已有应用账号，请登录现有账号；验证成功后会自动完成绑定，并继续使用原账号中的数据与设置。
       </div>
@@ -22,7 +22,7 @@
       </AuthField>
 
       <transition enter-active-class="transition duration-200" enter-from-class="opacity-0 -translate-y-1" leave-active-class="transition duration-150" leave-to-class="opacity-0">
-        <div v-if="errorMsg" class="flex items-center gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/25 rounded-xl px-3.5 py-2.5">
+        <div v-if="errorMsg" class="flex items-center gap-2 text-xs sm:text-sm text-red-300 bg-red-500/10 border border-red-500/25 rounded-xl px-3 py-2 sm:px-3.5 sm:py-2.5">
           <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86a2 2 0 001.74-3L13.74 4a2 2 0 00-3.48 0L3.34 16a2 2 0 001.73 3z"/></svg>
           {{ errorMsg }}
         </div>
@@ -33,7 +33,7 @@
         {{ loading ? (fnosBindingRequired ? '登录并绑定中...' : '登录中...') : (fnosBindingRequired ? '登录并绑定' : '登录') }}
       </button>
 
-      <button v-if="fnosEnabled" type="button" :disabled="loading" @click="handleFnOSLogin" class="w-full min-h-12 inline-flex items-center justify-center rounded-xl border border-white/15 bg-transparent px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300/70 disabled:cursor-not-allowed disabled:opacity-60">
+      <button v-if="fnosEnabled" type="button" :disabled="loading" @click="handleFnOSLogin" class="w-full min-h-11 sm:min-h-12 inline-flex items-center justify-center rounded-xl border border-white/15 bg-transparent px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-semibold text-white transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300/70 disabled:cursor-not-allowed disabled:opacity-60">
         {{ loading ? '正在获取飞牛账号…' : '使用飞牛 NAS 登录' }}
       </button>
     </form>
@@ -41,17 +41,17 @@
     <Teleport to="body">
       <transition enter-active-class="transition duration-200" enter-from-class="opacity-0" leave-active-class="transition duration-150" leave-to-class="opacity-0">
         <div v-if="showFnOSConfirm" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 px-4 backdrop-blur-sm" @click.self="closeFnOSConfirm">
-          <section role="dialog" aria-modal="true" aria-labelledby="fnos-confirm-title" class="w-full max-w-md rounded-3xl border border-white/15 bg-[#171827] p-6 text-white shadow-2xl sm:p-8">
-            <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 to-violet-500 text-2xl font-bold shadow-lg shadow-brand-500/25">
+          <section role="dialog" aria-modal="true" aria-labelledby="fnos-confirm-title" class="w-full max-w-md rounded-2xl sm:rounded-3xl border border-white/15 bg-[#171827] p-5 text-white shadow-2xl sm:p-8">
+            <div class="mx-auto flex h-12 w-12 sm:h-16 sm:w-16 items-center justify-center rounded-xl sm:rounded-2xl bg-gradient-to-br from-brand-500 to-violet-500 text-xl sm:text-2xl font-bold shadow-lg shadow-brand-500/25">
               {{ fnosConfirmUsername.slice(0, 1) || '飞' }}
             </div>
-            <h2 id="fnos-confirm-title" class="mt-5 text-center text-2xl font-bold">确认使用飞牛 NAS 登录</h2>
-            <p class="mt-2 text-center text-sm leading-6 text-white/65">“SmallGo”正在请求使用下面的飞牛 NAS 账号登录</p>
-            <div class="mt-6 flex items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-4">
+            <h2 id="fnos-confirm-title" class="mt-3 sm:mt-5 text-center text-lg sm:text-2xl font-bold">确认使用飞牛 NAS 登录</h2>
+            <p class="mt-1.5 sm:mt-2 text-center text-xs sm:text-sm leading-5 sm:leading-6 text-white/65">“SmallGo”正在请求使用下面的飞牛 NAS 账号登录</p>
+            <div class="mt-4 sm:mt-6 flex items-center justify-center gap-3 rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-3 sm:py-4">
               <span class="flex h-10 w-10 items-center justify-center rounded-full bg-brand-400/25 font-semibold text-brand-100">{{ fnosConfirmUsername.slice(0, 1) || '飞' }}</span>
               <span class="font-semibold">{{ fnosConfirmUsername || '当前飞牛 NAS 用户' }}</span>
             </div>
-            <button type="button" :disabled="loading" @click="confirmFnOSLogin" class="btn-premium mt-6">
+            <button type="button" :disabled="loading" @click="confirmFnOSLogin" class="btn-premium mt-4 sm:mt-6">
               {{ loading ? '正在登录…' : '确认登录' }}
             </button>
             <button type="button" :disabled="loading" @click="switchFnOSAccount" class="mt-3 w-full rounded-xl px-4 py-3 text-sm font-semibold text-brand-200 transition-colors hover:bg-white/[0.06] hover:text-brand-100 disabled:opacity-60">
@@ -75,6 +75,7 @@ import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { bindFnOSAccount, getFnOSIdentity, login, fnosLogin } from '../api/auth'
 import { useAuthStore } from '../stores/auth'
+import { useLedgerStore } from '../stores/ledger'
 import AuthShell from '../components/auth/AuthShell.vue'
 import AuthField from '../components/auth/AuthField.vue'
 
@@ -100,9 +101,7 @@ async function handleLogin() {
       ? await bindFnOSAccount('bind', username.value, password.value)
       : await login(username.value, password.value)
     if (res.data?.code === 0) {
-      authStore.setToken(res.data.data.token)
-      authStore.setUser(res.data.data.user)
-      router.push('/admin')
+      await enterAfterAuth(res.data.data?.token, res.data.data?.user)
     } else {
       errorMsg.value = res.data?.message || '登录失败'
     }
@@ -111,6 +110,22 @@ async function handleLogin() {
   } finally {
     loading.value = false
   }
+}
+
+// enterAfterAuth 登录成功后的统一去向：先拿到台账列表（ledger store 依赖
+// 登录态，必须在 setToken/setUser 之后拉），再按账号状态分流——
+// status === 2（待审核）的用户只能看「等待审核」页，业务接口对他们一律 403，
+// 路由守卫也会把他们重定向到 /pending。
+async function enterAfterAuth(token?: string, user?: any) {
+  if (token) authStore.setToken(token)
+  if (user) authStore.setUser(user)
+  const ledgerStore = useLedgerStore()
+  await ledgerStore.load(true)
+  if (authStore.isPendingUser) {
+    router.push({ name: 'PendingApproval' })
+    return
+  }
+  router.push('/admin')
 }
 
 async function handleFnOSLogin() {
@@ -173,7 +188,7 @@ async function confirmFnOSLogin() {
     authStore.setToken(res.data.data.token)
     authStore.setUser(res.data.data.user)
     showFnOSConfirm.value = false
-    router.push('/admin')
+    await enterAfterAuth()
   } catch (err: any) {
     showFnOSConfirm.value = false
     errorMsg.value = err.response?.data?.message || '飞牛一键登录失败'

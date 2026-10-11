@@ -10,13 +10,21 @@
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">房间（在租）</label>
           <select
-            :value="readingBillId || readingRoomId"
+            :value="currentCandidateValue"
             class="input-field"
             :disabled="readingLoading || readingCandidates.length === 0"
             @change="onReadingPick($event)"
           >
             <option v-if="readingCandidates.length === 0" :value="0" disabled>暂无在租房间</option>
-            <option v-for="c in readingCandidates" :key="c.bill?.id ?? c.room.id" :value="c.bill?.id ?? c.room.id">
+            <!--
+              value 必须带类型前缀（bill:5 / room:5）：原先是 `c.bill?.id ?? c.room.id`，
+              把「账单 id」和「房间 id」塞进了同一个数值空间。两者是各自递增的两套 ID，
+              必然重叠——比如账单 5 属于 12 号房，而 5 号房还没建账，两项 value 都是 5。
+              用户选「5 号房」时 onReadingPick 会先按账单 id 命中 12 号房的账单，
+              于是带出**别的房间**的租户与费用（粉丝报的正是这个现象）。
+              加前缀后两种取值不可能相等，配对不再有歧义。
+            -->
+            <option v-for="c in readingCandidates" :key="c.bill?.id ?? c.room.id" :value="candidateValue(c)">
               {{ c.bill ? '✓ ' : '' }}{{ c.room.room_no }} · {{ c.bill?.tenant_name || c.room.current_tenants?.map((t) => t.name).join('、') || '—' }}
             </option>
           </select>
@@ -65,7 +73,7 @@
               <label class="block">
                 <span class="text-[11px] text-muted-foreground block sm:hidden">本月（吨，上月 {{ fmtRead(readingForm.water_last) }}）</span>
                 <span class="hidden text-[11px] text-muted-foreground">本月读数（吨）*</span>
-                <input v-model.number="readingForm.water_now" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                <input v-model.number="readingForm.water_now" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
               </label>
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">单价（元/吨）</span>
@@ -90,7 +98,7 @@
               <label class="block">
                 <span class="text-[11px] text-muted-foreground block sm:hidden">本月（{{ m.unit }}，上月 {{ fmtRead(readingForm[m.lastKey]) }}）</span>
                 <span class="hidden text-[11px] text-muted-foreground">本月读数（{{ m.unit }}）*</span>
-                <input v-model.number="readingForm[m.nowKey]" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                <input v-model.number="readingForm[m.nowKey]" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
               </label>
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">单价（元/{{ m.unit }}）</span>
@@ -122,7 +130,7 @@ import { toast } from '../utils/toast'
 import { defaultBilling, fetchBillingDefaults, meterUnit, type BillingDefaults } from '../utils/billing'
 import { cycleMonths, onBillSchedule } from '../utils/cycle'
 import {
-  createBill, fmtMoney, getBills, getRooms, updateBill,
+  createBill, fmtMoney, getAllBills, getAllRooms, updateBill,
   type Bill, type RoomView,
 } from '../api/rental'
 
@@ -227,15 +235,17 @@ async function loadReadingData() {
   readingLoading.value = true
   readingError.value = ''
   try {
-    // 同时取本账期与上一账期的账单：后者用于未建账房间预览"上月读数"（与后端 prefillReadings 同口径）
-    const [billsRes, prevRes, roomsRes] = await Promise.all([
-      getBills({ page: 1, pageSize: 200, period: readingPeriod.value }),
-      getBills({ page: 1, pageSize: 200, period: prevPeriod(readingPeriod.value) }),
-      getRooms({ page: 1, pageSize: 200, status: 'occupied' }),
+    // 同时取本账期与上一账期的账单：后者用于未建账房间预览"上月读数"（与后端 prefillReadings 同口径）。
+    // 用 getAllBills / getAllRooms 跨页拉全：服务端 pageSize 上限是 100，
+    // 直接写 pageSize: 200 会被静默截断，房间多时列表缺房、配对串房。
+    const [bills, prevBills, rooms] = await Promise.all([
+      getAllBills({ period: readingPeriod.value }),
+      getAllBills({ period: prevPeriod(readingPeriod.value) }),
+      getAllRooms({ status: 'occupied' }),
     ])
-    readingBills.value = billsRes.data?.code === 0 ? billsRes.data.data.items || [] : []
-    readingPrevBills.value = prevRes.data?.code === 0 ? prevRes.data.data.items || [] : []
-    readingRooms.value = roomsRes.data?.code === 0 ? roomsRes.data.data.items || [] : []
+    readingBills.value = bills
+    readingPrevBills.value = prevBills
+    readingRooms.value = rooms
   } catch {
     readingBills.value = []
     readingPrevBills.value = []
@@ -329,10 +339,36 @@ async function onPeriodChange() {
   selectReadingCandidate(first)
 }
 
-// 下拉按 id 分发：先按账单 id 找（已建账），再按房间 id 找（未建账）
+// candidateValue 生成下拉选项的取值：带类型前缀，避免「账单 id」与「房间 id」
+// 数值空间重叠导致串房（详见模板里的注释）。
+function candidateValue(c: ReadingCandidate): string {
+  return c.bill ? `bill:${c.bill.id}` : `room:${c.room.id}`
+}
+
+// 下拉当前选中项的 value，口径与 option 的 :value 必须完全一致——
+// 原先这里也是 `readingBillId || readingRoomId`，与选项同一个坑：
+// 选「未建账的 5 号房」时，若恰好存在账单 5，下拉会高亮成 12 号房。
+const currentCandidateValue = computed(() => {
+  if (readingBillId.value > 0) return `bill:${readingBillId.value}`
+  if (readingRoomId.value > 0) return `room:${readingRoomId.value}`
+  return ''
+})
+
+// 下拉按前缀精确分发：bill: → 账单 id，room: → 房间 id。
+// 兼容解析纯数字（老值/外部调用），此时先按账单 id 找、再按房间 id 找。
 function onReadingPick(e: Event) {
-  const v = Number((e.target as HTMLSelectElement).value)
-  const c = readingCandidates.value.find((x) => (x.bill ? x.bill.id === v : x.room.id === v))
+  const raw = (e.target as HTMLSelectElement).value
+  let c: ReadingCandidate | undefined
+  if (raw.startsWith('bill:')) {
+    const id = Number(raw.slice(5))
+    c = readingCandidates.value.find((x) => x.bill?.id === id)
+  } else if (raw.startsWith('room:')) {
+    const id = Number(raw.slice(5))
+    c = readingCandidates.value.find((x) => !x.bill && x.room.id === id)
+  } else {
+    const id = Number(raw)
+    c = readingCandidates.value.find((x) => (x.bill ? x.bill.id === id : x.room.id === id))
+  }
   selectReadingCandidate(c ?? null)
   readingError.value = ''
 }

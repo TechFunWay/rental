@@ -229,7 +229,7 @@ func TestQuarterlyBilling(t *testing.T) {
 // （v0.2.3 起这些设置挂在租户上）；tenantName 为空表示空置房。
 func (e *testEnv) seedPayRoom(roomNo, tenantName, cycle string, payDay, remindDays int) *Room {
 	e.t.Helper()
-	room := Room{UserID: 1, RoomNo: roomNo, DefaultRent: 1000}
+	room := Room{UserID: 1, LedgerID: e.personalLedger, RoomNo: roomNo, DefaultRent: 1000}
 	if err := e.db.Create(&room).Error; err != nil {
 		e.t.Fatalf("seed pay room: %v", err)
 	}
@@ -242,7 +242,7 @@ func (e *testEnv) seedPayRoom(roomNo, tenantName, cycle string, payDay, remindDa
 // seedBillingTenant 直接落库一名在租租户并写入计费与缴费设置（绕过 API）。
 func (e *testEnv) seedBillingTenant(roomID uint, name, cycle string, payDay, remindDays int) *Tenant {
 	e.t.Helper()
-	tenant := Tenant{UserID: 1, RoomID: roomID, Name: name, Active: true,
+	tenant := Tenant{UserID: 1, LedgerID: e.personalLedger, RoomID: roomID, Name: name, Active: true,
 		PayCycle: cycle, PayDay: payDay, RemindDays: remindDays}
 	if err := e.db.Create(&tenant).Error; err != nil {
 		e.t.Fatalf("seed billing tenant: %v", err)
@@ -294,7 +294,7 @@ func TestNextPaymentDue(t *testing.T) {
 
 	// 季付房、9 月账单已收清 → 下一期 12 月。
 	qroom := env.seedPayRoom("A2", "乙", payCycleQuarterly, 5, 3)
-	env.db.Create(&Bill{UserID: 1, RoomID: qroom.ID, Period: "2026-09", RoomNo: "A2",
+	env.db.Create(&Bill{UserID: 1, LedgerID: qroom.LedgerID, RoomID: qroom.ID, Period: "2026-09", RoomNo: "A2",
 		PayCycle: payCycleQuarterly, Rent: 3000, TotalAmount: 3000, Status: billStatusPaid})
 	item = nextPaymentDue(env.db, qroom, env.billingOf(qroom), today)
 	if item.Period != "2026-12" || item.DueDate != "2026-12-05" || item.Months != 3 {
@@ -337,7 +337,7 @@ func TestComputePaymentDueWindow(t *testing.T) {
 
 	// 逾期恒提醒，即使提醒天数是 0。
 	overdue := env.seedPayRoom("B2", "逾期", payCycleMonthly, 1, 0)
-	env.db.Create(&Bill{UserID: 1, RoomID: overdue.ID, Period: "2026-09", RoomNo: "B2",
+	env.db.Create(&Bill{UserID: 1, LedgerID: overdue.LedgerID, RoomID: overdue.ID, Period: "2026-09", RoomNo: "B2",
 		Rent: 1000, TotalAmount: 1000, Status: billStatusUnpaid})
 	got = computePaymentDue(env.db, today)
 	if len(got) != 2 || got[0].RoomNo != "B2" || got[0].DaysLeft >= 0 {

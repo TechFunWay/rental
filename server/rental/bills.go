@@ -15,12 +15,15 @@ import (
 )
 
 func setupBillRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	read := requireAccess(db, AccessReadonly)
-	edit := requireAccess(db, AccessEdit)
-	full := requireAccess(db, AccessFull)
-	api.GET("/rental/bills", read, handleBillList(db))
-	api.GET("/rental/bills/periods", read, handleBillPeriods(db))
-	api.GET("/rental/bills/:id", read, handleBillDetail(db))
+	// 读（列表/详情/单据）用并集口径；写（开票/生成/编辑/收款/删除）用单台账
+	// 口径——开票与收款必须落在本次请求指定的台账里并达到档位（详见 rooms.go）。
+	view := requireModule(db, ModuleBills, PermView)
+	edit := requireLedgerModule(db, ModuleBills, PermEdit)
+	full := requireLedgerModule(db, ModuleBills, PermFull)
+	api.GET("/rental/bills", view, handleBillList(db))
+	api.GET("/rental/bills/periods", view, handleBillPeriods(db))
+	api.GET("/rental/bills/receipts", view, handleBillReceipts(db))
+	api.GET("/rental/bills/:id", view, handleBillDetail(db))
 	api.POST("/rental/bills", edit, handleBillCreate(db))
 	api.POST("/rental/bills/generate", edit, handleBillGenerate(db))
 	api.PUT("/rental/bills/:id", edit, handleBillUpdate(db))
@@ -30,26 +33,46 @@ func setupBillRoutes(api *gin.RouterGroup, db *gorm.DB) {
 
 // billRequest 是编辑账单的入参。费用三项（water_fee 等）与合计由服务端
 // 按读数与单价重算，客户端传入值一律忽略，保证口径唯一。
-// water_mode 为空表示保持账单现有计费方式（按吨 / 包月）。
+//
+// **字段一律用指针，「未传」= 保留原值**（2026-10-08 改）：
+// 编辑账单是**部分更新**，客户端只想改读数时不该连带清掉别的字段。
+// 此前用值类型，「未传」会被解析成零值直接覆盖，曾导致：
+//   - 只改读数 → 水价/电价被清成 0（水费凭空归零）；
+//   - 只改读数 → 已收金额被清成 0，账单变「未收」，**但收款流水还在**——
+//     钱收了、流水记着、账单却显示欠款，欠缴统计凭空多出欠款。
+//
+// 指针能区分「显式传 0」与「没传」，两种意图都表达得出来。
+//
+// 特例：RoomID / Period 是定位与账期，必须显式给（binding:required）。
 type billRequest struct {
-	RoomID        uint    `json:"room_id" binding:"required"`
-	Period        string  `json:"period" binding:"required"`
-	TenantName    string  `json:"tenant_name"`
-	Rent          float64 `json:"rent"`
-	WaterLast     float64 `json:"water_last"`
-	WaterNow      float64 `json:"water_now"`
-	ElecLast      float64 `json:"elec_last"`
-	ElecNow       float64 `json:"elec_now"`
-	GasLast       float64 `json:"gas_last"`
-	GasNow        float64 `json:"gas_now"`
-	WaterMode     string  `json:"water_mode"`
-	WaterPrice    float64 `json:"water_price"`
-	ElecPrice     float64 `json:"elec_price"`
-	GasPrice      float64 `json:"gas_price"`
-	SanitationFee float64 `json:"sanitation_fee"`
-	ManagementFee float64 `json:"management_fee"`
-	PaidAmount    float64 `json:"paid_amount"`
-	Remark        string  `json:"remark"`
+	RoomID        uint     `json:"room_id" binding:"required"`
+	Period        string   `json:"period" binding:"required"`
+	TenantName    *string  `json:"tenant_name"`
+	Rent          *float64 `json:"rent"`
+	WaterLast     *float64 `json:"water_last"`
+	WaterNow      *float64 `json:"water_now"`
+	ElecLast      *float64 `json:"elec_last"`
+	ElecNow       *float64 `json:"elec_now"`
+	GasLast       *float64 `json:"gas_last"`
+	GasNow        *float64 `json:"gas_now"`
+	WaterMode     string   `json:"water_mode"`
+	WaterPrice    *float64 `json:"water_price"`
+	ElecPrice     *float64 `json:"elec_price"`
+	GasPrice      *float64 `json:"gas_price"`
+	SanitationFee *float64 `json:"sanitation_fee"`
+	ManagementFee *float64 `json:"management_fee"`
+	// DepositFee 押金：只在首张账单上有值。传了才覆盖，不传原样保留
+	// ——否则「只改读数」的编辑会把押金清零。
+	DepositFee *float64 `json:"deposit_fee"`
+	PaidAmount *float64 `json:"paid_amount"`
+	Remark     *string  `json:"remark"`
+}
+
+// setIf 传了才覆盖（部分更新的统一写法，避免到处写 nil 判断）。
+func setIf[T any](dst *T, src *T) {
+	if src != nil {
+		*dst = *src
+	}
 }
 
 // recalc 按统一口径重算费用与合计，并联动缴纳状态。PaidAt 由调用方维护。
@@ -65,7 +88,7 @@ func (b *Bill) recalc() {
 	b.WaterFee = excludedAmount(b.waterFee(), excluded[feeKeyWater])
 	b.ElecFee = excludedAmount(meterFee(b.ElecLast, b.ElecNow, b.ElecPrice), excluded[feeKeyElec])
 	b.GasFee = excludedAmount(meterFee(b.GasLast, b.GasNow, b.GasPrice), excluded[feeKeyGas])
-	b.TotalAmount = round2(b.Rent + b.WaterFee + b.ElecFee + b.GasFee + b.SanitationFee + b.ManagementFee + b.ExtraAmount)
+	b.TotalAmount = round2(b.Rent + b.WaterFee + b.ElecFee + b.GasFee + b.SanitationFee + b.ManagementFee + b.DepositFee + b.ExtraAmount)
 	b.Status = billStatus(b.TotalAmount, b.PaidAmount)
 }
 
@@ -115,19 +138,27 @@ func defaultPrices(db *gorm.DB) (water, elec, gas float64) {
 }
 
 // activeTenantNames 返回房间在租租户姓名（多人顿号连接，作为账单快照）。
-func activeTenantNames(db *gorm.DB, roomID uint) string {
+// ledgerID 非 0 时限定同台账，杜绝跨台账孤儿租户进了账单抬头。
+func activeTenantNames(db *gorm.DB, roomID uint, ledgerID uint) string {
 	names := make([]string, 0, 4)
-	db.Model(&Tenant{}).Where("room_id = ? AND active = ?", roomID, true).
-		Order("id ASC").Limit(20).Pluck("name", &names)
+	q := db.Model(&Tenant{}).Where("room_id = ? AND active = ?", roomID, true)
+	if ledgerColumnReady(db, "tenants") {
+		q = q.Where("org_id = ?", ledgerID)
+	}
+	q.Order("id ASC").Limit(20).Pluck("name", &names)
 	return strings.Join(names, "、")
 }
 
 // prefillReadings 计算开票时的"上月读数"：优先取上一期账单的本月读数，
 // 无历史账单则取房间底数，再无则为 0。
+// 上一期账单只在同台账内找：别台账的同房号账单不能拿来当读数衔接。
 func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast float64) {
 	var prev Bill
-	err := db.Where("room_id = ?", room.ID).
-		Order("period DESC").First(&prev).Error
+	q := db.Where("room_id = ?", room.ID)
+	if ledgerColumnReady(db, "bills") {
+		q = q.Where("org_id = ?", room.LedgerID)
+	}
+	err := q.Order("period DESC").First(&prev).Error
 	if err == nil {
 		return prev.WaterNow, prev.ElecNow, prev.GasNow
 	}
@@ -164,12 +195,15 @@ func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 		months = 0
 	}
 	b := &Bill{
-		UserID:        room.UserID,
+		UserID: room.UserID,
+		// 账单归属随房间：派生账单（一键生成/开票预填）也不会跨台账。
+		LedgerID:      room.LedgerID,
 		RoomID:        room.ID,
 		Period:        period,
 		RoomNo:        room.RoomNo,
-		TenantName:    activeTenantNames(db, room.ID),
+		TenantName:    activeTenantNames(db, room.ID, room.LedgerID),
 		Rent:          round2(room.DefaultRent * months),
+		DepositFee:    firstBillDeposit(db, room, period),
 		WaterLast:     waterLast,
 		WaterNow:      waterLast,
 		ElecLast:      elecLast,
@@ -192,6 +226,43 @@ func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 	return b
 }
 
+// firstBillDeposit 返回「本期该不该收押金、收多少」。
+//
+// 规则（2026-10-11 粉丝需求）：新租户入住第一次，押金要和房租在同一张账单里一起收。
+//   - 金额取该房在租租户的 Tenant.Deposit（没填或 0 → 不收）；
+//   - **该房在本台账内已有任何账单就不再收**——押金一辈子只收一次。
+//
+// 为什么判定是「已有任何账单」而不是「已有更早账期」：房东可能先开当月账单、
+// 事后又补开上个月的老账期。若只看「更早」，补开的那张会被当成首张，押金再收一遍
+// （实测踩到：先开 2026-10，再补 2026-09，两张各收一次 2000）。
+// 所以只要该房已有账单记录，后续无论开哪个账期都不再收押金。
+//
+// 刻意不做的事：不给已存在的历史账单补收押金（历史账单原样不动）。
+func firstBillDeposit(db *gorm.DB, room *Room, period string) float64 {
+	var existing int64
+	q := db.Model(&Bill{}).Where("room_id = ?", room.ID)
+	if ledgerColumnReady(db, "bills") {
+		q = q.Where("org_id = ?", room.LedgerID)
+	}
+	if err := q.Count(&existing).Error; err != nil || existing > 0 {
+		return 0
+	}
+	return activeRoomDeposit(db, room)
+}
+
+// activeRoomDeposit 该房在租租户的押金：多人同住取第一位的押金（与
+// activeTenantNames / effectiveRoomBilling 同口径：按 id 升序取第一个非零值）。
+// 押金是"整套房"的钱，不按人头累加。
+func activeRoomDeposit(db *gorm.DB, room *Room) float64 {
+	tenants := activeRoomTenants(db, room.ID, roomLedgerRef(room))
+	for _, t := range tenants {
+		if t.Deposit > 0 {
+			return round2(t.Deposit)
+		}
+	}
+	return 0
+}
+
 // applyCustomFees 把启用的自定义收费项目并入账单（金额合计进 ExtraAmount），
 // 返回明细行供落库。在建账/生成的读数覆盖处理完成后、最终 recalc 前调用。
 func applyCustomFees(db *gorm.DB, room *Room, bill *Bill) []BillItem {
@@ -210,8 +281,15 @@ func handleBillList(db *gorm.DB) gin.HandlerFunc {
 		// status=arrears 是"是否欠缴"的筛选别名（partial+unpaid）。
 		status := strings.TrimSpace(c.Query("status"))
 		keyword := strings.TrimSpace(c.Query("keyword"))
+		roomID := utils.Atoi(c.Query("room_id"), 0)
+		community := strings.TrimSpace(c.Query("community"))
 
-		query := db.Model(&Bill{})
+		// v0.6.0：只列本次请求可见台账内的账单。
+		query, empty := scopeLedger(db.Model(&Bill{}), c)
+		if empty {
+			response.SuccessPage(c, []Bill{}, 0, page, pageSize)
+			return
+		}
 		if period != "" {
 			query = query.Where("period = ?", period)
 		}
@@ -236,6 +314,14 @@ func handleBillList(db *gorm.DB) gin.HandlerFunc {
 			like := "%" + keyword + "%"
 			query = query.Where("room_no LIKE ? OR tenant_name LIKE ?", like, like)
 		}
+		if roomID > 0 {
+			query = query.Where("room_id = ?", roomID)
+		}
+		if community != "" {
+			// 按小区/村组筛账单：房源限定在可见台账内，避免跨台账同名小区串数据
+			query = query.Where("room_id IN (SELECT id FROM rooms WHERE community = ? AND org_id IN ?)",
+				community, visibleLedgerIDs(c))
+		}
 
 		var total int64
 		if err := query.Count(&total).Error; err != nil {
@@ -259,9 +345,82 @@ func handleBillList(db *gorm.DB) gin.HandlerFunc {
 func handleBillPeriods(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		periods := make([]string, 0)
-		db.Model(&Bill{}).
-			Distinct("period").Order("period DESC").Limit(36).Pluck("period", &periods)
+		// 账期下拉按可见台账收窄：别台账的账期不该出现在筛选器里。
+		pq, empty := scopeLedger(db.Model(&Bill{}), c)
+		if empty {
+			response.Success(c, periods)
+			return
+		}
+		pq.Distinct("period").Order("period DESC").Limit(36).Pluck("period", &periods)
 		response.Success(c, periods)
+	}
+}
+
+// handleBillReceipts 按账期区间批量取收费单据打印数据：单据抬头一份，
+// 每张账单附费用明细行（与账单详情同口径）。区间两端皆可省略；上限
+// 500 张，超出按「账期、房号」排序截断，前端提示分批打印。
+func handleBillReceipts(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		from, to := strings.TrimSpace(c.Query("from")), strings.TrimSpace(c.Query("to"))
+		if from != "" && !isValidPeriod(from) {
+			response.ErrorBadRequest(c, "起始账期格式应为 YYYY-MM")
+			return
+		}
+		if to != "" && !isValidPeriod(to) {
+			response.ErrorBadRequest(c, "截止账期格式应为 YYYY-MM")
+			return
+		}
+		query, empty := scopeLedger(db.Model(&Bill{}), c)
+		if empty {
+			response.Success(c, gin.H{"property": gin.H{"name": "", "contact": "", "note": ""}, "bills": []gin.H{}})
+			return
+		}
+		query = query.Order("period ASC, room_no ASC, id ASC").Limit(500)
+		if from != "" {
+			query = query.Where("period >= ?", from)
+		}
+		if to != "" {
+			query = query.Where("period <= ?", to)
+		}
+		bills := make([]Bill, 0)
+		if err := query.Find(&bills).Error; err != nil {
+			response.ErrorInternal(c, "查询账单失败")
+			return
+		}
+
+		rows := make([]gin.H, 0, len(bills))
+		for i := range bills {
+			bill := &bills[i]
+			items := make([]BillItem, 0)
+			// 明细按账单溯源即可保证归属；再按可见台账收窄是为了不让
+			// 历史脏数据（跨台账孤儿明细）出现在单据里。
+			iq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
+			iq.Order("id ASC").Find(&items)
+			_, paids := billItemChargesAndPaids(db, c, bill)
+			itemRows := make([]gin.H, 0, len(items))
+			for _, it := range items {
+				itemRows = append(itemRows, gin.H{
+					"key": it.FeeKey, "name": it.Name, "kind": it.Kind,
+					"amount": it.Amount, "detail": it.Detail, "cycle": it.Cycle,
+					"paid":    paids[it.FeeKey],
+					"arrears": round2(it.Amount - paids[it.FeeKey]),
+				})
+			}
+			rows = append(rows, gin.H{"bill": bill, "items": itemRows})
+		}
+
+		// 抬头信息按**台账**取（管理员维护；台账无覆盖时回退系统级），整批共用
+		// 一份——不同房东的出租方名称/电话本就不同。整批账单同属当前选中台账，
+		// 取第一张的归属即可。
+		headerLedger := LegacySharedLedgerID
+		if len(bills) > 0 {
+			headerLedger = bills[0].LedgerID
+		}
+		name, contact, note := receiptHeaderFor(db, headerLedger)
+		response.Success(c, gin.H{
+			"property": gin.H{"name": name, "contact": contact, "note": note},
+			"bills":    rows,
+		})
 	}
 }
 
@@ -272,27 +431,29 @@ func handleBillDetail(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		// 抬头信息是系统级共享设置（管理员维护）。
-		name, _ := sysconfig.GetConfig(db, "rental_property_name", 0)
-		contact, _ := sysconfig.GetConfig(db, "rental_contact", 0)
-		note, _ := sysconfig.GetConfig(db, "rental_receipt_note", 0)
+		// 抬头信息按台账取（无覆盖时回退系统级），与该账单归属一致。
+		name, contact, note := receiptHeaderFor(db, bill.LedgerID)
 
 		items := make([]BillItem, 0)
-		db.Where("bill_id = ?", bill.ID).Order("id ASC").Find(&items)
-		charges, paids := billItemChargesAndPaids(db, bill)
+		// 明细与收款都挂在账单下，账单的台账校验已过；仍按可见台账收窄，
+		// 避免跨台账的孤儿明细/流水混进详情。
+		iq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
+		iq.Order("id ASC").Find(&items)
+		charges, paids := billItemChargesAndPaids(db, c, bill)
 		itemRows := make([]gin.H, 0, len(items))
 		for _, it := range items {
 			itemRows = append(itemRows, gin.H{
 				"key": it.FeeKey, "name": it.Name, "kind": it.Kind,
 				"amount": it.Amount, "detail": it.Detail, "cycle": it.Cycle,
-				"paid": paids[it.FeeKey],
+				"paid":    paids[it.FeeKey],
 				"arrears": round2(it.Amount - paids[it.FeeKey]),
 			})
 		}
 		_ = charges
 		payRows := make([]gin.H, 0)
 		payments := make([]Payment, 0)
-		db.Where("bill_id = ?", bill.ID).Order("paid_at DESC, id DESC").Find(&payments)
+		pq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
+		pq.Order("paid_at DESC, id DESC").Find(&payments)
 		for _, p := range payments {
 			payRows = append(payRows, gin.H{
 				"id": p.ID, "paid_at": p.PaidAt, "amount": p.Amount,
@@ -300,8 +461,8 @@ func handleBillDetail(db *gorm.DB) gin.HandlerFunc {
 			})
 		}
 		response.Success(c, gin.H{
-			"bill": bill,
-			"items": itemRows,
+			"bill":     bill,
+			"items":    itemRows,
 			"payments": payRows,
 			"property": gin.H{
 				"name":    name,
@@ -345,17 +506,34 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requireLedgerWrite(db, c, room.LedgerID, ModuleBills, PermEdit) {
+			return
+		}
+		// 同房同月唯一是「按台账」的唯一：查重限定本次写入的台账，
+		// 别的台账有同房同月账单不该挡住建账。
+		writeLedger, ok := writeLedgerID(c)
+		if !ok {
+			response.ErrorBadRequest(c, "请指定要操作的台账（ledger_id）")
+			return
+		}
+		// 房间台账必须就是本次写入的台账：否则带 ledger_id=B 开 A 台账房间的票，
+		// 会把账单写进 B 台账（或反之），绕过台账边界。
+		if room.LedgerID != writeLedger {
+			response.ErrorNotFound(c, "房源不存在")
+			return
+		}
 		var existing int64
-		db.Model(&Bill{}).Where("room_id = ? AND period = ?",
-			req.RoomID, req.Period).Count(&existing)
+		db.Model(&Bill{}).Where("room_id = ? AND period = ? AND org_id = ?",
+			req.RoomID, req.Period, writeLedger).Count(&existing)
 		if existing > 0 {
 			response.ErrorBadRequest(c, "该房间本月账单已存在")
 			return
 		}
 
-		// UserID 录入人戳：谁开的票记谁。
+		// UserID 录入人戳：谁开的票记谁；LedgerID 继承房间，杜绝跨台账孤儿账单。
 		bill := newBillFromRoom(db, room, req.Period)
 		bill.UserID = currentUserID(c)
+		bill.LedgerID = room.LedgerID
 		if req.WaterNow != nil {
 			bill.WaterNow = *req.WaterNow
 		}
@@ -441,10 +619,17 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		// 只为有在租租户的房间开票；空置房间不产生账单。
+		// v0.6.0：房间与在租租户都限定在本次写入的台账内——一键生成只影响
+		// 一个台账，不能顺手把别台账的账单也生成出来。
+		writeLedger, ok := writeLedgerID(c)
+		if !ok {
+			response.ErrorBadRequest(c, "请指定要操作的台账（ledger_id）")
+			return
+		}
 		rooms := make([]Room, 0)
 		if err := db.Where(
-			"id IN (SELECT room_id FROM tenants WHERE active = ?)",
-			true).Order("room_no ASC").Find(&rooms).Error; err != nil {
+			"org_id = ? AND id IN (SELECT room_id FROM tenants WHERE active = ? AND org_id = ?)",
+			writeLedger, true, writeLedger).Order("room_no ASC").Find(&rooms).Error; err != nil {
 			response.ErrorInternal(c, "查询房源失败")
 			return
 		}
@@ -452,8 +637,8 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 		created, skipped := 0, 0
 		for i := range rooms {
 			var existing int64
-			db.Model(&Bill{}).Where("room_id = ? AND period = ?",
-				rooms[i].ID, req.Period).Count(&existing)
+			db.Model(&Bill{}).Where("room_id = ? AND period = ? AND org_id = ?",
+				rooms[i].ID, req.Period, writeLedger).Count(&existing)
 			if existing > 0 {
 				skipped++
 				continue
@@ -465,7 +650,8 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 				continue
 			}
 			bill := newBillFromRoom(db, &rooms[i], req.Period)
-			bill.UserID = currentUserID(c) // 录入人戳
+			bill.UserID = currentUserID(c)    // 录入人戳
+			bill.LedgerID = rooms[i].LedgerID // 归属继承房间
 			customs := applyCustomFees(db, &rooms[i], bill)
 			bill.recalc()
 			if err := db.Create(bill).Error; err != nil {
@@ -489,6 +675,9 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requireLedgerWrite(db, c, bill.LedgerID, ModuleBills, PermEdit) {
+			return
+		}
 		var req billRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.ErrorBadRequest(c, "参数错误")
@@ -498,18 +687,35 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorBadRequest(c, "账期格式应为 YYYY-MM")
 			return
 		}
-		if req.PaidAmount < 0 {
+		if req.PaidAmount != nil && *req.PaidAmount < 0 {
 			response.ErrorBadRequest(c, "已收金额不能为负数")
 			return
 		}
 
+		// 部分更新：只覆盖客户端**显式传入**的字段，未传的一律保留原值。
 		bill.Period = req.Period
-		bill.TenantName = strings.TrimSpace(req.TenantName)
-		bill.Rent = req.Rent
-		bill.WaterLast, bill.WaterNow = req.WaterLast, req.WaterNow
-		bill.ElecLast, bill.ElecNow = req.ElecLast, req.ElecNow
-		bill.GasLast, bill.GasNow = req.GasLast, req.GasNow
-		// water_mode 未传则保持账单原有计费方式（包月/按吨），老客户端不受影响；
+		if req.TenantName != nil {
+			bill.TenantName = strings.TrimSpace(*req.TenantName)
+		}
+		setIf(&bill.Rent, req.Rent)
+		setIf(&bill.WaterLast, req.WaterLast)
+		setIf(&bill.WaterNow, req.WaterNow)
+		setIf(&bill.ElecLast, req.ElecLast)
+		setIf(&bill.ElecNow, req.ElecNow)
+		setIf(&bill.GasLast, req.GasLast)
+		setIf(&bill.GasNow, req.GasNow)
+		setIf(&bill.WaterPrice, req.WaterPrice)
+		setIf(&bill.ElecPrice, req.ElecPrice)
+		setIf(&bill.GasPrice, req.GasPrice)
+		setIf(&bill.SanitationFee, req.SanitationFee)
+		setIf(&bill.ManagementFee, req.ManagementFee)
+		// 押金：传了才覆盖。不传保留原值，保证「只改读数」不会把押金弄丢。
+		setIf(&bill.DepositFee, req.DepositFee)
+		if req.Remark != nil {
+			bill.Remark = *req.Remark
+		}
+
+		// water_mode 未传则保持账单原有计费方式（包月/按吨）；
 		// 传了非法值直接拒绝，避免被静默按"按吨"处理。
 		if v := strings.TrimSpace(req.WaterMode); v != "" {
 			mode := parseWaterMode(v)
@@ -517,29 +723,36 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 				response.ErrorBadRequest(c, "水费计费方式无效，应为按吨（meter）或包月（monthly）")
 				return
 			}
-			// 切换计费方式且没带金额时，按该房当前生效设置取新方式的金额：
-			// 与水费单位匹配，避免包月沿用元/吨单价（或反之）算出离谱水费。
-			if mode != normalizeWaterMode(bill.WaterMode) && req.WaterPrice <= 0 {
+			// 切换计费方式且没带金额（或带了 0）时，按该房当前生效设置取新方式的
+			// 金额：与水费单位匹配，避免包月沿用元/吨单价（或反之）算出离谱水费。
+			if mode != normalizeWaterMode(bill.WaterMode) &&
+				(req.WaterPrice == nil || *req.WaterPrice <= 0) {
 				var room Room
-				if err := db.First(&room, bill.RoomID).Error; err == nil {
-					req.WaterPrice = waterAmountForMode(db, &room, mode)
+				// 按账单所属台账取房间：别台账的同号房不能决定本账单的水价口径。
+				rq := db.Where("id = ?", bill.RoomID)
+				if ledgerColumnReady(db, "rooms") {
+					rq = rq.Where("org_id = ?", bill.LedgerID)
+				}
+				if err := rq.First(&room).Error; err == nil {
+					bill.WaterPrice = waterAmountForMode(db, &room, mode)
 				}
 			}
 			bill.WaterMode = mode
 		}
-		bill.WaterPrice, bill.ElecPrice, bill.GasPrice = req.WaterPrice, req.ElecPrice, req.GasPrice
-		bill.SanitationFee = req.SanitationFee
-		bill.ManagementFee = req.ManagementFee
-		bill.Remark = req.Remark
 
-		bill.PaidAmount = round2(req.PaidAmount)
-		if bill.PaidAmount > feeTolerance {
-			if bill.PaidAt == nil {
-				now := time.Now()
-				bill.PaidAt = &now
+		// 已收金额只在其被显式传入时改动，且连带维护 PaidAt。
+		// 未传时**必须**原样保留：否则「只改读数」会把已收清零，
+		// 而收款流水仍在——账单显示欠款、钱其实已收（见 billRequest 注释）。
+		if req.PaidAmount != nil {
+			bill.PaidAmount = round2(*req.PaidAmount)
+			if bill.PaidAmount > feeTolerance {
+				if bill.PaidAt == nil {
+					now := time.Now()
+					bill.PaidAt = &now
+				}
+			} else {
+				bill.PaidAt = nil
 			}
-		} else {
-			bill.PaidAt = nil
 		}
 		bill.recalc()
 
@@ -556,7 +769,11 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 // 自定义项目明细行保留原金额（编辑表单不含自定义项）。
 func syncBillItemsOnUpdate(db *gorm.DB, bill *Bill) {
 	customs := make([]BillItem, 0)
-	db.Where("bill_id = ? AND fee_key LIKE ?", bill.ID, "custom_%").Find(&customs)
+	cq := db.Where("bill_id = ? AND fee_key LIKE ?", bill.ID, "custom_%")
+	if ledgerColumnReady(db, "bill_items") {
+		cq = cq.Where("org_id = ?", bill.LedgerID)
+	}
+	cq.Find(&customs)
 	syncBillItems(db, bill, customs)
 }
 
@@ -568,10 +785,13 @@ func handleBillPay(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requireLedgerWrite(db, c, bill.LedgerID, ModuleBills, PermEdit) {
+			return
+		}
 		var req struct {
-			Amount float64       `json:"amount" binding:"required"`
-			Note   string        `json:"note"`
-			Items  []payItemReq  `json:"items"`
+			Amount float64      `json:"amount" binding:"required"`
+			Note   string       `json:"note"`
+			Items  []payItemReq `json:"items"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil || req.Amount <= 0 {
 			response.ErrorBadRequest(c, "收款金额必须大于 0")
@@ -582,7 +802,7 @@ func handleBillPay(db *gorm.DB) gin.HandlerFunc {
 		shares := make([]PaymentItem, 0, len(req.Items))
 		var shareSum float64
 		if len(req.Items) > 0 {
-			charges, paids := billItemChargesAndPaids(db, bill)
+			charges, paids := billItemChargesAndPaids(db, c, bill)
 			for _, it := range req.Items {
 				charge, okCharge := charges[it.Key]
 				if !okCharge || charge <= feeTolerance {
@@ -623,7 +843,9 @@ func handleBillPay(db *gorm.DB) gin.HandlerFunc {
 			}
 			return tx.Create(&Payment{
 				UserID: currentUserID(c), BillID: bill.ID, // UserID 收款人戳
-				PaidAt: now, Amount: round2(req.Amount),
+				// 收款流水继承账单台账：账单在哪个台账，钱就记在哪个台账。
+				LedgerID: bill.LedgerID,
+				PaidAt:   now, Amount: round2(req.Amount),
 				Items: paymentItemsJSON(shares), Note: strings.TrimSpace(req.Note),
 			}).Error
 		})
@@ -643,16 +865,18 @@ type payItemReq struct {
 }
 
 // billItemChargesAndPaids 汇总账单各项目应付与已收（已收从收款流水分摊累计）。
-func billItemChargesAndPaids(db *gorm.DB, bill *Bill) (map[string]float64, map[string]float64) {
+func billItemChargesAndPaids(db *gorm.DB, c *gin.Context, bill *Bill) (map[string]float64, map[string]float64) {
 	charges := map[string]float64{}
 	paids := map[string]float64{}
 	items := make([]BillItem, 0)
-	db.Where("bill_id = ?", bill.ID).Find(&items)
+	iq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
+	iq.Find(&items)
 	for _, it := range items {
 		charges[it.FeeKey] = round2(charges[it.FeeKey] + it.Amount)
 	}
 	payments := make([]Payment, 0)
-	db.Where("bill_id = ?", bill.ID).Order("paid_at ASC, id ASC").Find(&payments)
+	pq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
+	pq.Order("paid_at ASC, id ASC").Find(&payments)
 	for _, p := range payments {
 		for _, share := range paymentItems(p.Items) {
 			paids[share.Key] = round2(paids[share.Key] + share.Amount)
@@ -667,14 +891,20 @@ func handleBillDelete(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requireLedgerWrite(db, c, bill.LedgerID, ModuleBills, PermFull) {
+			return
+		}
 		err := db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Delete(bill).Error; err != nil {
 				return err
 			}
-			if err := tx.Where("bill_id = ?", bill.ID).Delete(&BillItem{}).Error; err != nil {
+			// 明细与流水按账单 ID 级联清理，同时限定台账，避免误删跨台账孤儿行。
+			iq, _ := scopeLedger(tx.Where("bill_id = ?", bill.ID), c)
+			if err := iq.Delete(&BillItem{}).Error; err != nil {
 				return err
 			}
-			return tx.Where("bill_id = ?", bill.ID).Delete(&Payment{}).Error
+			pq, _ := scopeLedger(tx.Where("bill_id = ?", bill.ID), c)
+			return pq.Delete(&Payment{}).Error
 		})
 		if err != nil {
 			response.ErrorInternal(c, "删除账单失败")
@@ -686,8 +916,13 @@ func handleBillDelete(db *gorm.DB) gin.HandlerFunc {
 
 func loadRoom(db *gorm.DB, c *gin.Context, roomID uint) (*Room, bool) {
 	var room Room
-	// 数据共享后按 ID 直取，不再限定录入人。
+	// 数据共享后按 ID 直取，不再限定录入人；但必须校验台账归属，
+	// 否则用构造出来的 room_id 就能往别的台账的房源上写子记录。
 	if err := db.First(&room, roomID).Error; err != nil {
+		response.ErrorNotFound(c, "房源不存在")
+		return nil, false
+	}
+	if !inLedgerScope(c, room.LedgerID) {
 		response.ErrorNotFound(c, "房源不存在")
 		return nil, false
 	}
@@ -701,8 +936,13 @@ func findUserBill(db *gorm.DB, c *gin.Context) (*Bill, bool) {
 		return nil, false
 	}
 	var bill Bill
-	// 数据共享后按 ID 直取，不再限定录入人。
+	// 数据共享后按 ID 直取，不再限定录入人；但必须校验台账归属，
+	// 否则换个 ID 就能读到/改到别台账的账单。
 	if err := db.First(&bill, id).Error; err != nil {
+		response.ErrorNotFound(c, "账单不存在")
+		return nil, false
+	}
+	if !inLedgerScope(c, bill.LedgerID) {
 		response.ErrorNotFound(c, "账单不存在")
 		return nil, false
 	}

@@ -19,10 +19,13 @@ export function bindFnOSAccount(mode: 'register' | 'bind', username: string, pas
   return request.post('/api/auth/fnos/bind', { mode, username, password })
 }
 
-export function register(username: string, password: string) {
+// 注册。phone 选填——是否显示/是否必填由后端两个系统配置控制
+// （register_phone_enabled / register_phone_required），前端按同一份开关渲染。
+export function register(username: string, password: string, phone = '') {
   return request.post('/api/auth/register', {
     username,
     password,
+    phone,
   })
 }
 

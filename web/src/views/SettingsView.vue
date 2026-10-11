@@ -19,13 +19,13 @@
 
     <!-- 收费项目（共享业务数据）：无业务权限的用户不展示；
          租房设置（水价电价等）已升级为系统级，管理员到「系统配置」页维护 -->
-    <FeeItemsCard v-if="accessStore.canView('bills')" class="mt-4" />
+    <FeeItemsCard v-if="ledgerStore.canView('bills')" class="mt-4" />
 
     <!-- 缴费提醒通知：钉钉 / 邮箱 / 短信 / QQ 机器人渠道绑定与测试 -->
-    <NotifyChannelsCard v-if="accessStore.canRead" class="mt-4" />
+    <NotifyChannelsCard v-if="ledgerStore.canRead" class="mt-4" />
 
     <!-- 支持开发者（仅管理员可见，赞赏完全自愿） -->
-    <div v-if="authStore.isAdmin" class="surface rounded-2xl p-5 sm:p-6">
+    <div v-if="authStore.isAdmin" class="surface rounded-2xl p-3.5 sm:p-6">
       <div class="flex flex-wrap items-center justify-between gap-4">
         <div class="flex items-start gap-3">
           <div class="w-10 h-10 rounded-xl bg-amber-400/15 text-amber-500 flex items-center justify-center shrink-0">
@@ -59,11 +59,11 @@ import { getUserConfigMeta, updateConfig } from '../api/config'
 import type { ConfigMeta } from '../api/config'
 import { useThemeStore } from '../stores/theme'
 import { useAuthStore } from '../stores/auth'
-import { useRentalAccessStore } from '../stores/rentalAccess'
+import { useLedgerStore } from '../stores/ledger'
 import { useSupportStore } from '../stores/support'
 
 const authStore = useAuthStore()
-const accessStore = useRentalAccessStore()
+const ledgerStore = useLedgerStore()
 const supportStore = useSupportStore()
 const items = ref<ConfigMeta[]>([])
 const loading = ref(false)

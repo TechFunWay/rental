@@ -49,11 +49,45 @@ type UserDeleteGuard func(db *gorm.DB, userID uint) (bool, error)
 // user is safe. Cleanups run inside the same transaction as the user deletion.
 type UserDeleteCleanup func(db *gorm.DB, userID uint) error
 
+// UserCreateHook lets an app attach app-owned per-user metadata immediately
+// after a user row is created (e.g. a default membership row in an app's own
+// table). Hooks run inside the registration transaction, so a failure rolls the
+// whole registration back. This keeps the framework's user service unaware of
+// any app schema while still guaranteeing every account gets initialized.
+type UserCreateHook func(db *gorm.DB, userID uint) error
+
 var (
 	userDeleteGuardsMu sync.RWMutex
 	userDeleteGuards   []UserDeleteGuard
 	userDeleteCleanups []UserDeleteCleanup
+	userCreateHooks    []UserCreateHook
 )
+
+// RegisterUserCreateHook registers an app-level hook that runs after a user is
+// created. Call from an app's init().
+func RegisterUserCreateHook(hook UserCreateHook) {
+	if hook == nil {
+		return
+	}
+	userDeleteGuardsMu.Lock()
+	defer userDeleteGuardsMu.Unlock()
+	userCreateHooks = append(userCreateHooks, hook)
+}
+
+// RunUserCreateHooks invokes every registered create hook in registration
+// order. The user service calls this inside the registration transaction.
+func RunUserCreateHooks(db *gorm.DB, userID uint) error {
+	userDeleteGuardsMu.RLock()
+	hooks := make([]UserCreateHook, len(userCreateHooks))
+	copy(hooks, userCreateHooks)
+	userDeleteGuardsMu.RUnlock()
+	for _, hook := range hooks {
+		if err := hook(db, userID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // RegisterUserDeleteGuard registers an app-level user deletion guard. Call
 // from an app's init().

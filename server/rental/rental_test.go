@@ -107,6 +107,11 @@ type testEnv struct {
 	r     http.Handler
 	db    *gorm.DB
 	token string
+	// adminID / personalLedger 是首个注册用户（管理员）的 ID 与其**个人台账**：
+	// 新模型里不带 ?ledger_id 的写操作都落在这里，凡是要与 API 数据对齐的
+	// 直接落库 fixture 必须用同一个台账。
+	adminID        uint
+	personalLedger uint
 }
 
 func setupEnv(t *testing.T) *testEnv {
@@ -130,6 +135,24 @@ func setupEnv(t *testing.T) *testEnv {
 	if err := sysconfig.InitDefaultConfigs(db); err != nil {
 		t.Fatalf("init configs: %v", err)
 	}
+	// v0.6.0：注册审核默认开启（生产口径：新注册账号为「待审核」）。本文件与
+	// access_meter / contracts 等既有用例考的是**业务数据与权限**，不是审核流程
+	// ——它们是在「注册完即可用」的前提下写的，因此这里显式关掉审核，让它们
+	// 继续考本来要考的东西。审核流程本身由 approval_test.go 覆盖（那里显式
+	// 打开它，并断言待审核用户被挡）。
+	if err := sysconfig.UpdateConfig(db, "register_need_approval", "false", 0); err != nil {
+		t.Fatalf("disable approval for tests: %v", err)
+	}
+	// 注册手机号默认「收集且必填」（生产口径，2026-10-11 粉丝需求）。道理同上：
+	// 本文件与 access_meter / contracts / ledger 等既有用例考的是业务数据与权限，
+	// 与手机号无关，注册请求里没带 phone 字段——这里显式关掉必填，让它们继续考
+	// 本来要考的东西。手机号策略本身由 phone_test.go 覆盖（分别断言必填被拦、
+	// 选填放行、关闭收集时的口径，以及格式校验与首位账号豁免）。
+	if err := sysconfig.UpdateConfig(db, "register_phone_required", "false", 0); err != nil {
+		t.Fatalf("disable phone requirement for tests: %v", err)
+	}
+	// v0.6.0（0.5.2 模型）：不再需要预建 0 号公共台账——每个账号在注册钩子里
+	// 自动获得个人台账，业务数据默认落这里。共同台账由用例自己用 API 建。
 	secret, err := sysconfig.GetConfig(db, "jwt_secret", 0)
 	if err != nil || secret == "" {
 		t.Fatalf("jwt secret: %v", err)
@@ -137,7 +160,7 @@ func setupEnv(t *testing.T) *testEnv {
 
 	r := ginserver.NewRouter(config.Config{CORSOrigin: "*", RateLimit: 0}, db, secret)
 
-	// 首个注册用户即管理员。
+	// 首个注册用户即管理员，注册钩子同时给他建好个人台账。
 	w := doJSON(r, http.MethodPost, "/api/auth/register", "", map[string]interface{}{
 		"username": "landlord", "password": "secret123",
 	})
@@ -145,8 +168,13 @@ func setupEnv(t *testing.T) *testEnv {
 		t.Fatalf("register: %d %s", w.Code, w.Body.String())
 	}
 	token := field(t, decodeBody(t, w), "data", "token").(string)
+	adminID := uint(field(t, decodeBody(t, w), "data", "user", "id").(float64))
+	pl := personalLedgerOf(db, adminID)
+	if pl == nil {
+		t.Fatal("管理员注册后必须有个人台账")
+	}
 
-	return &testEnv{t: t, r: r, db: db, token: token}
+	return &testEnv{t: t, r: r, db: db, token: token, adminID: adminID, personalLedger: pl.ID}
 }
 
 func doJSON(r http.Handler, method, path, token string, body interface{}) *httptest.ResponseRecorder {
@@ -676,90 +704,115 @@ func TestStats(t *testing.T) {
 	}
 }
 
-// TestSharedDataAndAccessLevels：业务数据全员共享 + 管理员按人授权。
-// 未授权（none）的业务请求一律 403；授权只读后能看到全部共享数据但不能写；
-// 授权录入后能写；删除仍要完全权限。
-func TestSharedDataAndAccessLevels(t *testing.T) {
+// TestPerLedgerAccessLevels：共同台账内按成员勾选「模块 × 档位」放行。
+// 未授权（空勾选）→ 该台账 403；view 能看不能写；edit 能写不能删；
+// full 能删；撤销后回到 403。成员管理本身只有管理者可调。
+func TestPerLedgerAccessLevels(t *testing.T) {
 	env := setupEnv(t)
-	roomID := env.seedRoom("801", 1000, 0)
-	env.seedTenant(roomID, "共享租户")
-	env.createBill("801", "2026-09")
+	owner := newPersonalLedger(t, env, "access-owner")
+	shared := createSharedLedger(t, env, owner.token, "权限台账")
+	ledgerQ := "?ledger_id=" + itoa(shared)
 
-	// 注册员工账号（普通用户，默认无业务权限）。
+	// 管理者在该台账建房：801 带租户/账单（删除会被保护拦），802 空房可删。
+	postRoom := func(roomNo string) uint {
+		w := doJSON(env.r, http.MethodPost, "/api/rental/rooms"+ledgerQ, owner.token,
+			map[string]interface{}{"community": "A区", "room_no": roomNo, "default_rent": 1000})
+		if w.Code != http.StatusOK {
+			t.Fatalf("seed room %s: %d %s", roomNo, w.Code, w.Body.String())
+		}
+		return uint(field(t, decodeBody(t, w), "data", "id").(float64))
+	}
+	room801 := postRoom("801")
+	room802 := postRoom("802")
+	if w := doJSON(env.r, http.MethodPost, "/api/rental/tenants"+ledgerQ, owner.token,
+		map[string]interface{}{"room_id": room801, "name": "共享租户"}); w.Code != http.StatusOK {
+		t.Fatalf("seed tenant: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(env.r, http.MethodPost, "/api/rental/bills"+ledgerQ, owner.token,
+		map[string]interface{}{"room_id": room801, "period": "2026-09"}); w.Code != http.StatusOK {
+		t.Fatalf("seed bill: %d %s", w.Code, w.Body.String())
+	}
+
+	// 注册员工账号（普通用户，新模型下自带个人台账、与该共同台账无关）。
 	w := doJSON(env.r, http.MethodPost, "/api/auth/register", "", map[string]interface{}{
 		"username": "employee", "password": "secret123",
 	})
+	empID := uint(field(t, decodeBody(t, w), "data", "user", "id").(float64))
 	empToken := field(t, decodeBody(t, w), "data", "token").(string)
+	inviteAndAccept(t, env, owner.token, empToken, shared, "employee")
 
-	// 未授权：业务接口一律 403，权限查询返回 none。
-	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("unauthorized rooms = %d, want 403", w.Code)
-	}
-	w = doJSON(env.r, http.MethodGet, "/api/rental/bills/1", empToken, nil)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("unauthorized bill detail = %d, want 403", w.Code)
-	}
-	w = doJSON(env.r, http.MethodGet, "/api/rental/access/me", empToken, nil)
-	if got := field(t, decodeBody(t, w), "data", "level").(string); got != AccessNone {
-		t.Fatalf("default level = %q, want none", got)
+	setPerms := func(perms ModulePerms) {
+		t.Helper()
+		if w := doJSON(env.r, http.MethodPut,
+			"/api/rental/ledgers/"+itoa(shared)+"/members/"+itoa(empID), owner.token,
+			map[string]interface{}{"perms": perms}); w.Code != http.StatusOK {
+			t.Fatalf("set perms %v: %d %s", perms, w.Code, w.Body.String())
+		}
 	}
 
-	// 管理员授权只读：能看到共享数据，但不能写、不能删。
-	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessReadonly})
-	if w.Code != http.StatusOK {
-		t.Fatalf("grant readonly: %d %s", w.Code, w.Body.String())
+	// 空勾选：该台账里既不能写、也不能读（2026-10-11 收紧口径）。
+	// 旧口径是「成员能看、按权限写」，结果只勾抄表的临时工也能读到租户身份证号、
+	// 合同与收款流水；现在读接口按**台账 + 模块**收窄：显式指定一个没有本模块
+	// view 的台账直接 403，不带 ledger_id 时该台账不进可见范围（返回空列表）。
+	setPerms(ModulePerms{})
+	if w := doJSON(env.r, http.MethodGet, "/api/rental/rooms"+ledgerQ, empToken, nil); w.Code != http.StatusForbidden {
+		t.Fatalf("no-perm rooms read = %d, want 403（该台账未勾选房源模块）", w.Code)
 	}
-	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil)
-	if got := len(itemsOf(t, w)); got != 1 {
-		t.Fatalf("readonly rooms = %d, want 1 (shared data)", got)
+	if w := doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("no-param rooms read = %d, want 200（并集门禁通过、范围收窄）", w.Code)
+	} else if n := len(itemsOf(t, w)); n != 0 {
+		t.Fatalf("no-param rooms read items = %d, want 0（无模块权限的台账不该进可见范围）", n)
 	}
-	w = doJSON(env.r, http.MethodGet, "/api/rental/bills/1", empToken, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("readonly bill detail = %d, want 200", w.Code)
+	if w := doJSON(env.r, http.MethodPost, "/api/rental/rooms"+ledgerQ, empToken,
+		map[string]interface{}{"room_no": "804"}); w.Code != http.StatusForbidden {
+		t.Fatalf("no-perm room write = %d, want 403", w.Code)
 	}
-	w = doJSON(env.r, http.MethodPost, "/api/rental/rooms", empToken, map[string]interface{}{"room_no": "802"})
-	if w.Code != http.StatusForbidden {
+
+	// rooms/bills view：能看，不能写。
+	setPerms(ModulePerms{ModuleRooms: PermView, ModuleBills: PermView})
+	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms"+ledgerQ, empToken, nil)
+	if w.Code != http.StatusOK || len(itemsOf(t, w)) != 2 {
+		t.Fatalf("readonly rooms = %d items=%d, want 200/2", w.Code, len(itemsOf(t, w)))
+	}
+	if w := doJSON(env.r, http.MethodGet, "/api/rental/bills"+ledgerQ, empToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("readonly bills = %d, want 200", w.Code)
+	}
+	if w := doJSON(env.r, http.MethodPost, "/api/rental/rooms"+ledgerQ, empToken,
+		map[string]interface{}{"room_no": "803"}); w.Code != http.StatusForbidden {
 		t.Fatalf("readonly create room = %d, want 403", w.Code)
 	}
 
-	// 授权录入：能新增房源，但删除仍要完全权限。
-	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessEdit})
-	if w.Code != http.StatusOK {
-		t.Fatalf("grant edit: %d %s", w.Code, w.Body.String())
-	}
-	w = doJSON(env.r, http.MethodPost, "/api/rental/rooms", empToken, map[string]interface{}{"room_no": "802"})
+	// rooms edit：能新增，删除仍要 full。
+	setPerms(ModulePerms{ModuleRooms: PermEdit, ModuleBills: PermView})
+	w = doJSON(env.r, http.MethodPost, "/api/rental/rooms"+ledgerQ, empToken,
+		map[string]interface{}{"room_no": "803"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("edit create room = %d %s, want 200", w.Code, w.Body.String())
 	}
-	w = doJSON(env.r, http.MethodDelete, "/api/rental/rooms/1", empToken, nil)
-	if w.Code != http.StatusForbidden {
+	if w := doJSON(env.r, http.MethodDelete, "/api/rental/rooms/"+itoa(room802)+ledgerQ, empToken, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("edit delete room = %d, want 403", w.Code)
 	}
 
-	// 授权完全：删除放行（802 是无账单的房，801 有账单会被删除保护拦截）；
-	// 撤销授权（none）后回到全 403。
-	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessFull})
-	if w.Code != http.StatusOK {
-		t.Fatalf("grant full: %d %s", w.Code, w.Body.String())
+	// full：能删（802 空房可删；801 有账单被删除保护拦下，证明不是无条件放行）。
+	setPerms(ModulePerms{ModuleRooms: PermFull, ModuleBills: PermView})
+	if w := doJSON(env.r, http.MethodDelete, "/api/rental/rooms/"+itoa(room801)+ledgerQ, empToken, nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("full delete room-with-bills = %d, want 400 (guard)", w.Code)
 	}
-	w = doJSON(env.r, http.MethodDelete, "/api/rental/rooms/2", empToken, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("full delete room = %d %s, want 200", w.Code, w.Body.String())
-	}
-	w = env.do(http.MethodPut, "/api/rental/access/2", map[string]interface{}{"level": AccessNone})
-	if w.Code != http.StatusOK {
-		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
-	}
-	w = doJSON(env.r, http.MethodGet, "/api/rental/rooms", empToken, nil)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("revoked rooms = %d, want 403", w.Code)
+	if w := doJSON(env.r, http.MethodDelete, "/api/rental/rooms/"+itoa(room802)+ledgerQ, empToken, nil); w.Code != http.StatusOK {
+		t.Fatalf("full delete empty room = %d %s, want 200", w.Code, w.Body.String())
 	}
 
-	// 授权接口本身仅管理员可调。
-	w = doJSON(env.r, http.MethodPut, "/api/rental/access/2", empToken, map[string]interface{}{"level": AccessFull})
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("non-admin grant = %d, want 403", w.Code)
+	// 撤销（空勾选）后写权限收回。
+	setPerms(ModulePerms{})
+	if w := doJSON(env.r, http.MethodPost, "/api/rental/rooms"+ledgerQ, empToken,
+		map[string]interface{}{"room_no": "805"}); w.Code != http.StatusForbidden {
+		t.Fatalf("revoked room write = %d, want 403", w.Code)
+	}
+	// 成员无权给自己或别人设权限（只有管理者能）。
+	if w := doJSON(env.r, http.MethodPut,
+		"/api/rental/ledgers/"+itoa(shared)+"/members/"+itoa(empID), empToken,
+		map[string]interface{}{"perms": ModulePerms{ModuleRooms: PermFull}}); w.Code != http.StatusForbidden {
+		t.Fatalf("member self-grant = %d, want 403", w.Code)
 	}
 }
 
@@ -963,7 +1016,12 @@ func TestPayCycleFollowGlobalDefault(t *testing.T) {
 	// 租户没设置周期 → 跟随全局季付：租金按 3 个月计。
 	roomID := env.seedRoom("721", 1000, 0)
 	env.seedTenant(roomID, "跟全局")
-	room := Room{UserID: 1, ID: roomID}
+	// 从库里取房间（连带真实台账归属）；构造零值 Room 会漏掉 org_id，
+	// effectiveRoomBilling 就找不到同台账的租户设置。
+	var room Room
+	if err := env.db.First(&room, roomID).Error; err != nil {
+		t.Fatalf("load room: %v", err)
+	}
 	if cfg := effectiveRoomBilling(env.db, &room); cfg.PayCycle != payCycleQuarterly {
 		t.Fatalf("effective pay cycle = %v, want quarterly", cfg.PayCycle)
 	}
@@ -1006,7 +1064,10 @@ func TestMultiTenantBillingPrecedence(t *testing.T) {
 	env.db.Model(&Tenant{}).Where("room_id = ? AND name = ?", roomID, "乙").
 		Updates(map[string]interface{}{"water_mode": waterModeMonthly, "water_monthly_fee": 45})
 
-	room := Room{UserID: 1, ID: roomID}
+	var room Room
+	if err := env.db.First(&room, roomID).Error; err != nil {
+		t.Fatalf("load room: %v", err)
+	}
 	cfg := effectiveRoomBilling(env.db, &room)
 	if cfg.WaterMode != waterModeMonthly || !almostEqual(cfg.WaterAmount, 45) {
 		t.Fatalf("multi-tenant water = %v/%v, want monthly/45", cfg.WaterMode, cfg.WaterAmount)

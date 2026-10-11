@@ -78,12 +78,14 @@ body {
 
   /* Primary brand button — `bg-brand-gradient` is already var-driven in
      tailwind.config so swapping the brand CSS variables reskins this. */
+  /* 按钮内边距随屏宽收紧：手机端 px-3 py-2（保持 ≥40px 可点高度），
+     sm 起恢复 px-4 py-2.5。页头操作组在窄屏要与标题同排，大内边距会直接撑爆一行。 */
   .btn-brand {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-brand-gradient text-white text-sm font-semibold shadow-glow hover:brightness-110 active:scale-[0.98] disabled:opacity-60 disabled:pointer-events-none transition-all;
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-2 sm:gap-2 sm:px-4 sm:py-2.5 rounded-xl bg-brand-gradient text-white text-sm font-semibold shadow-glow hover:brightness-110 active:scale-[0.98] disabled:opacity-60 disabled:pointer-events-none transition-all whitespace-nowrap;
   }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-foreground bg-surface/70 dark:bg-surface/5 border border-border hover:bg-surface dark:hover:bg-surface/10 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none transition-all;
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-2 sm:gap-2 sm:px-4 sm:py-2.5 rounded-xl text-sm font-medium text-foreground bg-surface/70 dark:bg-surface/5 border border-border hover:bg-surface dark:hover:bg-surface/10 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none transition-all whitespace-nowrap;
   }
 
   .input-field {
@@ -95,14 +97,17 @@ body {
   }
 
   /* Page-level container — uses the full available width so authenticated
-     views (especially tables) don't waste space once a sidebar is present. */
+     views (especially tables) don't waste space once a sidebar is present.
+     手机端纵向堆叠收紧到 space-y-2.5（10px）：小屏一屏要看到尽量多内容，
+     原来是 24px→16px，实测 4 处面板间距就吃掉 64px；10px 仍能靠面板圆角+底色
+     区分相邻面板。sm 起恢复 space-y-6（桌面不受影响）。 */
   .page-container {
-    @apply w-full space-y-6;
+    @apply w-full space-y-2.5 sm:space-y-6;
   }
 
   /* Premium gradient button with a light sweep on hover */
   .btn-premium {
-    @apply relative overflow-hidden w-full py-3 px-4 rounded-xl bg-brand-gradient text-white font-semibold shadow-glow active:scale-[0.98] disabled:opacity-60 disabled:pointer-events-none transition-all flex items-center justify-center gap-2;
+    @apply relative overflow-hidden w-full py-2.5 sm:py-3 px-4 rounded-xl bg-brand-gradient text-white font-semibold shadow-glow active:scale-[0.98] disabled:opacity-60 disabled:pointer-events-none transition-all flex items-center justify-center gap-2;
   }
   .btn-premium::after {
     content: '';

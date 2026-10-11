@@ -5,7 +5,7 @@
         <button class="btn-ghost" @click="downloadTemplate">下载模板</button>
         <button class="btn-ghost" @click="doExport">导出</button>
         <button class="btn-ghost" @click="openBatchPrint">打印单据</button>
-        <button v-if="accessStore.canFull('bills')" class="btn-ghost" @click="showImport = true">导入</button>
+        <button v-if="ledgerStore.canFull('bills')" class="btn-ghost" @click="showImport = true">导入</button>
       </template>
     </PageHeader>
 
@@ -26,6 +26,14 @@
           <option value="unpaid">未缴纳</option>
           <option value="partial">部分已缴</option>
           <option value="paid">已缴清</option>
+        </select>
+        <select v-model="filterCommunity" class="input-field !py-2 !w-auto max-w-[150px]" @change="onCommunityChange">
+          <option value="">全部小区</option>
+          <option v-for="c in communityOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
+        <select v-model="filterRoomId" class="input-field !py-2 !w-auto max-w-[150px]" @change="load(1)">
+          <option :value="0">全部房源</option>
+          <option v-for="r in roomOptions" :key="r.id" :value="r.id">{{ r.room_no }}</option>
         </select>
         <input v-model="keyword" class="input-field flex-1 min-w-[160px] !py-2" placeholder="搜索房号或租户…" @keyup.enter="applyFilters" />
         <button class="btn-brand !py-2" @click="applyFilters">查询</button>
@@ -56,6 +64,7 @@
               <th colspan="3" class="py-2 px-3 font-medium text-center border-b border-border/60">抄表费用</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">卫生费（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">管理费（元）</th>
+              <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom" title="入住押金：只在租户首张账单上收一次">押金（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">本月租金（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">已收（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">欠缴额（元）</th>
@@ -87,6 +96,11 @@
               <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.gas_fee) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.sanitation_fee) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.management_fee) }}</td>
+              <!-- 押金：只在首张账单有值，其余账期显示 —（避免一列全是 0.00 看着乱） -->
+              <td class="py-2.5 px-3 text-right tabular-nums">
+                <span v-if="b.deposit_fee" class="text-amber-600 dark:text-amber-300 font-semibold">{{ fmtMoney(b.deposit_fee) }}</span>
+                <span v-else class="text-muted-foreground">—</span>
+              </td>
               <td class="py-2.5 px-3 text-right tabular-nums font-bold text-foreground">{{ fmtMoney(b.total_amount) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums text-emerald-600 dark:text-emerald-400">{{ fmtMoney(b.paid_amount) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums" :class="isArrears(b) ? 'text-rose-500 font-semibold' : ''">{{ fmtMoney(arrearsOf(b)) }}</td>
@@ -95,11 +109,11 @@
               </td>
               <td class="py-2.5 px-3 text-right whitespace-nowrap">
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openDetail(b)">详情</button>
-                <button v-if="accessStore.canEdit('bills')" class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReading(b)">抄表</button>
+                <button v-if="ledgerStore.canEdit('bills')" class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReading(b)">抄表</button>
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-2.5" @click="openReceipt(b)">单据</button>
-                <button v-if="accessStore.canEdit('bills')" class="text-foreground hover:underline mr-2.5" @click="openEdit(b)">编辑</button>
-                <button v-if="accessStore.canEdit('bills') && isArrears(b)" class="text-emerald-600 dark:text-emerald-400 hover:underline mr-2.5" @click="openPay(b)">收款</button>
-                <button v-if="accessStore.canFull('bills')" class="text-destructive hover:underline" @click="remove(b)">删除</button>
+                <button v-if="ledgerStore.canEdit('bills')" class="text-foreground hover:underline mr-2.5" @click="openEdit(b)">编辑</button>
+                <button v-if="ledgerStore.canEdit('bills') && isArrears(b)" class="text-emerald-600 dark:text-emerald-400 hover:underline mr-2.5" @click="openPay(b)">收款</button>
+                <button v-if="ledgerStore.canFull('bills')" class="text-destructive hover:underline" @click="remove(b)">删除</button>
               </td>
             </tr>
           </tbody>
@@ -124,6 +138,8 @@
           <div class="text-[11px] text-muted-foreground tabular-nums rounded-md bg-muted/50 px-2 py-1.5">
             <div>水 {{ waterReadingText(b, '→') }} 电 {{ meterReadingText(b, 'elec') }} 气 {{ meterReadingText(b, 'gas') }}</div>
             <div class="mt-0.5">水费 {{ fmtMoney(b.water_fee) }} 元 · 电费 {{ fmtMoney(b.elec_fee) }} 元 · 燃气 {{ fmtMoney(b.gas_fee) }} 元 · 卫生 {{ fmtMoney(b.sanitation_fee) }} 元 · 管理 {{ fmtMoney(b.management_fee) }} 元</div>
+            <!-- 押金只在首张账单出现；手机端单独一行并标黄，避免和普通费用混在一起 -->
+            <div v-if="b.deposit_fee" class="mt-0.5 text-amber-600 dark:text-amber-300 font-medium">押金 {{ fmtMoney(b.deposit_fee) }} 元（入住押金，退租时结算退还）</div>
           </div>
 
           <div class="flex items-end justify-between gap-2">
@@ -138,11 +154,11 @@
 
           <div class="flex items-center gap-4 pt-1.5 border-t border-border/60 text-xs">
             <button class="text-brand-600 dark:text-brand-300" @click="openDetail(b)">详情</button>
-            <button v-if="accessStore.canEdit('bills')" class="text-brand-600 dark:text-brand-300" @click="openReading(b)">抄表</button>
+            <button v-if="ledgerStore.canEdit('bills')" class="text-brand-600 dark:text-brand-300" @click="openReading(b)">抄表</button>
             <button class="text-brand-600 dark:text-brand-300" @click="openReceipt(b)">单据</button>
-            <button v-if="accessStore.canEdit('bills')" class="text-foreground" @click="openEdit(b)">编辑</button>
-            <button v-if="accessStore.canEdit('bills') && isArrears(b)" class="text-emerald-600 dark:text-emerald-400" @click="openPay(b)">收款</button>
-            <button v-if="accessStore.canFull('bills')" class="text-destructive ml-auto" @click="remove(b)">删除</button>
+            <button v-if="ledgerStore.canEdit('bills')" class="text-foreground" @click="openEdit(b)">编辑</button>
+            <button v-if="ledgerStore.canEdit('bills') && isArrears(b)" class="text-emerald-600 dark:text-emerald-400" @click="openPay(b)">收款</button>
+            <button v-if="ledgerStore.canFull('bills')" class="text-destructive ml-auto" @click="remove(b)">删除</button>
           </div>
         </div>
       </div>
@@ -203,11 +219,11 @@
             <div v-else class="grid grid-cols-2 sm:grid-cols-3 gap-2">
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">上月读数（吨）</span>
-                <input v-model.number="editForm.water_last" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                <input v-model.number="editForm.water_last" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
               </label>
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">本月读数（吨）</span>
-                <input v-model.number="editForm.water_now" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                <input v-model.number="editForm.water_now" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
               </label>
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">单价（元/吨）</span>
@@ -227,11 +243,11 @@
             <div v-else class="grid grid-cols-2 sm:grid-cols-3 gap-2">
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">上月读数（{{ m.unit }}）</span>
-                <input v-model.number="editForm[m.lastKey]" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                <input v-model.number="editForm[m.lastKey]" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
               </label>
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">本月读数（{{ m.unit }}）</span>
-                <input v-model.number="editForm[m.nowKey]" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                <input v-model.number="editForm[m.nowKey]" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
               </label>
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">单价（元/{{ m.unit }}）</span>
@@ -248,6 +264,18 @@
           <div>
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">管理费（元）</label>
             <input v-model.number="editForm.management_fee" type="number" step="0.01" min="0" class="input-field" :disabled="feeExcluded('management')" />
+          </div>
+          <!-- 押金：只在首张账单上出现。不参与「排除项」（服务端也不受它影响），
+               这里始终可编辑，方便手动把押金改掉或清零。 -->
+          <!-- 输入框必须始终渲染：此前写成 v-if="editForm.deposit_fee"，一旦押金改成
+               0（或账单本来就没押金）输入框整个消失，再也补不回去，与上面「始终可编辑」
+               的注释自相矛盾（2026-10-11 审计）。 -->
+          <div>
+            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">
+              押金（元）
+              <span class="font-normal text-[11px]">· 入住押金，只收一次，0 表示不收</span>
+            </label>
+            <input v-model.number="editForm.deposit_fee" type="number" step="0.01" min="0" class="input-field" />
           </div>
           <div>
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">已收金额（元）</label>
@@ -365,12 +393,10 @@
       <div v-if="receiptBill">
         <RentalReceipt :bill="receiptBill" :property="receiptProperty" :items="receiptItems" />
         <div class="flex flex-wrap items-center justify-end gap-3 mt-4 print:hidden">
-          <label class="text-xs text-muted-foreground flex items-center gap-1.5">
-            单据纸张
-            <select v-model="receiptPaper" class="input-field !py-1.5 !w-auto text-xs" @change="onPaperChange">
-              <option v-for="p in receiptPapers" :key="p.value" :value="p.value">{{ p.label }}</option>
-            </select>
-          </label>
+          <div class="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span>单据纸张</span>
+            <ReceiptPaperPicker v-model:paper="receiptPaper" v-model:custom="customPaper" @update:paper="onPaperChange" @update:custom="onPaperChange" />
+          </div>
           <button class="btn-ghost" @click="showReceipt = false">关闭</button>
           <button class="btn-brand" @click="printReceipt">🖨 打印 / 另存 PDF</button>
         </div>
@@ -395,13 +421,11 @@
           <span v-if="batchBills.length >= 500" class="text-amber-600 dark:text-amber-300 text-xs ml-1">已达单批上限 500 张，请缩小区间分批打印</span>
           <span v-else-if="batchBills.length === 0" class="text-muted-foreground text-xs ml-1">区间内没有账单</span>
         </div>
-        <label class="text-xs text-muted-foreground flex items-center gap-1.5">
-          单据纸张
-          <select v-model="receiptPaper" class="input-field !py-1.5 !w-auto text-xs" @change="onPaperChange">
-            <option v-for="p in receiptPapers" :key="p.value" :value="p.value">{{ p.label }}</option>
-          </select>
+        <div class="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <span>单据纸张</span>
+          <ReceiptPaperPicker v-model:paper="receiptPaper" v-model:custom="customPaper" @update:paper="onPaperChange" @update:custom="onPaperChange" />
           <span class="text-[11px]">（设置保存在本机）</span>
-        </label>
+        </div>
         <div class="flex gap-3">
           <button class="btn-ghost flex-1" @click="showBatchPrint = false">关闭</button>
           <button class="btn-brand flex-1" :disabled="batchLoading || batchBills.length === 0" @click="startBatchPrint">开始打印</button>
@@ -422,13 +446,11 @@
     <!-- 批量打印层：预览全部单据，打印时每张一页（工具栏不参与打印） -->
     <div v-if="batchPrinting" class="batch-print fixed inset-0 z-50 overflow-auto bg-white">
       <div class="sticky top-0 z-10 flex items-center justify-end gap-2 px-4 py-2.5 bg-white border-b border-border shadow-sm">
-        <span class="text-xs text-muted-foreground mr-auto">共 {{ batchBills.length }} 张单据 · 纸张 {{ receiptPapers.find((p) => p.value === receiptPaper)?.label }}</span>
-        <label class="text-xs text-muted-foreground flex items-center gap-1.5">
-          纸张
-          <select v-model="receiptPaper" class="input-field !py-1 !w-auto text-xs" @change="onPaperChange">
-            <option v-for="p in receiptPapers" :key="p.value" :value="p.value">{{ p.label }}</option>
-          </select>
-        </label>
+        <span class="text-xs text-muted-foreground mr-auto">共 {{ batchBills.length }} 张单据 · 纸张 {{ paperSummary(receiptPaper, customPaper) }}</span>
+        <div class="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <span>纸张</span>
+          <ReceiptPaperPicker v-model:paper="receiptPaper" v-model:custom="customPaper" @update:paper="onPaperChange" @update:custom="onPaperChange" />
+        </div>
         <button class="btn-brand !py-1.5 !px-3 text-xs" @click="printBatch">🖨 打印</button>
         <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="batchPrinting = false">关闭</button>
       </div>
@@ -461,11 +483,13 @@ import BillDetail from '../components/BillDetail.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
-import { useRentalAccessStore } from '../stores/rentalAccess'
+import { useLedgerStore } from '../stores/ledger'
 import RentalReceipt from '../components/RentalReceipt.vue'
+import ReceiptPaperPicker from '../components/ReceiptPaperPicker.vue'
 import { toast } from '../utils/toast'
 import {
-  applyReceiptPaper, loadReceiptPaper, receiptPapers, saveReceiptPaper, type ReceiptPaper,
+  applyReceiptPaper, loadCustomPaper, loadReceiptPaper, paperSummary, saveReceiptPaper,
+  type CustomPaper, type ReceiptPaper,
 } from '../utils/receiptPaper'
 import {
   defaultBilling, fetchBillingDefaults, meterUnit, roomBillingSummary, type BillingDefaults,
@@ -473,11 +497,11 @@ import {
 import { coveredPeriodText, cycleMonths } from '../utils/cycle'
 import {
   arrearsOf, createBill, currentPeriod, deleteBill, downloadTemplate, exportBills, fmtMoney,
-  getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears, payBill, updateBill,
+  getAllRooms, getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears, payBill, updateBill,
   type Bill, type BillItemDetail, type FeeItem, type ImportResult, type PropertyMeta, type ReceiptEntry, type RoomView,
 } from '../api/rental'
 
-const accessStore = useRentalAccessStore()
+const ledgerStore = useLedgerStore()
 
 const bills = ref<Bill[]>([])
 const allRooms = ref<RoomView[]>([])
@@ -491,6 +515,18 @@ const periodFrom = ref('')
 const periodTo = ref('')
 const billType = ref<'' | 'monthly' | 'quarterly'>('')
 const status = ref('')
+// 小区/村组 + 房源下拉：房源选项随所选小区收窄（小区条件由服务端按房源反查）
+const filterCommunity = ref('')
+const filterRoomId = ref(0)
+const communityOptions = computed(() => [...new Set(allRooms.value.map((r) => r.community).filter(Boolean))])
+const roomOptions = computed(() =>
+  filterCommunity.value ? allRooms.value.filter((r) => r.community === filterCommunity.value) : allRooms.value,
+)
+
+function onCommunityChange() {
+  if (filterRoomId.value && !roomOptions.value.some((r) => r.id === filterRoomId.value)) filterRoomId.value = 0
+  load(1)
+}
 const keyword = ref('')
 const saving = ref(false)
 
@@ -552,10 +588,17 @@ const billsFilterSummary = computed(() =>
     periodFrom.value && periodTo.value ? `${periodFrom.value} ~ ${periodTo.value}` : periodFrom.value || periodTo.value || '全部月份',
     billsTypeText[billType.value] || null,
     billsStatusText[status.value] || '全部状态',
+    filterCommunity.value || null,
+    filterRoomId.value ? (allRooms.value.find((r) => r.id === filterRoomId.value)?.room_no || '指定房源') : null,
     keyword.value ? `“${keyword.value}”` : null,
   ].filter(Boolean).join(' · '),
 )
-const billsFilterCount = computed(() => (billType.value ? 1 : 0) + (status.value ? 1 : 0) + (keyword.value ? 1 : 0))
+// 徽标统计「非默认条件」：账期区间此前漏算，只填区间时列表已被过滤、徽标却是 0
+// （2026-10-11 审计）。
+const billsFilterCount = computed(() =>
+  (periodFrom.value || periodTo.value ? 1 : 0) +
+  (billType.value ? 1 : 0) + (status.value ? 1 : 0) + (keyword.value ? 1 : 0) +
+  (filterCommunity.value ? 1 : 0) + (filterRoomId.value ? 1 : 0))
 const billsTypeText: Record<string, string> = { monthly: '月账单', quarterly: '季度账单' }
 
 const filterRef = ref<InstanceType<typeof FilterPanel> | null>(null)
@@ -602,14 +645,17 @@ function waterPreview(f: Pick<Bill, 'water_mode' | 'water_last' | 'water_now' | 
 function previewTotal(): number {
   const f = editForm.value
   if (!f) return 0
-  // 与服务端 recalc 同口径：被排除的项目按 0 计。
+  // 与服务端 recalc 同口径：被排除的项目按 0 计；押金不计入「排除项」——
+  // 它是入住押金，服务端也不受 ExcludedFees 影响，必须原样加上，
+  // 否则编辑账单时预览合计会比实际少一个押金。
   const t =
     (feeExcluded('rent') ? 0 : (f.rent || 0)) +
     (feeExcluded('water') ? 0 : waterPreview(f)) +
     (feeExcluded('elec') ? 0 : previewFee(f.elec_last, f.elec_now, f.elec_price)) +
     (feeExcluded('gas') ? 0 : previewFee(f.gas_last, f.gas_now, f.gas_price)) +
     (feeExcluded('sanitation') ? 0 : (f.sanitation_fee || 0)) +
-    (feeExcluded('management') ? 0 : (f.management_fee || 0))
+    (feeExcluded('management') ? 0 : (f.management_fee || 0)) +
+    (f.deposit_fee || 0)
   return Math.round(t * 100) / 100
 }
 
@@ -673,6 +719,8 @@ async function load(p = page.value) {
       period_to: periodTo.value || undefined,
       bill_type: billType.value || undefined,
       status: status.value, keyword: keyword.value,
+      community: filterCommunity.value || undefined,
+      room_id: filterRoomId.value || undefined,
     })
     if (res.data?.code === 0) {
       bills.value = res.data.data.items || []
@@ -685,13 +733,16 @@ async function load(p = page.value) {
 }
 
 async function loadRooms() {
-  const res = await getRooms({ page: 1, pageSize: 100 })
-  if (res.data?.code === 0) allRooms.value = res.data.data.items || []
+  // 跨页拉全：服务端 pageSize 硬上限是 100，写死 100 在房源超过 100 间时
+  // 会让小区/房源下拉缺项（2026-10-11 审计）。
+  allRooms.value = await getAllRooms()
 }
 
 function doExport() {
-  const start = periodFrom.value || periodTo.value || currentPeriod()
-  exportBills(start)
+  // 按页面上的账期筛选区间导出（2026-10-11：原先只取「起始或截止」其中一个，
+  // 用户选了 2026-10 ~ 2026-11 也只导出一个月的账，是"不能按时间段导出"的根因）。
+  // 两段都为空 → 导出全部月份。
+  exportBills(undefined, periodFrom.value || undefined, periodTo.value || undefined)
 }
 
 const confirmState = ref({ show: false, title: '', message: '', action: null as null | (() => Promise<void>) })
@@ -836,7 +887,7 @@ async function openDetail(b: Bill) {
 }
 
 function printReceipt() {
-  applyReceiptPaper(receiptPaper.value)
+  applyReceiptPaper(receiptPaper.value, customPaper.value)
   window.print()
 }
 
@@ -844,8 +895,12 @@ function printReceipt() {
 
 // 单据纸张：打印设备属性，保存在本机（localStorage），单张与批量共用
 const receiptPaper = ref<ReceiptPaper>(loadReceiptPaper())
+// 自定义纸张尺寸（针式打印纸/发货单）：与预设共存，选中「自定义尺寸…」时生效。
+const customPaper = ref<CustomPaper>(loadCustomPaper())
 function onPaperChange() {
   saveReceiptPaper(receiptPaper.value)
+  // 立即重写 @page，让预览层的工具栏改动当场生效
+  applyReceiptPaper(receiptPaper.value, customPaper.value)
 }
 
 const showBatchPrint = ref(false)
@@ -887,16 +942,20 @@ async function previewReceipts() {
   }
 }
 
-// 进入全屏预览层并直接拉起打印；纸张在打印时写入 @page
+// 进入全屏预览层并直接拉起打印；纸张在打印时写入 @page。
+// 必须先关掉配置弹窗：Modal 是 teleport 到 body 的 z-50，DOM 顺序在全屏
+// 预览层（#app 内）之后，不关会叠在预览层上面挡住单据（粉丝反馈"打印要
+// 取消 2 次才出"的界面来源之一）。
 async function startBatchPrint() {
   if (!batchBills.value.length) return
+  showBatchPrint.value = false
   batchPrinting.value = true
   await nextTick()
   printBatch()
 }
 
 function printBatch() {
-  applyReceiptPaper(receiptPaper.value)
+  applyReceiptPaper(receiptPaper.value, customPaper.value)
   window.print()
 }
 
@@ -953,23 +1012,3 @@ onMounted(async () => {
   await Promise.all([loadRooms(), load(1)])
 })
 </script>
-
-<style>
-/* 批量打印层：屏幕上是可滚动的全屏预览；打印时解除定位与裁剪，
-   每张单据独立一页（RentalReceipt 内部的可见性/定位规则以这里的高优先级覆盖为准） */
-@media print {
-  .batch-print {
-    position: static !important;
-    overflow: visible !important;
-  }
-  .batch-print .receipt-page {
-    break-after: page;
-  }
-  .batch-print .receipt-page:last-child {
-    break-after: auto;
-  }
-  .batch-print .receipt-wrap {
-    position: static !important;
-  }
-}
-</style>

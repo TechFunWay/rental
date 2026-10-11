@@ -2,8 +2,10 @@
 //
 // 设计原则（与《应用支持功能与在线统计接入指南》一致，不可妥协）：
 //  1. 匿名透明：只上报设备级信息（哈希标识/系统/架构/版本），不含任何用户数据；
-//  2. 可退出：-disable-stats 启动参数或 DISABLE_STATS=1 环境变量完全关闭，
-//     管理员也可在系统配置中通过 stats_enabled 运行时开关关闭；
+//  2. 默认开启且**应用内不可关闭**（2026-10-11 用户定调：「默认就是要统计，
+//     不能取消」）：系统配置里不再提供 stats_enabled 开关，管理员界面看不到、
+//     也改不掉；部署者仍可用 -disable-stats 启动参数或 DISABLE_STATS=1
+//     环境变量在部署层面整体退出；
 //  3. 上报走 HTTPS，地址可用 STATS_ENDPOINT 环境变量覆盖（本地测试指向假服务）；
 //  4. 「已支持」状态以服务端结果为准：统计端点返回非 2xx 一律视为失败。
 //
@@ -17,6 +19,7 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,7 +33,6 @@ import (
 	"gorm.io/gorm"
 
 	"smallgo/server/response"
-	"smallgo/server/sysconfig"
 )
 
 // Request 是统计端点的心跳/事件上报体。
@@ -43,11 +45,17 @@ type Request struct {
 	Arch       string `json:"arch"`
 	// Event 区分上报类型：心跳不携带，赞赏点击为 "donate_support"
 	Event string `json:"event,omitempty"`
+	// Amount 赞赏金额（元），仅 donate_support 事件携带，用于接收端统计
+	// 赞赏流水（app_support_log.amount）。心跳不携带。
+	Amount float64 `json:"amount,omitempty"`
 }
 
 const (
 	heartbeatInterval = 60 * time.Minute
 	donateEvent       = "donate_support"
+	// 支持金额单笔上限（元）：预设档位 1/5/10/50，误填的巨额输入在这里钳掉，
+	// 避免污染接收端的「赞赏总金额」统计
+	maxDonateAmount = 1000.0
 )
 
 var (
@@ -207,17 +215,17 @@ func persistentDeviceID(dataDir string) string {
 	return hostname + runtime.GOOS + runtime.GOARCH
 }
 
-// enabled 读取运行时开关（管理员可在系统配置中关闭）。
-// 未初始化或读取失败时默认开启，保持与 flag 行为一致。
-func enabled(db *gorm.DB) bool {
-	if db == nil {
-		return true
-	}
-	v, err := sysconfig.GetConfig(db, "stats_enabled", 0)
-	if err != nil || v == "" {
-		return true
-	}
-	return v != "false"
+// enabled 恒为 true：匿名统计是产品默认行为，**应用内不提供关闭入口**
+// （2026-10-11 用户定调：默认就是要统计，不能取消；系统配置里已不再注册
+// stats_enabled，管理员界面看不到也改不掉）。
+//
+// 部署层面的退出仍然保留：server.Start 里的 -disable-stats / DISABLE_STATS=1
+// 直接不启动上报，与这里无关；STATS_ENDPOINT 也可以把上报指向自建端点。
+//
+// 保留这个函数而不是直接删掉判断，是为了把「为什么恒开」写在调用点上，
+// 同时让历史库里的 stats_enabled=false 记录彻底失效（不再被读取）。
+func enabled(_ *gorm.DB) bool {
+	return true
 }
 
 // RegisterRoutes 挂载需要登录的赞赏支持端点。不要求管理员，但前端入口
@@ -228,10 +236,23 @@ func RegisterRoutes(auth *gin.RouterGroup, db *gorm.DB) {
 			response.ErrorForbidden(c, "统计上报已被管理员禁用")
 			return
 		}
+		// 支持金额（元）：可选字段，缺省为 0（不校验支付，仅作金额标注）
+		var payload struct {
+			Amount float64 `json:"amount"`
+		}
+		_ = c.ShouldBindJSON(&payload)
+		// 负数与非有限值归零，误填的巨额输入封顶，接收端同样有上限兜底
+		if math.IsNaN(payload.Amount) || payload.Amount < 0 {
+			payload.Amount = 0
+		} else if math.IsInf(payload.Amount, 0) || payload.Amount > maxDonateAmount {
+			payload.Amount = maxDonateAmount
+		}
+
 		mu.Lock()
 		req := base
 		mu.Unlock()
 		req.Event = donateEvent
+		req.Amount = payload.Amount
 		body, _ := json.Marshal(req)
 		resp, err := httpClient.Post(Endpoint(), "application/json", bytes.NewReader(body))
 		if err != nil {
@@ -245,18 +266,5 @@ func RegisterRoutes(auth *gin.RouterGroup, db *gorm.DB) {
 			return
 		}
 		response.Success(c, gin.H{"ok": true})
-	})
-}
-
-func init() {
-	sysconfig.RegisterConfig(sysconfig.ConfigDef{
-		Key:         "stats_enabled",
-		Scope:       sysconfig.ScopeSystem,
-		Type:        sysconfig.TypeBool,
-		Default:     "true",
-		Public:      false,
-		Group:       "stats",
-		Label:       "匿名使用统计",
-		Description: "仅上报设备级信息（哈希标识/系统/架构/版本），不含任何用户数据；关闭后心跳与赞赏计数均停止",
 	})
 }

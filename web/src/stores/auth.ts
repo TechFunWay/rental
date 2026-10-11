@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { checkAuth, checkSetupRequired as apiCheckSetupRequired, logout as apiLogout } from '../api/auth'
+import { checkAuth, checkSetupRequired as apiCheckSetupRequired, getCurrentUser, logout as apiLogout } from '../api/auth'
 import { getPublicConfigs, getUserConfigMeta } from '../api/config'
 import { getSecurityQuestions } from '../api/security'
+import { getMyApproval } from '../api/ledger'
 import { useThemeStore } from './theme'
 import { SK } from '../utils/storage-keys'
 import { onFnOSGatewayOrigin } from '../utils/gateway'
@@ -12,6 +13,10 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref<any>(null)
   const requireLogin = ref(true)
   const allowRegister = ref(true)
+  // 注册手机号策略（超管可配）：enabled 控制注册页显不显示输入框，
+  // required 控制是否必填。默认都开（管理员要能看出谁是谁）。
+  const registerPhoneEnabled = ref(true)
+  const registerPhoneRequired = ref(true)
   const setupRequired = ref(false)
   // 站名兜底值：服务端 /api/configs/public 返回前的首屏用它，必须是本应用的中文名，
   // 否则侧栏与浏览器标题会先闪出框架默认的英文名。
@@ -33,6 +38,11 @@ export const useAuthStore = defineStore('auth', () => {
     if (!ts) return false
     return Date.now() - Number(ts) < DISMISS_TTL
   })())
+  /** 待审核（status === 2）：可以登录，但业务接口一律 403。
+   *  来源是登录/注册响应里的 user.status 与 /api/auth/check 回填的 user，
+   *  不依赖业务接口的 403（403 也意味着「模块无权限」，会把正常用户误判）。 */
+  const isPendingUser = computed(() => Number(user.value?.status) === 2)
+
   let initialized = false
   let initPromise: Promise<void> | null = null
 
@@ -59,6 +69,11 @@ export const useAuthStore = defineStore('auth', () => {
         if (configsRes.data?.code === 0) {
           requireLogin.value = configsRes.data.data?.require_login !== 'false'
           allowRegister.value = configsRes.data.data?.allow_register !== 'false'
+          // 注册手机号：超管可在后台关掉收集、或改成选填（默认收集且必填）。
+          // 关闭收集时必填一并作废，否则会出现「输入框不显示却要求填」的死锁。
+          const phoneEnabled = configsRes.data.data?.register_phone_enabled !== 'false'
+          registerPhoneEnabled.value = phoneEnabled
+          registerPhoneRequired.value = phoneEnabled && configsRes.data.data?.register_phone_required !== 'false'
           if (configsRes.data.data?.site_title) {
             siteTitle.value = configsRes.data.data.site_title
           }
@@ -100,6 +115,18 @@ export const useAuthStore = defineStore('auth', () => {
                 }
               }
             } catch {}
+          } else if (await restorePendingSession()) {
+            // 待审核（status === 2）用户的会话在刷新后的**恢复**路径。
+            //
+            // 背景：/auth/check 只认 status === 1 的账号（pending 用户在那里
+            // 拿到 authenticated:false、user:null），但令牌本身是有效的——
+            // /auth/me、/rental/users/me/approval、/rental/ledgers/mine 这些
+            // pending 白名单接口仍然返回 200。只按 checkAuth 判就会把待审核
+            // 用户直接登出到登录页，永远看不到「等待审核」页（实测踩到）。
+            //
+            // 所以这里用白名单里的 /rental/users/me/approval 兜一层：它能同时
+            // 给出权威的 status 与用户名。仅当服务端确认 pending 时才认这个
+            // 会话，其余情况（令牌失效/账号被禁用）照旧清本地。
           } else {
             clearSession()
           }
@@ -111,6 +138,37 @@ export const useAuthStore = defineStore('auth', () => {
     })()
 
     return initPromise
+  }
+
+  // restorePendingSession 在 checkAuth 未认下会话时，用待审核白名单接口
+  // 判断「是不是一个仍然有效的待审核会话」。返回 true 表示已恢复登录态
+  // （user 里带 status === 2，路由守卫据此把人送到 /pending）。
+  //
+  // 网关域上不带应用令牌时不该走这条路（那里的身份由服务端从网关注入头解析），
+  // 所以只在确实有本地令牌时尝试。
+  async function restorePendingSession(): Promise<boolean> {
+    if (!token.value) return false
+    try {
+      const res = await getMyApproval()
+      const d = res.data?.data
+      if (res.data?.code !== 0 || !d?.pending) return false
+      // 用户名不在该接口的返回里，用 /auth/me（同样在白名单内）补齐；
+      // 失败时不阻塞：只要 status 对，页面与守卫就够用了。
+      let username = ''
+      let id = 0
+      try {
+        const meRes = await getCurrentUser()
+        if (meRes.data?.code === 0) {
+          id = Number(meRes.data.data?.id) || 0
+          username = String(meRes.data.data?.username || '')
+        }
+      } catch {}
+      user.value = { id, username, role: 'user', status: d.status }
+      sessionSource.value = 'app'
+      return true
+    } catch {
+      return false
+    }
   }
 
   function resetInit() {
@@ -179,5 +237,5 @@ export const useAuthStore = defineStore('auth', () => {
       .catch(() => {})
   }
 
-  return { token, user, requireLogin, allowRegister, setupRequired, siteTitle, hasSecurityQuestions, securityPromptDismissed, sessionSource, isAuthenticated, isAdmin, init, resetInit, setToken, setUser, endSession, logout, checkSetupRequired, dismissSecurityPrompt, refreshSecurityQuestions }
+  return { token, user, requireLogin, allowRegister, registerPhoneEnabled, registerPhoneRequired, setupRequired, siteTitle, hasSecurityQuestions, securityPromptDismissed, sessionSource, isAuthenticated, isAdmin, isPendingUser, init, resetInit, setToken, setUser, endSession, logout, checkSetupRequired, dismissSecurityPrompt, refreshSecurityQuestions }
 })

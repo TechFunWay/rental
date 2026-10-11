@@ -3,7 +3,7 @@
 #
 # 覆盖《应用支持功能与在线统计接入指南》验收清单的核心项：
 #   1. 匿名心跳上报：字段齐全、device_id 为 32 位哈希、无 hostname
-#   2. 赞赏链路：已登录成功 → {"ok":true}；未登录 401
+#   2. 赞赏链路：已登录成功 → {"ok":true}；未登录 401；金额随上报体透传并钳位
 #   3. 备份接口：创建/列表/下载/删除 + 路径穿越拒绝
 #   4. 版本检查：假发布渠道返回新版本 → has_update=true
 #   5. 退出开关：DISABLE_STATS=1 时无任何上报
@@ -23,7 +23,14 @@ say()  { printf '%s\n' "$*"; }
 pass() { say "PASS  $*"; }
 fail() { say "FAIL  $*"; FAILS=$((FAILS+1)); }
 
-cleanup() { kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; rm -rf "$TMP"; }
+# 退出时把业务进程与假统计服务一并收掉：假服务不退会一直占着 stdout，
+# 脚本本身结束了但 `bash scripts/smoke.sh | tail` 这类管道仍然挂着不返回。
+cleanup() {
+  kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
+  [ -n "${FAKE_PID:-}" ] && { kill "$FAKE_PID" 2>/dev/null; wait "$FAKE_PID" 2>/dev/null; }
+  # 成功时清掉临时目录；失败时保留现场（日志/假服务记录）供排查
+  if [ "${FAILS:-0}" -eq 0 ]; then rm -rf "$TMP"; else say "失败现场保留在 $TMP"; fi
+}
 trap cleanup EXIT
 
 # ---------- 假统计/发布渠道服务 ----------
@@ -87,7 +94,7 @@ start_server() {
 }
 
 say "== 阶段 1：正常启动（统计开启） =="
-start_server "STATS_ENDPOINT=$STATS_URL UPDATE_CHECK_URL=$GH_URL"
+start_server "STATS_ENDPOINT=$STATS_URL UPDATE_CHECK_GITEE_URL=$GH_URL UPDATE_CHECK_URL=$GH_URL"
 pass "server up"
 
 # 首个注册用户即管理员
@@ -109,6 +116,24 @@ CODE=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' -X POST "$API/donate/
 # 已登录赞赏 → ok:true（假服务 200）
 DON=$(curl -s --max-time 8 -X POST "$API/donate/support" -H "$AUTH")
 echo "$DON" | grep -q '"ok":true' && pass "donate support ok" || fail "donate: $DON"
+
+# 赞赏带金额：上报体应携带 amount=6.6（接收端据此统计赞赏流水）
+DONA=$(curl -s --max-time 8 -X POST "$API/donate/support" -H "$AUTH" -H 'Content-Type: application/json' -d '{"amount":6.6}')
+echo "$DONA" | grep -q '"ok":true' && pass "donate with amount ok" || fail "donate amount: $DONA"
+
+# 超额金额（99999）应被钳到上限 1000，不能污染接收端统计
+DONB=$(curl -s --max-time 8 -X POST "$API/donate/support" -H "$AUTH" -H 'Content-Type: application/json' -d '{"amount":99999}')
+echo "$DONB" | grep -q '"ok":true' && pass "donate oversized ok" || fail "donate oversized: $DONB"
+
+sleep 0.5
+python3 - "$TMP/stats.log" <<'PY' && pass "donate payload carries clamped amount" || fail "donate amount payload"
+import json, sys
+lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+don = [e for e in lines if e.get("event") == "donate_support"]
+assert don, "no donate event"
+assert any(e.get("amount") == 6.6 for e in don), [e.get("amount") for e in don]
+assert any(e.get("amount") == 1000 for e in don), [e.get("amount") for e in don]
+PY
 
 # 版本检查：假渠道 v9.9.9 > v0.1.0
 CHK=$(curl -s --max-time 8 "$API/version/check" -H "$AUTH")
@@ -160,7 +185,7 @@ DEVICE_ID=$(python3 -c 'import json,sys; print([json.loads(l) for l in open(sys.
 # ---------- 阶段 2：重启后 device_id 稳定 ----------
 say "== 阶段 2：重启（同一数据目录） =="
 : > "$TMP/stats.log"
-start_server "STATS_ENDPOINT=$STATS_URL UPDATE_CHECK_URL=$GH_URL"
+start_server "STATS_ENDPOINT=$STATS_URL UPDATE_CHECK_GITEE_URL=$GH_URL UPDATE_CHECK_URL=$GH_URL"
 sleep 0.5
 NEW_ID=$(python3 -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[1])][0]["device_id"])' "$TMP/stats.log" 2>/dev/null)
 [ "$NEW_ID" = "$DEVICE_ID" ] && pass "device_id stable across restart" || fail "device_id changed: $DEVICE_ID → $NEW_ID"
@@ -169,7 +194,7 @@ kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
 # ---------- 阶段 3：DISABLE_STATS=1 ----------
 say "== 阶段 3：DISABLE_STATS=1 =="
 : > "$TMP/stats.log"
-start_server "STATS_ENDPOINT=$STATS_URL UPDATE_CHECK_URL=$GH_URL DISABLE_STATS=1"
+start_server "STATS_ENDPOINT=$STATS_URL UPDATE_CHECK_GITEE_URL=$GH_URL UPDATE_CHECK_URL=$GH_URL DISABLE_STATS=1"
 sleep 0.5
 [ ! -s "$TMP/stats.log" ] && pass "no reports when DISABLE_STATS=1" || fail "reports leaked: $(cat "$TMP/stats.log")"
 DON2=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' -X POST "$API/donate/support" -H "$AUTH" 2>/dev/null)
@@ -177,8 +202,8 @@ kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
 
 say ""
 if [ "$FAILS" -eq 0 ]; then
-  say "全部通过 ✅  (artifacts in $TMP kept for inspection)"
+  say "全部通过 ✅"
 else
-  say "失败 $FAILS 项 ❌  (artifacts in $TMP)"
+  say "失败 $FAILS 项 ❌"
 fi
 exit "$FAILS"

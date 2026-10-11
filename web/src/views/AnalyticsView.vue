@@ -35,7 +35,7 @@
     </div>
 
     <!-- 收入趋势：SVG 柱状图（应收 vs 实收） -->
-    <div class="surface rounded-2xl p-4 sm:p-6">
+    <div class="surface rounded-2xl p-3.5 sm:p-6">
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-sm sm:text-base font-bold text-foreground">收入趋势</h3>
         <div class="flex items-center gap-3 text-[11px] text-muted-foreground">
@@ -76,7 +76,7 @@
     </div>
 
     <!-- 项目收入构成 -->
-    <div class="surface rounded-2xl p-4 sm:p-6">
+    <div class="surface rounded-2xl p-3.5 sm:p-6">
       <h3 class="text-sm sm:text-base font-bold text-foreground mb-4">项目收入构成</h3>
       <div v-if="items.length === 0" class="py-10 text-center text-sm text-muted-foreground">区间内还没有账单明细</div>
       <div v-else class="space-y-3">

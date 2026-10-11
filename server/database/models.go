@@ -10,6 +10,11 @@ type User struct {
 	Status      int    `gorm:"default:1"`
 	APIKey      string
 	AuthVersion uint `gorm:"not null;default:1"`
+	// Phone 是注册时填写的手机号，**只作联系/认人用途**（管理员在用户列表里
+	// 一眼看出谁是谁），不做唯一约束、不参与登录、不作为身份凭据。
+	// 是否显示与是否必填由系统配置 register_phone_enabled / register_phone_required
+	// 控制（见 rental/rental.go 的 registerConfigs）。
+	Phone string
 	// FnOSUserID is the NAS-local UID from the fnOS unified gateway. It is a
 	// binding identifier, never an API token or credential.
 	FnOSUserID   *uint `gorm:"uniqueIndex"`

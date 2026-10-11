@@ -23,7 +23,7 @@
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       <!-- Change password -->
-      <section class="surface rounded-2xl p-6 sm:p-7">
+      <section class="surface rounded-2xl p-3.5 sm:p-7">
         <div class="flex items-center gap-3 mb-5">
           <div class="w-10 h-10 rounded-xl bg-brand-50 dark:bg-brand-500/15 text-brand-600 dark:text-brand-300 flex items-center justify-center">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V8a4 4 0 118 0v3"/></svg>
@@ -48,8 +48,34 @@
         </form>
       </section>
 
+      <!-- 账号信息：手机号是注册时填的（只作联系/认人用途），此前收了却没有任何
+           界面能看到自己的号码；这里做成只读展示（改号请让管理员在用户列表里核对）。 -->
+      <section class="surface rounded-2xl p-3.5 sm:p-7">
+        <div class="flex items-center gap-3 mb-5">
+          <div class="w-10 h-10 rounded-xl bg-sky-50 dark:bg-sky-500/15 text-sky-600 dark:text-sky-300 flex items-center justify-center">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5" stroke-width="2"/><path stroke-linecap="round" stroke-width="2" d="M11 18.5h2"/></svg>
+          </div>
+          <h2 class="text-lg font-bold text-foreground">账号信息</h2>
+        </div>
+        <div class="space-y-2.5 text-sm">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-muted-foreground">用户名</span>
+            <span class="font-semibold text-foreground truncate">{{ authStore.user?.username || '—' }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-muted-foreground">手机号</span>
+            <span class="font-semibold text-foreground tabular-nums">{{ ownPhone || '未填写' }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-muted-foreground">角色</span>
+            <span class="font-semibold text-foreground">{{ authStore.isAdmin ? '管理员' : '普通用户' }}</span>
+          </div>
+        </div>
+        <p class="text-[11px] text-muted-foreground mt-3 leading-5">手机号只用于联系与认人，不参与登录；需要修改请联系管理员。</p>
+      </section>
+
       <!-- API Key -->
-      <section class="surface rounded-2xl p-6 sm:p-7">
+      <section class="surface rounded-2xl p-3.5 sm:p-7">
         <div class="flex items-center gap-3 mb-5">
           <div class="w-10 h-10 rounded-xl bg-amber-50 dark:bg-amber-500/15 text-amber-600 dark:text-amber-300 flex items-center justify-center">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
@@ -69,7 +95,7 @@
     </div>
 
     <!-- Security questions -->
-    <section class="surface rounded-2xl p-6 sm:p-7">
+    <section class="surface rounded-2xl p-3.5 sm:p-7">
       <div class="flex items-center gap-3 mb-5">
         <div class="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 flex items-center justify-center">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
@@ -105,7 +131,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { changePassword, regenerateAPIKey } from '../api/auth'
+import { changePassword, getCurrentUser, regenerateAPIKey } from '../api/auth'
 import { getSecurityQuestions, setSecurityQuestions } from '../api/security'
 import { passwordValidationError } from '../utils/password'
 
@@ -135,7 +161,15 @@ const apiKeyLoading = ref(false)
 const apiKeyMsg = ref('')
 const apiKeySuccess = ref(false)
 
+// 自己的手机号：/auth/check 的 user 里没有这个字段，个人资料页单独拉 /auth/me
+// （后端已下发 phone）。只读展示。
+const ownPhone = ref('')
+
 onMounted(async () => {
+  try {
+    const me = await getCurrentUser()
+    if (me.data?.code === 0) ownPhone.value = me.data.data?.phone || ''
+  } catch {}
   try {
     const res = await getSecurityQuestions()
     if (res.data?.code === 0 && res.data.data?.has_questions) {

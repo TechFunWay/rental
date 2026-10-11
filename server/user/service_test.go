@@ -33,6 +33,12 @@ func setupUserDB(t *testing.T) *gorm.DB {
 	if err := sysconfig.InitDefaultConfigs(db); err != nil {
 		t.Fatal(err)
 	}
+	// 注册手机号默认必填（2026-10-11 粉丝需求）。本文件考的是登录、飞牛绑定与
+	// 账号状态，与手机号无关，注册请求里没带 phone——显式关掉必填，让用例继续
+	// 考本来要考的东西。手机号策略本身由 rental/phone_test.go 覆盖。
+	if err := sysconfig.UpdateConfig(db, "register_phone_required", "false", 0); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 

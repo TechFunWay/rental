@@ -124,8 +124,12 @@ func init() {
 	})
 	RegisterConfig(ConfigDef{
 		Key: "site_description", Scope: ScopeSystem, Type: TypeString,
-		Default: "现代化的全栈应用框架", Public: true,
-		Group: "general", Label: "站点描述",
+		// 默认值按应用写：这里是「租房管理」的站点描述。框架基线里是通用文案
+		// （「现代化的全栈应用框架」），实例仓库落地时必须换成自己的一句话简介，
+		// 否则系统配置里显示的是框架说明而不是这个应用（2026-10-11 用户要求）。
+		Default: "面向房东、公寓与宿舍管理者的租房管理：房源与租户登记、抄表出账、收款与欠缴跟踪，数据按台账隔离",
+		Public:  true,
+		Group:   "general", Label: "站点描述",
 		Description: "站点的简短介绍",
 	})
 	RegisterConfig(ConfigDef{
