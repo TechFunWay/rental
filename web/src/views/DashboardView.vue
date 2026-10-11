@@ -1,66 +1,76 @@
 <template>
   <div class="page-container animate-fade-in">
-    <!-- 欢迎横幅：手机端收紧（介绍长文案只在桌面端显示） -->
-    <div class="relative overflow-hidden rounded-2xl bg-brand-gradient p-4 sm:p-9 shadow-glow">
+    <!-- 欢迎横幅：手机端收紧（p-3、按钮与间距都收一档），
+         介绍长文案只在桌面端显示 -->
+    <div class="relative overflow-hidden rounded-2xl bg-brand-gradient p-3 sm:p-9 shadow-glow">
       <div class="absolute -top-16 -right-16 w-64 h-64 rounded-full bg-white/10 blur-2xl"></div>
       <div class="absolute -bottom-20 -left-10 w-56 h-56 rounded-full bg-black/10 blur-2xl"></div>
       <div class="relative">
         <p class="text-white/80 text-xs sm:text-sm font-medium">{{ greeting }}，{{ authStore.user?.username || '房东' }} 👋</p>
-        <h1 class="text-xl sm:text-3xl font-extrabold text-white mt-1 sm:mt-2">租房管理</h1>
+        <h1 class="text-lg sm:text-3xl font-extrabold text-white mt-0.5 sm:mt-2">租房管理</h1>
         <p class="hidden sm:block text-white/80 mt-3 max-w-xl">房源、租户与月度抄表账单一站式管理，费用自动计算，欠缴一目了然。</p>
-        <div class="flex flex-wrap gap-2 sm:gap-3 mt-3 sm:mt-6">
-          <RouterLink to="/admin/bills" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white text-brand-700 text-sm font-semibold hover:bg-white/90 active:scale-[0.98] transition-all">
+        <div class="flex flex-wrap gap-2 sm:gap-3 mt-2.5 sm:mt-6">
+          <RouterLink to="/admin/bills" class="inline-flex items-center gap-2 px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl bg-white text-brand-700 text-sm font-semibold hover:bg-white/90 active:scale-[0.98] transition-all">
             去抄表记账
           </RouterLink>
-          <RouterLink to="/admin/rooms" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/15 text-white text-sm font-semibold backdrop-blur hover:bg-white/25 active:scale-[0.98] transition-all">
+          <RouterLink to="/admin/rooms" class="inline-flex items-center gap-2 px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl bg-white/15 text-white text-sm font-semibold backdrop-blur hover:bg-white/25 active:scale-[0.98] transition-all">
             管理房源
           </RouterLink>
         </div>
       </div>
     </div>
 
-    <!-- 统计卡：手机两列两行（两位小数金额要完整显示，四列放不下），桌面一行四列大卡 -->
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
-      <div v-for="card in statCards" :key="card.label" class="surface rounded-2xl p-3 lg:p-5 hover:-translate-y-0.5 transition-transform min-w-0">
-        <div class="flex items-center justify-between gap-1">
-          <span class="text-xs lg:text-sm text-muted-foreground">{{ card.label }}</span>
-          <span class="w-9 h-9 rounded-lg items-center justify-center hidden lg:flex" :class="card.bg">
+    <!-- 统计卡：手机端两列两行（两位小数金额要完整显示，四列放不下），
+         内边距 p-3 → p-2.5、数字 text-xl → text-lg，把小屏行高收紧 -->
+    <!-- 统计卡：手机端两列两行（两位小数金额要完整显示，四列放不下——
+         实测 81px 宽时「当前在住人数」「在租 1 · 空闲 0」会被截断，违反内容不截断底线）。
+         手机端把「标签 + 数字」压到同一行（原来三行：标签/数字/说明），
+         每张卡从 89px 降到约 62px，两行共省 54px；桌面保持原来的三行大卡。 -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 lg:gap-4">
+      <div v-for="card in statCards" :key="card.label" class="surface rounded-2xl px-2.5 py-2 lg:p-5 hover:-translate-y-0.5 transition-transform min-w-0">
+        <div class="lg:hidden flex items-baseline justify-between gap-1.5">
+          <span class="text-xs text-muted-foreground shrink-0">{{ card.label }}</span>
+          <span class="text-base font-extrabold text-foreground tabular-nums truncate">{{ card.value }}</span>
+        </div>
+        <div class="hidden lg:flex items-center justify-between gap-1">
+          <span class="text-sm text-muted-foreground">{{ card.label }}</span>
+          <span class="w-9 h-9 rounded-lg items-center justify-center flex" :class="card.bg">
             <span v-html="card.icon" class="w-5 h-5 block"></span>
           </span>
         </div>
-        <div class="mt-1.5 lg:mt-3 text-xl lg:text-2xl font-extrabold text-foreground tabular-nums truncate">{{ card.value }}</div>
-        <div class="mt-1 text-[11px] lg:text-xs text-muted-foreground truncate">{{ card.sub }}</div>
+        <div class="hidden lg:block mt-3 text-2xl font-extrabold text-foreground tabular-nums truncate">{{ card.value }}</div>
+        <div class="mt-0.5 text-[11px] lg:text-xs text-muted-foreground truncate">{{ card.sub }}</div>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 xl:grid-cols-5 gap-4">
+    <div class="grid grid-cols-1 xl:grid-cols-5 gap-2.5 sm:gap-4">
       <!-- 本月收缴进度 -->
-      <div class="surface rounded-2xl p-4 sm:p-6 xl:col-span-3">
-        <div class="flex items-center justify-between mb-5">
+      <div class="surface rounded-2xl p-3 sm:p-6 xl:col-span-3">
+        <div class="flex items-center justify-between mb-2.5 sm:mb-5">
           <h3 class="text-sm sm:text-base font-bold text-foreground">{{ stats?.month.period ?? currentPeriod() }} 收缴情况</h3>
           <span class="badge bg-brand-500/10 text-brand-600 dark:text-brand-300">应收 {{ fmtMoney(stats?.month.total) }} 元</span>
         </div>
-        <div class="space-y-4">
+        <div class="space-y-2.5 sm:space-y-4">
           <div>
-            <div class="flex justify-between text-sm mb-1.5">
+            <div class="flex justify-between text-sm mb-1">
               <span class="text-muted-foreground">已收</span>
               <span class="font-semibold text-emerald-500 tabular-nums">{{ fmtMoney(stats?.month.paid) }} 元</span>
             </div>
-            <div class="h-2.5 rounded-full bg-muted overflow-hidden">
+            <div class="h-2 sm:h-2.5 rounded-full bg-muted overflow-hidden">
               <div class="h-full rounded-full bg-emerald-500 transition-all duration-500" :style="{ width: paidPct + '%' }"></div>
             </div>
           </div>
           <div>
-            <div class="flex justify-between text-sm mb-1.5">
+            <div class="flex justify-between text-sm mb-1">
               <span class="text-muted-foreground">欠缴（{{ stats?.month.arrears_count ?? 0 }} 户）</span>
               <span class="font-semibold text-rose-500 tabular-nums">{{ fmtMoney(stats?.month.outstanding) }} 元</span>
             </div>
-            <div class="h-2.5 rounded-full bg-muted overflow-hidden">
+            <div class="h-2 sm:h-2.5 rounded-full bg-muted overflow-hidden">
               <div class="h-full rounded-full bg-rose-500 transition-all duration-500" :style="{ width: arrearsPct + '%' }"></div>
             </div>
           </div>
         </div>
-        <div class="mt-5 pt-4 border-t border-border flex items-center justify-between text-sm">
+        <div class="mt-2.5 sm:mt-5 pt-2.5 sm:pt-4 border-t border-border flex items-center justify-between text-sm">
           <span class="text-muted-foreground">历史累计欠缴</span>
           <span class="font-bold text-rose-500 tabular-nums">
             {{ fmtMoney(stats?.overall.outstanding) }} 元（{{ stats?.overall.arrears_count ?? 0 }} 张账单）
@@ -68,49 +78,51 @@
         </div>
       </div>
 
-      <!-- 房源概况 -->
-      <div class="surface rounded-2xl p-4 sm:p-6 xl:col-span-2">
-        <h3 class="text-sm sm:text-base font-bold text-foreground mb-4 sm:mb-5">房源概况</h3>
-        <div class="space-y-4">
-          <div class="flex items-center justify-between p-3.5 rounded-xl bg-muted">
+      <!-- 房源概况：手机端行高收紧（p-3.5 → px-3 py-2.5，数字 text-lg → text-base） -->
+      <div class="surface rounded-2xl p-3 sm:p-6 xl:col-span-2">
+        <h3 class="text-sm sm:text-base font-bold text-foreground mb-2.5 sm:mb-5">房源概况</h3>
+        <div class="space-y-1.5 sm:space-y-4">
+          <div class="flex items-center justify-between px-3 py-2 sm:p-3.5 rounded-xl bg-muted">
             <span class="text-sm text-muted-foreground">房源总数</span>
-            <span class="text-lg font-bold text-foreground tabular-nums">{{ stats?.rooms_total ?? 0 }}</span>
+            <span class="text-base sm:text-lg font-bold text-foreground tabular-nums">{{ stats?.rooms_total ?? 0 }}</span>
           </div>
-          <div class="flex items-center justify-between p-3.5 rounded-xl bg-emerald-500/10">
+          <div class="flex items-center justify-between px-3 py-2 sm:p-3.5 rounded-xl bg-emerald-500/10">
             <span class="text-sm text-muted-foreground">在租</span>
-            <span class="text-lg font-bold text-emerald-500 tabular-nums">{{ stats?.rooms_occupied ?? 0 }}</span>
+            <span class="text-base sm:text-lg font-bold text-emerald-500 tabular-nums">{{ stats?.rooms_occupied ?? 0 }}</span>
           </div>
-          <div class="flex items-center justify-between p-3.5 rounded-xl bg-muted">
+          <div class="flex items-center justify-between px-3 py-2 sm:p-3.5 rounded-xl bg-muted">
             <span class="text-sm text-muted-foreground">空闲</span>
-            <span class="text-lg font-bold text-foreground tabular-nums">{{ stats?.rooms_vacant ?? 0 }}</span>
+            <span class="text-base sm:text-lg font-bold text-foreground tabular-nums">{{ stats?.rooms_vacant ?? 0 }}</span>
           </div>
-          <div class="flex items-center justify-between p-3.5 rounded-xl bg-muted">
+          <div class="flex items-center justify-between px-3 py-2 sm:p-3.5 rounded-xl bg-muted">
             <span class="text-sm text-muted-foreground">在租租户</span>
-            <span class="text-lg font-bold text-foreground tabular-nums">{{ stats?.tenants_active ?? 0 }}</span>
+            <span class="text-base sm:text-lg font-bold text-foreground tabular-nums">{{ stats?.tenants_active ?? 0 }}</span>
           </div>
         </div>
       </div>
     </div>
 
     <!-- 到期提醒 + 缴费提醒 + 欠缴名单：不用翻列表就知道该办什么 -->
-    <div class="grid grid-cols-1 xl:grid-cols-3 gap-4">
-      <!-- 缴费提醒（按房间设置的缴费日，窗口内或已逾期） -->
-      <div class="surface rounded-2xl p-4 sm:p-6">
-        <div class="flex items-center justify-between mb-4">
+    <div class="grid grid-cols-1 xl:grid-cols-3 gap-2.5 sm:gap-4">
+      <!-- 缴费提醒（按房间设置的缴费日，窗口内或已逾期）。
+           面板自带 p-3.5，列表容器用 -mx-2 抵消、不重复加 p-2（见 mobile-ui 规范），
+           每条数据是独立卡片（圆角+边框+底色），条目间距 6px。 -->
+      <div class="surface rounded-2xl p-3 sm:p-6">
+        <div class="flex items-center justify-between mb-2.5 sm:mb-4">
           <h3 class="text-sm sm:text-base font-bold text-foreground">缴费提醒</h3>
           <span class="badge shrink-0" :class="paymentDue.length ? 'bg-amber-500/10 text-amber-600 dark:text-amber-300' : 'bg-muted text-muted-foreground'">
             {{ paymentDue.length ? `${paymentDue.length} 笔` : '暂无' }}
           </span>
         </div>
-        <div v-if="!paymentDue.length" class="text-sm text-muted-foreground py-6 text-center">
+        <div v-if="!paymentDue.length" class="text-sm text-muted-foreground py-4 text-center">
           暂无临期或逾期的缴费。到「租户管理」给租户设置缴费日即可开启提醒。
         </div>
-        <div v-else class="divide-y divide-border/60">
+        <div v-else class="-mx-2 space-y-1.5">
           <RouterLink
             v-for="p in paymentDue"
             :key="p.room_id"
             to="/admin/bills"
-            class="flex items-center justify-between py-2 group"
+            class="flex items-center justify-between rounded-xl border border-border bg-surface/80 px-3 py-2 group"
             :title="p.due_date"
           >
             <div class="min-w-0">
@@ -118,7 +130,7 @@
                 <span class="text-sm font-semibold text-foreground">{{ p.room_no }}</span>
                 <span class="text-xs text-muted-foreground truncate">{{ p.tenant_name || '—' }}</span>
               </div>
-              <div class="text-[11px] text-muted-foreground mt-0.5 tabular-nums">
+              <div class="text-[11px] text-muted-foreground mt-0.5 tabular-nums truncate">
                 {{ cycleLabel(p.pay_cycle) }} · {{ coveredPeriodText(p.period, p.pay_cycle) }} · 每月 {{ p.pay_day }} 号收 · 预计 {{ fmtMoney(p.expected_amount) }} 元
               </div>
             </div>
@@ -130,20 +142,20 @@
       </div>
 
       <!-- 租约到期（60 天内含已过期） -->
-      <div class="surface rounded-2xl p-4 sm:p-6">
-        <div class="flex items-center justify-between mb-4">
+      <div class="surface rounded-2xl p-3 sm:p-6">
+        <div class="flex items-center justify-between mb-2.5 sm:mb-4">
           <h3 class="text-sm sm:text-base font-bold text-foreground">租约到期提醒</h3>
           <span class="badge shrink-0" :class="leaseDue.length ? 'bg-amber-500/10 text-amber-600 dark:text-amber-300' : 'bg-muted text-muted-foreground'">
             {{ leaseDue.length ? `${leaseDue.length} 户` : '暂无' }}
           </span>
         </div>
-        <div v-if="!leaseDue.length" class="text-sm text-muted-foreground py-6 text-center">60 天内没有到期的租约。</div>
-        <div v-else class="divide-y divide-border/60">
+        <div v-if="!leaseDue.length" class="text-sm text-muted-foreground py-4 text-center">60 天内没有到期的租约。</div>
+        <div v-else class="-mx-2 space-y-1.5">
           <RouterLink
             v-for="t in leaseDue"
             :key="t.id"
             to="/admin/tenants"
-            class="flex items-center justify-between py-2 group"
+            class="flex items-center justify-between rounded-xl border border-border bg-surface/80 px-3 py-2 group"
           >
             <div class="min-w-0">
               <span class="text-sm font-semibold text-foreground">{{ t.name }}</span>
@@ -157,20 +169,20 @@
       </div>
 
       <!-- 本月欠缴户 -->
-      <div class="surface rounded-2xl p-4 sm:p-6">
-        <div class="flex items-center justify-between mb-4">
+      <div class="surface rounded-2xl p-3 sm:p-6">
+        <div class="flex items-center justify-between mb-2.5 sm:mb-4">
           <h3 class="text-sm sm:text-base font-bold text-foreground">本月欠缴（{{ stats?.month.period ?? currentPeriod() }}）</h3>
           <span class="badge shrink-0" :class="arrearsList.length ? 'bg-rose-500/10 text-rose-500' : 'bg-muted text-muted-foreground'">
             {{ arrearsList.length ? `${arrearsList.length} 户` : '已收齐' }}
           </span>
         </div>
-        <div v-if="!arrearsList.length" class="text-sm text-muted-foreground py-6 text-center">本月账单已全部收齐。</div>
-        <div v-else class="divide-y divide-border/60">
+        <div v-if="!arrearsList.length" class="text-sm text-muted-foreground py-4 text-center">本月账单已全部收齐。</div>
+        <div v-else class="-mx-2 space-y-1.5">
           <RouterLink
             v-for="a in arrearsList"
             :key="a.id"
             to="/admin/bills"
-            class="flex items-center justify-between py-2 group"
+            class="flex items-center justify-between rounded-xl border border-border bg-surface/80 px-3 py-2 group"
           >
             <div class="min-w-0">
               <span class="text-sm font-semibold text-foreground">{{ a.room_no }}</span>
@@ -183,8 +195,8 @@
     </div>
 
     <!-- 最近账单 -->
-    <div class="surface rounded-2xl p-4 sm:p-6">
-      <div class="flex items-center justify-between mb-4">
+    <div class="surface rounded-2xl p-3 sm:p-6">
+      <div class="flex items-center justify-between mb-2.5 sm:mb-4">
         <h3 class="text-sm sm:text-base font-bold text-foreground">最近账单</h3>
         <RouterLink to="/admin/bills" class="text-sm text-brand-600 dark:text-brand-300 hover:underline">查看全部</RouterLink>
       </div>

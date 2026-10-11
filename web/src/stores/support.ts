@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { getVersion } from '../api/config'
-import { checkUpdate, donateSupport, type UpdateInfo } from '../api/system'
+import {
+  applyUpdate as applyUpdateApi, checkUpdate, donateSupport, getUpdateApplyStatus,
+  type UpdateApplyStage, type UpdateInfo,
+} from '../api/system'
 
 // 赞赏支持与新版本提示的全局状态。
 //
@@ -76,6 +79,118 @@ export const useSupportStore = defineStore('support', () => {
   const updateInfo = ref<UpdateInfo | null>(null)
   const updateBannerVisible = ref(false)
 
+  // ---- 版本与更新弹窗（常驻入口：顶栏版本号按钮 / 系统设置卡片）----
+  const updateDialogVisible = ref(false)
+  const checkingUpdate = ref(false)
+  const checkError = ref('')
+
+  // ---- 一键自更新（管理员）：下载 → 替换 → 原地重启 ----
+  const applyStage = ref<UpdateApplyStage>('idle')
+  const applyMessage = ref('')
+  let applyPollTimer: ReturnType<typeof setInterval> | null = null
+  let restartPollTimer: ReturnType<typeof setInterval> | null = null
+
+  const applying = computed(() =>
+    ['resolving', 'downloading', 'verifying', 'replacing', 'restarting'].includes(applyStage.value))
+
+  const applyButtonText = computed(() => {
+    switch (applyStage.value) {
+      case 'resolving': return '检查中…'
+      case 'downloading': return '下载中…'
+      case 'verifying': return '校验中…'
+      case 'replacing': return '替换文件中…'
+      case 'restarting': return '重启中…'
+      case 'failed': return '重试更新'
+      default: return '⚡ 一键更新'
+    }
+  })
+
+  function stopApplyPoll() {
+    if (applyPollTimer) { clearInterval(applyPollTimer); applyPollTimer = null }
+    if (restartPollTimer) { clearInterval(restartPollTimer); restartPollTimer = null }
+  }
+
+  /** 轮询任务阶段；服务重启瞬间连接断开即转入"等待服务恢复"。 */
+  function pollApplyStatus() {
+    stopApplyPoll()
+    applyPollTimer = setInterval(async () => {
+      try {
+        const res = await getUpdateApplyStatus()
+        const d = res.data?.data
+        if (!d) return
+        applyStage.value = d.stage
+        applyMessage.value = d.message || ''
+        if (d.stage === 'restarting') waitServiceBack()
+        if (d.stage === 'failed' || d.stage === 'idle') stopApplyPoll()
+      } catch {
+        // 连接断开 = 正在重启，等新进程接管
+        waitServiceBack()
+      }
+    }, 1500)
+  }
+
+  /** 轮询公开 /api/version 直到新进程接管（版本号变化），成功后刷新页面。
+   *
+   *  两个关键点（2026-10-11 修）：
+   *  1. 地址必须带 BASE_URL：飞牛包的前端基址是 /app/techfunway-rental/，
+   *     写死 '/api/version' 会落到网关根目录 404，永远等不到服务恢复；
+   *  2. 必须比对版本号：替换二进制到 exec 之间旧进程仍在服务，只要「有响应」
+   *     就判定成功会在重启刚开始时误报「已更新到旧版本」，还把新版本号写进
+   *     「已提示」记录导致横幅永久消失。只有拿到的版本既不等于当前版本、
+   *     又等于目标版本时才认为新进程已接管。 */
+  function waitServiceBack() {
+    if (restartPollTimer) return
+    if (applyPollTimer) { clearInterval(applyPollTimer); applyPollTimer = null }
+    const target = updateInfo.value?.latest || ''
+    const from = appVersion.value || updateInfo.value?.current || ''
+    applyStage.value = 'restarting'
+    applyMessage.value = '重启完成，等待服务恢复…'
+    let tries = 0
+    restartPollTimer = setInterval(async () => {
+      tries++
+      try {
+        const res = await fetch(`${import.meta.env.BASE_URL}api/version`)
+        const j = await res.json()
+        const v = j?.data?.version || ''
+        const replaced = v && v !== from && (!target || v === target)
+        if (replaced) {
+          stopApplyPoll()
+          applyStage.value = 'failed' // 复用 failed 视觉（停止 applying 态），文案给成功
+          applyMessage.value = `已更新到 ${v}，页面即将刷新…`
+          lsSet(KEY_UPDATE_DISMISSED, v) // 新版本内不再弹同一条横幅
+          setTimeout(() => location.reload(), 1500)
+        }
+      } catch {
+        if (tries > 90) {
+          stopApplyPoll()
+          applyStage.value = 'failed'
+          applyMessage.value = '等待服务恢复超时，请手动刷新页面查看版本'
+        }
+      }
+    }, 1000)
+  }
+
+  /** 一键更新入口：失败无损（服务端各阶段都先落暂存再替换）。 */
+  async function applyNewVersion() {
+    if (applying.value) return
+    applyStage.value = 'resolving'
+    applyMessage.value = '正在获取最新版本信息…'
+    try {
+      const res = await applyUpdateApi()
+      if (res.data?.code === 0 && res.data.data) {
+        applyStage.value = res.data.data.stage
+        applyMessage.value = res.data.data.message || ''
+        pollApplyStatus()
+      } else {
+        applyStage.value = 'failed'
+        applyMessage.value = res.data?.message || '启动更新失败'
+      }
+    } catch {
+      applyStage.value = 'failed'
+      applyMessage.value = '启动更新失败，请稍后再试'
+    }
+  }
+
   /** 登录后调用：拉取版本信息并调度提示（仅管理员）。 */
   async function init(isAdmin: boolean) {
     if (!isAdmin) return
@@ -133,9 +248,12 @@ export const useSupportStore = defineStore('support', () => {
   async function maybeCheckUpdate() {
     try {
       const res = await checkUpdate()
-      if (res.data?.code === 0 && res.data.data?.has_update) {
+      if (res.data?.code === 0 && res.data.data) {
+        // 无论有没有新版本都记下来：常驻入口（顶栏版本号按钮 / 系统设置卡片）
+        // 需要据此显示「已经是最新版本」，旧版只在 has_update 时赋值，导致
+        // 「已是最新」这种最正常的状态反而什么也不显示。
         updateInfo.value = res.data.data
-        if (lsGet(KEY_UPDATE_DISMISSED) !== res.data.data.latest) {
+        if (res.data.data.has_update && lsGet(KEY_UPDATE_DISMISSED) !== res.data.data.latest) {
           updateBannerVisible.value = true
         }
       }
@@ -158,15 +276,15 @@ export const useSupportStore = defineStore('support', () => {
     if (appVersion.value) lsSet(KEY_DISMISSED_VERSION, appVersion.value)
   }
 
-  /** 【已支持】上报匿名支持计数，成功才记住当前版本。
+  /** 【已支持】上报匿名支持计数（amount 为赞赏金额，元），成功才记住当前版本。
    *  应用升级到新版本后 supportedVersion 与当前版本不一致，横幅与
    *  启动弹窗会再次出现，再次确认即刷新记录。 */
-  async function confirmSupported(): Promise<boolean> {
+  async function confirmSupported(amount?: number): Promise<boolean> {
     sending.value = true
     errorText.value = ''
     let ok = false
     try {
-      const res = await donateSupport()
+      const res = await donateSupport(amount)
       ok = res.status === 200 && res.data?.code === 0 && res.data?.data?.ok === true
     } catch {
       ok = false
@@ -190,6 +308,39 @@ export const useSupportStore = defineStore('support', () => {
     show.value = true
   }
 
+  /** 手动检查更新：入口常驻（顶栏版本号按钮 / 系统设置「版本与更新」卡片），
+   *  不再依赖「恰好检测到新版本才出现提示条」。 */
+  async function checkUpdateNow() {
+    checkingUpdate.value = true
+    checkError.value = ''
+    try {
+      const res = await checkUpdate()
+      if (res.data?.code === 0 && res.data.data) {
+        updateInfo.value = res.data.data
+        // 手动检查命中有新版本时提示条也一起亮：用户主动点的，看到全部信息
+        // 就行，不必再强行弹回已经关过的提示条。
+        if (res.data.data.has_update && lsGet(KEY_UPDATE_DISMISSED) !== res.data.data.latest) {
+          updateBannerVisible.value = true
+        }
+      } else {
+        checkError.value = res.data?.message || '检查更新失败'
+      }
+    } catch {
+      checkError.value = '检查更新失败，请检查网络或稍后再试'
+    } finally {
+      checkingUpdate.value = false
+    }
+  }
+
+  function openUpdateDialog() {
+    updateDialogVisible.value = true
+    void checkUpdateNow()
+  }
+
+  function closeUpdateDialog() {
+    updateDialogVisible.value = false
+  }
+
   return {
     show,
     sending,
@@ -201,6 +352,17 @@ export const useSupportStore = defineStore('support', () => {
     bannerVisible,
     updateInfo,
     updateBannerVisible,
+    updateDialogVisible,
+    checkingUpdate,
+    checkError,
+    applyStage,
+    applyMessage,
+    applying,
+    applyButtonText,
+    applyNewVersion,
+    checkUpdateNow,
+    openUpdateDialog,
+    closeUpdateDialog,
     init,
     dismiss,
     dismissBanner,

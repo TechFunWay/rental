@@ -1,7 +1,7 @@
 <template>
   <div>
-    <div v-if="label || $slots.labelRight" class="flex items-center justify-between mb-1.5">
-      <label v-if="label" class="block text-sm font-medium text-white/75">{{ label }}</label>
+    <div v-if="label || $slots.labelRight" class="flex items-center justify-between mb-1 sm:mb-1.5">
+      <label v-if="label" class="block text-xs sm:text-sm font-medium text-white/75">{{ label }}</label>
       <slot name="labelRight" />
     </div>
     <div class="relative group">
@@ -23,7 +23,9 @@
           // 手机端 16px：小于 16px 的输入框聚焦时 iOS/WebView 会自动放大页面
           // （表现为输入时整页闪跳），与全局 .input-field 的 16px 口径一致；
           // 桌面端维持原字号。
-          'w-full py-3 rounded-xl bg-white/[0.04] border border-white/10 text-white text-base sm:text-sm placeholder-white/30 focus:bg-white/[0.07] focus:border-brand-400/70 focus:ring-4 focus:ring-brand-500/20 outline-none transition-all',
+          // 手机端纵向内边距 12px → 10px、圆角 12px → 10px，输入框高度 50 → 46，
+          // 桌面端由 sm: 恢复，触控面积仍 ≥44px。
+          'w-full py-2.5 sm:py-3 rounded-[10px] sm:rounded-xl bg-white/[0.04] border border-white/10 text-white text-base sm:text-sm placeholder-white/30 focus:bg-white/[0.07] focus:border-brand-400/70 focus:ring-4 focus:ring-brand-500/20 outline-none transition-all',
           $slots.icon ? 'pl-11' : 'pl-4',
           isPassword ? 'pr-11' : 'pr-4',
         ]"

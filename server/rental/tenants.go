@@ -36,24 +36,31 @@ type tenantRequest struct {
 	PayDay          *int     `json:"pay_day"`
 	RemindDays      *int     `json:"remind_days"`
 	ExcludedFees    []string `json:"excluded_fees"`
-	Notes           string   `json:"notes"`
+	Tags            []string `json:"tags"`
+	// ApplicationID 选填：由「租客自助登记」转入登记时带上，租户创建成功后
+	// 服务端把申请标记为已入库并转移身份证照片到资料附件。
+	ApplicationID uint   `json:"application_id"`
+	Notes         string `json:"notes"`
 }
 
 // tenantRow 是租户列表的出参视图：附加所属房源的位置标签
 // （RoomNo/RoomLabel 由代码补齐，非表字段），用于区分不同小区的同房号房源；
-// ContractsCount 为该租户名下的合同文件数（一条 GROUP BY 批量补齐）。
+// ContractsCount / AttachmentsCount 为该租户名下的合同与资料附件数量
+// （各一条 GROUP BY 批量补齐）。
 type tenantRow struct {
 	Tenant
-	RoomNo         string `gorm:"-" json:"room_no"`
-	RoomLabel      string `gorm:"-" json:"room_label"`
-	ContractsCount int64  `gorm:"-" json:"contracts_count"`
+	RoomNo           string `gorm:"-" json:"room_no"`
+	RoomLabel        string `gorm:"-" json:"room_label"`
+	ContractsCount   int64  `gorm:"-" json:"contracts_count"`
+	AttachmentsCount int64  `gorm:"-" json:"attachments_count"`
 }
 
 func setupTenantRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	read := requireAccess(db, AccessReadonly)
-	edit := requireAccess(db, AccessEdit)
-	full := requireAccess(db, AccessFull)
-	api.GET("/rental/tenants", read, handleTenantList(db))
+	// 读并集、写单台账（详见 rooms.go 的同名说明）。
+	view := requireModule(db, ModuleTenants, PermView)
+	edit := requireLedgerModule(db, ModuleTenants, PermEdit)
+	full := requireLedgerModule(db, ModuleTenants, PermFull)
+	api.GET("/rental/tenants", view, handleTenantList(db))
 	api.POST("/rental/tenants", edit, handleTenantCreate(db))
 	api.PUT("/rental/tenants/:id", edit, handleTenantUpdate(db))
 	api.POST("/rental/tenants/:id/checkout", edit, handleTenantCheckout(db))
@@ -66,11 +73,22 @@ func handleTenantList(db *gorm.DB) gin.HandlerFunc {
 		keyword := strings.TrimSpace(c.Query("keyword"))
 		active := c.Query("active") // "1" 在租 / "0" 已退租 / 空=全部
 		roomID := utils.Atoi(c.Query("room_id"), 0)
+		community := strings.TrimSpace(c.Query("community"))
 
-		query := db.Model(&Tenant{})
+		// v0.6.0：只列本次请求可见台账内的租户。
+		query, empty := scopeLedger(db.Model(&Tenant{}), c)
+		if empty {
+			response.SuccessPage(c, []tenantRow{}, 0, page, pageSize)
+			return
+		}
 		if keyword != "" {
 			like := "%" + keyword + "%"
-			query = query.Where("name LIKE ? OR phone LIKE ?", like, like)
+			query = query.Where("name LIKE ? OR phone LIKE ? OR tags LIKE ?", like, like, like)
+		}
+		if tag := strings.TrimSpace(c.Query("tag")); tag != "" {
+			// 标签筛选：tags 存的是 JSON 数组，按 "标签" 带引号精确命中，
+			// 避免「优质」命中「优质长租」的子串误配
+			query = query.Where("tags LIKE ?", "%\""+tag+"\"%")
 		}
 		if active == "1" {
 			query = query.Where("active = ?", true)
@@ -79,6 +97,11 @@ func handleTenantList(db *gorm.DB) gin.HandlerFunc {
 		}
 		if roomID > 0 {
 			query = query.Where("room_id = ?", roomID)
+		}
+		if community != "" {
+			// 按小区/村组筛租户：房源限定在可见台账内，避免跨台账同名小区串数据
+			query = query.Where("room_id IN (SELECT id FROM rooms WHERE community = ? AND org_id IN ?)",
+				community, visibleLedgerIDs(c))
 		}
 
 		var total int64
@@ -103,7 +126,10 @@ func handleTenantList(db *gorm.DB) gin.HandlerFunc {
 		roomLabels := map[uint]string{}
 		if len(roomIDs) > 0 {
 			rooms := make([]Room, 0, len(roomIDs))
-			db.Where("id IN ?", roomIDs).Find(&rooms)
+			// 房源同样限定可见台账：列表里的租户只可能在本台账的房里，
+			// 这里是为了不让跨台账的同名 ID 脏数据串出别人的房号。
+			rq, _ := scopeLedger(db.Where("id IN ?", roomIDs), c)
+			rq.Find(&rooms)
 			for _, r := range rooms {
 				roomNos[r.ID] = r.RoomNo
 				roomLabels[r.ID] = roomLocationLabel(r)
@@ -121,16 +147,33 @@ func handleTenantList(db *gorm.DB) gin.HandlerFunc {
 				Cnt      int64
 			}
 			counts := make([]countRow, 0, len(tenantIDs))
-			db.Model(&Contract{}).Select("tenant_id, COUNT(*) as cnt").
+			cq, _ := scopeLedger(db.Model(&Contract{}), c)
+			cq.Select("tenant_id, COUNT(*) as cnt").
 				Where("tenant_id IN ?", tenantIDs).Group("tenant_id").Scan(&counts)
 			for _, cr := range counts {
 				contractCounts[cr.TenantID] = cr.Cnt
+			}
+		}
+		// 资料附件数量批量补齐（同样一条 GROUP BY）。
+		attachmentCounts := map[uint]int64{}
+		if len(tenantIDs) > 0 {
+			type countRow struct {
+				TenantID uint
+				Cnt      int64
+			}
+			counts := make([]countRow, 0, len(tenantIDs))
+			aq, _ := scopeLedger(db.Model(&TenantAttachment{}), c)
+			aq.Select("tenant_id, COUNT(*) as cnt").
+				Where("tenant_id IN ?", tenantIDs).Group("tenant_id").Scan(&counts)
+			for _, cr := range counts {
+				attachmentCounts[cr.TenantID] = cr.Cnt
 			}
 		}
 		for i := range rows {
 			rows[i].RoomNo = roomNos[rows[i].RoomID]
 			rows[i].RoomLabel = roomLabels[rows[i].RoomID]
 			rows[i].ContractsCount = contractCounts[rows[i].ID]
+			rows[i].AttachmentsCount = attachmentCounts[rows[i].ID]
 		}
 		response.SuccessPage(c, rows, total, page, pageSize)
 	}
@@ -146,7 +189,14 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 		req.Name = strings.TrimSpace(req.Name)
 
 		// 校验请求体中的房源归属（room_id 在 body 中，不在 URL 参数里）。
-		if _, ok := loadRoom(db, c, req.RoomID); !ok {
+		room, ok := loadRoom(db, c, req.RoomID)
+		if !ok {
+			return
+		}
+		// 写入判定按**房源所属台账**：租户的台账跟随房源，若只看「本次请求
+		// 选中的台账」，不带 ?ledger_id 时会被回落到个人台账（恒完全权限），
+		// 从而往自己只有查看权的台账里塞数据。
+		if !requireLedgerWrite(db, c, room.LedgerID, ModuleTenants, PermEdit) {
 			return
 		}
 		if !validateTenantBillingRequest(c, &req) {
@@ -154,8 +204,11 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		tenant := Tenant{
-			// UserID 录入人戳，仅溯源；业务数据全员共享。
-			UserID:       currentUserID(c),
+			// UserID 录入人戳，仅溯源；数据归属看 LedgerID。
+			UserID: currentUserID(c),
+			// 子记录继承父记录的台账：租户必须落在其房源所属台账里，
+			// 否则用构造出的 room_id 就能在别的台账里造孤儿租户。
+			LedgerID:     room.LedgerID,
 			RoomID:       req.RoomID,
 			Name:         req.Name,
 			Phone:        req.Phone,
@@ -168,9 +221,22 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 		}
 		applyTenantBilling(&tenant, &req)
 		tenant.ExcludedFees = normalizeExcludedFeeKeys(req.ExcludedFees)
+		tenant.Tags = normalizeTags(req.Tags)
 		if err := db.Create(&tenant).Error; err != nil {
 			response.ErrorInternal(c, "创建租户失败")
 			return
+		}
+		// 租客自助登记转入：申请标记已入库，身份证照片挪进该租户附件。
+		// **必须校验申请与租户同台账**：申请 id 是全局递增的，若只按
+		// id + pending 取，任何一个账号都能在自己台账建租户时带上别台账的
+		// application_id，把对方的身份证照片搬进自己的租户附件（2026-10-11
+		// 审计复现）。台账不符时按不存在处理，不提示对方台账的存在。
+		if req.ApplicationID > 0 {
+			var app TenantApplication
+			err := db.Where("id = ? AND status = ?", req.ApplicationID, "pending").First(&app).Error
+			if err == nil && app.LedgerID == tenant.LedgerID {
+				consumeApplication(db, &app, &tenant)
+			}
 		}
 		response.Success(c, tenant)
 	}
@@ -182,6 +248,9 @@ func handleTenantUpdate(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requireLedgerWrite(db, c, tenant.LedgerID, ModuleTenants, PermEdit) {
+			return
+		}
 		var req tenantRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.ErrorBadRequest(c, "请填写租户姓名并选择房源")
@@ -189,7 +258,18 @@ func handleTenantUpdate(db *gorm.DB) gin.HandlerFunc {
 		}
 		req.Name = strings.TrimSpace(req.Name)
 
-		if _, ok := loadRoom(db, c, req.RoomID); !ok {
+		room, ok := loadRoom(db, c, req.RoomID)
+		if !ok {
+			return
+		}
+		// 换房只允许在同一台账内：此前实现让租户的台账跟随新房间，于是
+		// 「在 A、B 两个台账都是成员」的人能把 A 的租户挪到 B 的房间，而 A 里
+		// 已开的账单、抄表记录仍留在 A，两边对不上（2026-10-11 审计）。
+		if room.LedgerID != tenant.LedgerID {
+			response.ErrorBadRequest(c, "只能把租户换到同一台账的房源")
+			return
+		}
+		if !requireLedgerWrite(db, c, room.LedgerID, ModuleTenants, PermEdit) {
 			return
 		}
 		if !validateTenantBillingRequest(c, &req) {
@@ -206,6 +286,7 @@ func handleTenantUpdate(db *gorm.DB) gin.HandlerFunc {
 		tenant.Notes = req.Notes
 		applyTenantBilling(tenant, &req)
 		tenant.ExcludedFees = normalizeExcludedFeeKeys(req.ExcludedFees)
+		tenant.Tags = normalizeTags(req.Tags)
 		// 已退租的租户编辑资料不自动恢复在租，恢复需另行处理。
 		if err := db.Save(tenant).Error; err != nil {
 			response.ErrorInternal(c, "保存租户失败")
@@ -256,6 +337,9 @@ func handleTenantCheckout(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
+		if !requireLedgerWrite(db, c, tenant.LedgerID, ModuleTenants, PermEdit) {
+			return
+		}
 		var req struct {
 			MoveOutDate string `json:"move_out_date"`
 		}
@@ -281,12 +365,16 @@ func handleTenantDelete(db *gorm.DB) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		// 账单仅快照租户姓名，删除租户不影响历史账单；合同文件随之清理。
+		if !requireLedgerWrite(db, c, tenant.LedgerID, ModuleTenants, PermFull) {
+			return
+		}
+		// 账单仅快照租户姓名，删除租户不影响历史账单；合同文件与资料附件随之清理。
 		if err := db.Delete(tenant).Error; err != nil {
 			response.ErrorInternal(c, "删除租户失败")
 			return
 		}
-		deleteTenantContracts(db, tenant.ID)
+		deleteTenantContracts(db, tenant.ID, tenant.LedgerID)
+		deleteTenantAttachments(db, tenant.ID, tenant.LedgerID)
 		response.Success(c, nil)
 	}
 }
@@ -298,8 +386,13 @@ func findUserTenant(db *gorm.DB, c *gin.Context) (*Tenant, bool) {
 		return nil, false
 	}
 	var tenant Tenant
-	// 数据共享后按 ID 直取，不再限定录入人。
+	// 数据共享后按 ID 直取，不再限定录入人；但必须校验台账归属，
+	// 否则换个 ID 就能读到别台账的租户档案。
 	if err := db.First(&tenant, id).Error; err != nil {
+		response.ErrorNotFound(c, "租户不存在")
+		return nil, false
+	}
+	if !inLedgerScope(c, tenant.LedgerID) {
 		response.ErrorNotFound(c, "租户不存在")
 		return nil, false
 	}

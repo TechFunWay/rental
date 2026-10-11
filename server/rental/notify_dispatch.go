@@ -39,8 +39,9 @@ func init() {
 }
 
 // dispatchPaymentNotices 遍历绑定了提醒渠道的用户，逐渠道发送当日汇总。
-// 数据共享后缴费提醒只有一套台账，收件人改成「绑定了渠道且业务权限不低于
-// 只读的用户」——无权限的注册账号不会收到房源与欠缴信息。
+// 收件人 = 绑定了渠道、且对账单或收款记录有查看权的用户；推送范围 = 他
+// **实际参与**的台账（超管没有全局特权，不是成员就不推）。汇总里是房号与
+// 欠缴金额，所以权限与范围都要卡住，避免越权推送。
 func dispatchPaymentNotices(db *gorm.DB) {
 	now := time.Now()
 	var userIDs []uint
@@ -51,12 +52,21 @@ func dispatchPaymentNotices(db *gorm.DB) {
 	}
 	sendDate := now.Format("2006-01-02")
 	for _, userID := range userIDs {
-		var role string
-		db.Table("users").Select("role").Where("id = ?", userID).Scan(&role)
-		if accessRank[accessLevel(db, userID, role)] < accessRank[AccessReadonly] {
+		perms := mergedPerms(db, userID)
+		if permRank[perms[ModuleBills]] < permRank[PermView] &&
+			permRank[perms[ModulePayments]] < permRank[PermView] {
 			continue
 		}
-		items := computePaymentDue(db, now)
+		// 只推这个人**实际参与**的台账里到期的账单，不推别人的台账。
+		ledgerIDs, err := activeLedgerIDs(db, userID)
+		if err != nil {
+			logger.Error("rental: scan user ledgers: %v", err)
+			continue
+		}
+		if len(ledgerIDs) == 0 {
+			continue
+		}
+		items := computePaymentDueInLedgers(db, now, ledgerIDs)
 		if len(items) == 0 {
 			continue
 		}

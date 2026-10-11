@@ -30,6 +30,14 @@
 
         <!-- Nav -->
         <nav class="flex-1 overflow-y-auto px-4 py-5 space-y-1">
+          <!-- 当前台账一个模块都没勾（例如刚被邀请进来还没勾权限）：菜单会被
+               下面的门禁全部隐藏，这里明说一句去哪儿切。 -->
+          <div
+            v-if="showNoPermHint"
+            class="mb-2 rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2.5 text-xs leading-5 text-amber-700 dark:text-amber-200"
+          >
+            当前台账「{{ ledgerStore.current?.name || '未选择' }}」没有业务权限，菜单已隐藏。请切换到「我的台账」或联系台账管理者为你勾选权限。
+          </div>
           <RouterLink
             v-for="item in visibleMainNav"
             :key="item.to"
@@ -83,7 +91,12 @@
             </div>
             <div class="min-w-0 flex-1">
               <div class="text-sm font-semibold text-foreground truncate">{{ authStore.user?.username }}</div>
-              <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : `普通用户 · ${accessStore.levelLabel}` }}</div>
+              <div class="text-xs text-muted-foreground truncate">
+                {{ authStore.isAdmin ? '管理员' : `普通用户 · ${ledgerStore.levelLabel}` }}
+                <template v-if="ledgerStore.current">
+                  · {{ ledgerStore.current.kind === 'personal' ? '我的台账' : ledgerStore.current.name }}
+                </template>
+              </div>
             </div>
             <button
               @click="handleLogout"
@@ -117,63 +130,119 @@
 
     <!-- Main column -->
     <div class="flex-1 flex flex-col min-h-screen lg:pl-72 min-w-0">
-      <header class="sticky top-0 z-20 px-4 lg:px-8 pt-3">
-        <div class="h-16 flex items-center justify-between px-4 lg:px-6 rounded-2xl surface">
-          <div class="flex items-center gap-3 min-w-0">
-            <button class="lg:hidden p-2 -ml-1 rounded-lg text-foreground hover:bg-muted" @click="sidebarOpen = !sidebarOpen">
-              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
-            </button>
-            <div class="min-w-0 flex-1">
-              <!-- breadcrumb + 版本号（左上角，只显示 v+版本） -->
-              <div class="flex items-center gap-2 text-sm">
-                <RouterLink to="/admin" class="text-muted-foreground hover:text-foreground transition-colors truncate">{{ authStore.siteTitle }}</RouterLink>
-                <svg class="hidden sm:block w-4 h-4 text-muted-foreground shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-                <span class="hidden sm:inline text-foreground font-semibold truncate">{{ currentTitle }}</span>
-                <span v-if="versionInfo" class="ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium tabular-nums bg-muted text-muted-foreground border border-border/50">{{ versionInfo }}</span>
+      <header class="sticky top-0 z-20 px-3 pt-2 sm:px-4 sm:pt-3 lg:px-8">
+        <!-- 手机端（窄屏）顶栏拆成两行：第一行品牌+版本号+操作，第二行台账切换器。
+             单行时「台账切换器」与「版本号徽标」在 375 宽下必然重叠（实测 692px²），
+             切换器是不透明胶囊、压在版本号上面，版本号被吃掉只剩半个字符。
+             自适应口径：窄屏给切换器独立一行（整宽、可伸缩），版本号在第一行有完整位置；
+             sm 起空间够用，回到一行布局。
+             手机端整栏高度已压到约 96px（pt-2 + 第一行 48 + 第二行 40 + pb-1.5）：
+             667 高的屏上顶栏每省 10px 就多看到小半张统计卡。 -->
+        <div class="rounded-2xl surface px-3 sm:px-4 lg:px-6">
+          <div class="min-h-12 sm:min-h-14 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 min-w-0 flex-1">
+              <button class="lg:hidden p-1.5 -ml-1.5 rounded-lg text-foreground hover:bg-muted shrink-0" @click="sidebarOpen = !sidebarOpen" aria-label="打开菜单">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+              </button>
+              <div class="min-w-0 flex-1">
+                <!-- 品牌 + 版本号（窄屏：品牌名 + 版本号并排，两者都有完整位置）；
+                     当前页标题（面包屑第二段）sm 起再显示 -->
+                <div class="flex items-center gap-1.5 text-sm">
+                  <RouterLink to="/admin" class="font-semibold text-foreground hover:text-brand-600 dark:hover:text-brand-300 transition-colors truncate">{{ authStore.siteTitle }}</RouterLink>
+                  <!-- 版本号就是「版本与更新」的常驻入口（管理员可点）：
+                       不再只在检测到新版本时才出现升级条，平时也能点开看版本、手动检查。
+                       有新版本时常驻入口高亮成品牌色并带一个小圆点提示。 -->
+                  <button
+                    v-if="versionInfo && authStore.isAdmin"
+                    type="button"
+                    class="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium tabular-nums border transition-colors"
+                    :class="supportStore.updateInfo?.has_update
+                      ? 'bg-brand-500/15 text-brand-600 dark:text-brand-300 border-brand-500/40 hover:bg-brand-500/25'
+                      : 'bg-muted text-muted-foreground border-border/50 hover:text-foreground hover:bg-muted/70'"
+                    title="版本与更新（检查新版本 / 一键更新）"
+                    @click="supportStore.openUpdateDialog()"
+                  >
+                    <span v-if="supportStore.updateInfo?.has_update" class="w-1.5 h-1.5 rounded-full bg-brand-500"></span>
+                    {{ versionInfo }}
+                  </button>
+                  <span v-else-if="versionInfo" class="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium tabular-nums bg-muted text-muted-foreground border border-border/50">{{ versionInfo }}</span>
+                  <svg class="hidden sm:block w-4 h-4 text-muted-foreground shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                  <span class="hidden sm:inline text-foreground font-semibold truncate">{{ currentTitle }}</span>
+                </div>
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5 sm:gap-3 shrink-0">
+              <!-- 台账切换器：sm 起放右组；窄屏在下面第二行整宽显示 -->
+              <div class="hidden sm:block">
+                <LedgerSwitcher />
+              </div>
+              <UiThemeToggle />
+
+              <!-- user dropdown -->
+              <div class="relative" ref="menuRef">
+                <button
+                  @click="menuOpen = !menuOpen"
+                  class="flex items-center gap-2.5 pl-1 pr-2 py-1 rounded-xl hover:bg-muted transition-colors"
+                >
+                  <div class="w-9 h-9 rounded-full bg-brand-gradient flex items-center justify-center text-white font-bold text-sm">{{ userInitial }}</div>
+                  <span class="hidden sm:block text-sm font-medium text-foreground">{{ authStore.user?.username }}</span>
+                  <svg class="hidden sm:block w-4 h-4 text-muted-foreground transition-transform" :class="menuOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                </button>
+                <transition enter-active-class="transition duration-150 ease-out" enter-from-class="opacity-0 scale-95 -translate-y-1" leave-active-class="transition duration-100" leave-to-class="opacity-0 scale-95 -translate-y-1">
+                  <div v-if="menuOpen" class="absolute right-0 mt-2 w-56 rounded-2xl surface shadow-card p-2 origin-top-right">
+                    <div class="px-3 py-2.5 mb-1 border-b border-border">
+                      <div class="text-sm font-semibold text-foreground truncate">{{ authStore.user?.username }}</div>
+                      <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : `普通用户 · ${ledgerStore.levelLabel}` }}</div>
+                    </div>
+                    <RouterLink to="/admin/profile" @click="menuOpen = false" class="menu-item">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                      个人资料
+                    </RouterLink>
+                    <button @click="handleLogout" class="menu-item w-full text-destructive hover:bg-destructive/10">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                      退出登录
+                    </button>
+                  </div>
+                </transition>
               </div>
             </div>
           </div>
-          <div class="flex items-center gap-2 sm:gap-3">
-            <UiThemeToggle />
 
-            <!-- user dropdown -->
-            <div class="relative" ref="menuRef">
-              <button
-                @click="menuOpen = !menuOpen"
-                class="flex items-center gap-2.5 pl-1 pr-2 py-1 rounded-xl hover:bg-muted transition-colors"
-              >
-                <div class="w-9 h-9 rounded-full bg-brand-gradient flex items-center justify-center text-white font-bold text-sm">{{ userInitial }}</div>
-                <span class="hidden sm:block text-sm font-medium text-foreground">{{ authStore.user?.username }}</span>
-                <svg class="hidden sm:block w-4 h-4 text-muted-foreground transition-transform" :class="menuOpen ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
-              </button>
-              <transition enter-active-class="transition duration-150 ease-out" enter-from-class="opacity-0 scale-95 -translate-y-1" leave-active-class="transition duration-100" leave-to-class="opacity-0 scale-95 -translate-y-1">
-                <div v-if="menuOpen" class="absolute right-0 mt-2 w-56 rounded-2xl surface shadow-card p-2 origin-top-right">
-                  <div class="px-3 py-2.5 mb-1 border-b border-border">
-                    <div class="text-sm font-semibold text-foreground truncate">{{ authStore.user?.username }}</div>
-                    <div class="text-xs text-muted-foreground">{{ authStore.isAdmin ? '管理员' : `普通用户 · ${accessStore.levelLabel}` }}</div>
-                  </div>
-                  <RouterLink to="/admin/profile" @click="menuOpen = false" class="menu-item">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
-                    个人资料
-                  </RouterLink>
-                  <button @click="handleLogout" class="menu-item w-full text-destructive hover:bg-destructive/10">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
-                    退出登录
-                  </button>
-                </div>
-              </transition>
-            </div>
+          <!-- 第二行（窄屏）：台账切换器整宽，当前台账名不会被挤没 -->
+          <div class="sm:hidden pb-1.5 -mt-1">
+            <LedgerSwitcher fluid />
           </div>
         </div>
       </header>
 
-      <main class="flex-1 p-4 pb-28 sm:p-6 sm:pb-28 lg:pb-8 xl:p-8 overflow-auto">
-        <!-- 新版本提示条（管理员，每个最新版本一次） -->
+      <!-- 手机端密度：页边距 p-3（原 p-4），底部预留 pb-24 给底部导航；
+           sm 起恢复 p-6 / pb-8。顶栏在窄屏是两行（约 106px），页边距收紧一点补回来。 -->
+      <main class="flex-1 p-3 pb-24 sm:p-6 sm:pb-28 lg:pb-8 xl:p-8 overflow-auto">
+        <!-- 新版本提示条（管理员，每个最新版本一次）；一键更新 + 多下载入口 -->
         <div v-if="supportStore.updateBannerVisible" class="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-brand-500/30 bg-brand-500/10 px-4 py-3">
-          <span class="text-sm text-foreground">
-            🎉 发现新版本 <strong>{{ supportStore.updateInfo?.latest }}</strong>，当前版本 {{ supportStore.updateInfo?.current }}，建议升级以获得最新功能和修复。
-            <a :href="supportStore.updateInfo?.download_url" target="_blank" rel="noopener" class="ml-2 font-semibold text-brand-600 dark:text-brand-300 hover:underline">前往下载</a>
-          </span>
+          <div class="text-sm text-foreground min-w-0">
+            <span>
+              🎉 发现新版本 <strong>{{ supportStore.updateInfo?.latest }}</strong>（当前 {{ supportStore.updateInfo?.current }}），建议升级以获得最新功能和修复。
+            </span>
+            <p v-if="supportStore.applyMessage" class="text-xs mt-0.5"
+              :class="supportStore.applyStage === 'failed' && /已更新|重启完成/.test(supportStore.applyMessage) ? 'text-emerald-600 dark:text-emerald-400' : /失败|超时/.test(supportStore.applyMessage) ? 'text-destructive' : 'text-muted-foreground'">
+              {{ supportStore.applyMessage }}
+            </p>
+            <span class="block sm:inline sm:ml-2 mt-1.5 sm:mt-0">
+              <button v-if="supportStore.updateInfo?.fpk_assets?.length" type="button"
+                class="btn-brand !py-1 !px-2.5 !text-xs mr-2 align-middle"
+                :disabled="supportStore.applying"
+                @click="supportStore.applyNewVersion()">
+                {{ supportStore.applyButtonText }}
+              </button>
+              <a v-for="fpk in supportStore.updateInfo?.fpk_assets ?? []" :key="fpk.url" :href="fpk.url" target="_blank" rel="noopener"
+                class="mr-2 text-brand-600 dark:text-brand-300 hover:underline">
+                {{ /arm|aarch/.test(fpk.name) ? 'ARM' : 'x86' }}包直链
+              </a>
+              <a :href="supportStore.updateInfo?.gitee_url" target="_blank" rel="noopener" class="mr-2 text-brand-600 dark:text-brand-300 hover:underline">Gitee 发行版</a>
+              <a :href="supportStore.updateInfo?.github_url" target="_blank" rel="noopener" class="text-brand-600 dark:text-brand-300 hover:underline">GitHub</a>
+            </span>
+          </div>
           <button class="text-muted-foreground hover:text-foreground text-lg leading-none px-1" title="关闭" @click="supportStore.dismissUpdateBanner()">×</button>
         </div>
 
@@ -188,7 +257,10 @@
         <RouterView v-slot="{ Component }">
           <!-- 手机端体验：短淡入即可（out-in 长动画会有"停顿-再出现"的卡顿感） -->
           <transition mode="out-in" enter-active-class="transition-[opacity,transform] duration-150 ease-out" enter-from-class="opacity-0 translate-y-1.5" leave-active-class="transition-opacity duration-75" leave-to-class="opacity-0">
-            <component :is="Component" />
+            <!-- key 带台账选择：切换台账后当前页面整体重挂载，各页 onMounted
+                 里的 load() 会带上新的 ledger_id 重新取数（业务页都是挂载即拉）。
+                 不加 key 的话页面不会自动刷新，用户会以为数据没隔离。 -->
+            <component :is="Component" :key="`${route.path}::${ledgerStore.selection}`" />
           </transition>
         </RouterView>
       </main>
@@ -229,6 +301,9 @@
     <!-- 赞赏支持弹窗（安全问题引导优先，让位不渲染） -->
     <SupportModal v-if="!showSecurityModal" />
 
+    <!-- 版本与更新弹窗：顶栏版本号按钮与系统设置卡片共用 -->
+    <UpdateDialog />
+
     <!-- Security question prompt -->
     <Modal v-model="showSecurityModal" title="设置安全问题" :closable="false">
       <div class="flex flex-col items-center text-center gap-4 py-2">
@@ -256,23 +331,29 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute, RouterLink, RouterView } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
-import { useRentalAccessStore } from '../stores/rentalAccess'
+import { useLedgerStore } from '../stores/ledger'
 import type { ModuleKey } from '../api/rental'
 import { getVersion } from '../api/config'
 import { getStats } from '../api/rental'
+import { permScore } from '../utils/perm'
+import { landingRouteName } from '../router'
 import { useSupportStore } from '../stores/support'
 import UiThemeToggle from '../components/ui/ThemeToggle.vue'
 import Modal from '../components/Modal.vue'
 import SupportModal from '../components/SupportModal.vue'
+import UpdateDialog from '../components/UpdateDialog.vue'
+import LedgerSwitcher from '../components/LedgerSwitcher.vue'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const supportStore = useSupportStore()
-// 业务权限：数据共享后按管理员授权决定菜单与按钮（access store 在路由守卫
-// 里也会拉取，这里主要供导航渲染与角标轮询判断）。
-const accessStore = useRentalAccessStore()
+// 业务权限的唯一口径是**当前台账**（ledgerStore）：侧栏菜单、底部导航、角标与
+// 页面内按钮、路由守卫全部读它，菜单亮着就一定点得动。
+// （历史上菜单/按钮读的是跨台账并集，与按台账判定的守卫不同源，普通用户
+//  会「登录落到个人资料页、点菜单没反应」。）
+const ledgerStore = useLedgerStore()
 const sidebarOpen = ref(false)
 const menuOpen = ref(false)
 const menuRef = ref<HTMLElement | null>(null)
@@ -284,8 +365,8 @@ const paymentDueCount = ref(0)
 let paymentTimer: number | undefined
 
 async function refreshPaymentBadge() {
-  // 没有统计分析查看权的用户拿不到统计接口，角标直接清零不再轮询。
-  if (!accessStore.canView('analytics')) {
+  // 当前台账没有统计分析查看权就拿不到统计接口，角标直接清零不再轮询。
+  if (!ledgerStore.canView('analytics')) {
     paymentDueCount.value = 0
     return
   }
@@ -307,7 +388,7 @@ onMounted(async () => {
   } catch {}
   // 赞赏提示与新版本检查：仅管理员可见（store 内部只对管理员生效）
   await authStore.init()
-  await accessStore.ensureLoaded()
+  await ledgerStore.ensureLoaded()
   supportStore.init(authStore.isAdmin)
   // 缴费提醒角标：立即拉一次，之后每 5 分钟刷新
   refreshPaymentBadge()
@@ -320,6 +401,21 @@ onBeforeUnmount(() => {
 
 // 路由切换时刷新角标（在账单页收款后回到其它页面时数字能及时更新）。
 watch(() => route.path, () => refreshPaymentBadge())
+
+// 切换台账后：角标按新台账重算，并把当前页面整体重挂载（下方 :key），
+// 让正在显示的业务列表立刻按新 ledger_id 重新拉数据——否则用户会看到
+// 「称谓变了、数据还是上一个台账的」，是数据隔离里最危险的一种错觉。
+//
+// 同时按新台账重新判一次当前页面的模块门禁（口径与路由守卫一致）：切到
+// 「没有这个模块权限」的台账时，页面不能继续停在那儿——否则菜单已经不亮了、
+// 页面却还在，请求还会 403。没有可进页面就回落个人资料页。
+watch(() => ledgerStore.selection, () => {
+  refreshPaymentBadge()
+  const mod = route.meta.module as ModuleKey | undefined
+  if (route.meta.requiresAccess && mod && !ledgerStore.canView(mod)) {
+    router.replace({ name: landingRouteName(ledgerStore) ?? 'Profile' })
+  }
+})
 
 const mainNavIcons = {
   overview: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>',
@@ -337,13 +433,20 @@ const mobileNav = [
   { to: '/admin/bills', label: '账单', module: 'bills', icon: mainNavIcons.bills },
 ]
 
-// 菜单即岗位：业务导航项挂模块键，按用户的模块勾选显隐（多人分工时
+// 菜单即岗位：业务导航项挂模块键，按**当前台账**的模块勾选显隐（多人分工时
 // 抄表员只见抄表、会计只见账单收款）；个人入口不挂模块，恒可见。
 // 没有任何模块勾选的用户就只剩个人入口，路由守卫兜底防直敲 URL。
+// 注意口径必须与守卫一致（都用 ledgerStore）：用跨台账并集会让菜单亮着而页面
+// 进不去，点击像「没反应」。
 const visibleMainNav = computed(() =>
-  mainNav.filter((i) => !i.module || accessStore.canView(i.module as ModuleKey)))
+  mainNav.filter((i) => !i.module || ledgerStore.canView(i.module as ModuleKey)))
 const visibleMobileNav = computed(() =>
-  mobileNav.filter((i) => accessStore.canView(i.module as ModuleKey)))
+  mobileNav.filter((i) => ledgerStore.canView(i.module as ModuleKey)))
+
+// 当前台账一个业务模块都没勾：侧栏只剩个人入口，明说一句去哪儿切，
+// 别让用户以为应用坏了（典型场景：刚被邀请进共同台账、权限还没勾）。
+const showNoPermHint = computed(() =>
+  ledgerStore.canRead && permScore(ledgerStore.currentPerms) === 0)
 
 const mainNav = [
   { to: '/admin', label: '总览', module: 'analytics', icon: '<svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>' },
@@ -393,6 +496,9 @@ function handleLogout() {
   // endSession 先落服务端「主动登出」抑制标记再清本地（网关域上只清本地
   // 会被网关注入身份重新认回）；本地清理是同步完成的，随后即可跳登录页。
   void authStore.endSession()
+  // 台账选择也要清：不清的话下一个账号会继承上一个账号的台账选择
+  // （虽然守卫会按新账号的台账列表纠正，但不该让上一任的 id 留在本地）。
+  ledgerStore.reset()
   router.push('/login')
 }
 

@@ -34,62 +34,31 @@
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td class="receipt-td">租金</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(bill.rent) }}</td>
-            </tr>
-            <tr>
-              <td class="receipt-td">{{ bill.water_mode === 'monthly' ? '水费（包月）' : '水费' }}</td>
-              <!-- 包月水费不看抄表：读数与用量列留空，单价即每月金额 -->
-              <template v-if="bill.water_mode === 'monthly'">
-                <td class="receipt-td text-right">—</td>
-                <td class="receipt-td text-right">—</td>
-                <td class="receipt-td text-right">—</td>
-                <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.water_price) }} 元/月</td>
+            <!--
+              明细行由 receiptRows 统一驱动，而不是写死六行内置项目。
+              原先是硬编码的租金/水/电/燃气/卫生/管理六行，后果是：
+              ① 押金、自定义收费项目（宽带费等）在单据上**根本不出现**，
+                 但合计里又含它们 —— 桌面单据的明细加起来对不上合计
+                 （实测：DJ01 首张账单明细只有 1,500，合计却是 3,530）；
+              ② 手机端卡片走的是 feeRows（数据驱动），两端显示还不一致。
+              现在两端共用 receiptRows：内置读数项带读数/单价列，
+              押金与自定义项只在「项目 + 金额」两列有值（其余列用 — 占位）。
+            -->
+            <tr v-for="row in receiptRows" :key="row.key">
+              <td class="receipt-td">{{ row.name }}</td>
+              <template v-if="row.isReading">
+                <td class="receipt-td text-right tabular-nums">{{ row.lastText }}</td>
+                <td class="receipt-td text-right tabular-nums">{{ row.nowText }}</td>
+                <td class="receipt-td text-right tabular-nums">{{ row.usageText }}</td>
+                <td class="receipt-td text-right tabular-nums">{{ row.priceText }}</td>
               </template>
               <template v-else>
-                <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.water_last) }} 吨</td>
-                <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.water_now) }} 吨</td>
-                <td class="receipt-td text-right tabular-nums">{{ fmtRead(usage(bill.water_last, bill.water_now)) }} 吨</td>
-                <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.water_price) }} 元/吨</td>
+                <td class="receipt-td text-right">—</td>
+                <td class="receipt-td text-right">—</td>
+                <td class="receipt-td text-right">—</td>
+                <td class="receipt-td text-right">—</td>
               </template>
-              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(bill.water_fee) }}</td>
-            </tr>
-            <tr>
-              <td class="receipt-td">电费</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.elec_last) }} 度</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.elec_now) }} 度</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(usage(bill.elec_last, bill.elec_now)) }} 度</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.elec_price) }} 元/度</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(bill.elec_fee) }}</td>
-            </tr>
-            <tr>
-              <td class="receipt-td">燃气费</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.gas_last) }} 方</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.gas_now) }} 方</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(usage(bill.gas_last, bill.gas_now)) }} 方</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtRead(bill.gas_price) }} 元/方</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(bill.gas_fee) }}</td>
-            </tr>
-            <tr>
-              <td class="receipt-td">卫生费</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(bill.sanitation_fee) }}</td>
-            </tr>
-            <tr>
-              <td class="receipt-td">管理费</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right">—</td>
-              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(bill.management_fee) }}</td>
+              <td class="receipt-td text-right tabular-nums">{{ fmtMoney(row.amount) }}</td>
             </tr>
           </tbody>
           <tfoot>
@@ -110,13 +79,14 @@
           </tfoot>
         </table>
 
-        <!-- 手机端：费用明细卡片化（打印时隐藏，仍输出上面的表格） -->
+        <!-- 手机端：费用明细卡片化（打印时隐藏，仍输出上面的表格）。
+             与桌面表格共用 receiptRows，两端项目与金额完全一致。 -->
         <div class="receipt-mobile sm:hidden border border-border rounded-xl mb-4 overflow-hidden">
           <div class="divide-y divide-border/70">
-            <div v-for="row in feeRows" :key="row.name" class="px-3 py-2 flex items-start justify-between gap-3">
+            <div v-for="row in receiptRows" :key="row.key" class="px-3 py-2 flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <div class="text-sm font-medium text-foreground">{{ row.name }}</div>
-                <div v-if="row.detail" class="text-[11px] text-muted-foreground tabular-nums mt-0.5">{{ row.detail }}</div>
+                <div v-if="mobileDetail(row)" class="text-[11px] text-muted-foreground tabular-nums mt-0.5">{{ mobileDetail(row) }}</div>
               </div>
               <div class="text-sm font-semibold text-foreground tabular-nums shrink-0">{{ fmtMoney(row.amount) }}</div>
             </div>
@@ -152,9 +122,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { arrearsOf, fmtMoney, isArrears, type Bill, type PropertyMeta } from '../api/rental'
 import { coveredPeriodText, cycleLabel, cycleMonths } from '../utils/cycle'
+import { appendPrintPage } from '../utils/print-root'
 
 const props = defineProps<{
   bill: Bill
@@ -162,6 +133,18 @@ const props = defineProps<{
   /** 后端费用明细（含自定义收费项目）；没有时回退由 bills 固定列生成 */
   items?: { key: string; name: string; kind: string; amount: number; detail: string }[]
 }>()
+
+// 打印暂存：挂载即把自身克隆进 body 直属的打印根（#print-root，屏幕上不可见），
+// 浏览器菜单 Ctrl+P 不经打印按钮也能只打出单据；卸载时撤下克隆。
+const receiptEl = ref<HTMLElement | null>(null)
+let removeStaged: (() => void) | null = null
+onMounted(() => {
+  if (receiptEl.value) removeStaged = appendPrintPage(receiptEl.value)
+})
+onBeforeUnmount(() => {
+  removeStaged?.()
+  removeStaged = null
+})
 
 const periodLabel = computed(() => {
   const m = props.bill.period.match(/^(\d{4})-(\d{2})$/)
@@ -177,36 +160,79 @@ const cycleText = computed(() => {
 
 const today = computed(() => new Date().toISOString().slice(0, 10))
 
-// 单据明细数据源：优先用后端 bill_items（含自定义收费项目），
-// 没有时回退由 bills 固定列生成（老数据兼容）。
-const feeRows = computed(() => {
-  if (props.items && props.items.length) {
-    return props.items.map((it) => ({ name: it.name, detail: it.detail, amount: it.amount }))
-  }
+// 单据行：桌面表格与手机卡片共用同一份数据，保证两端一致、且明细加起来等于合计。
+// 内置读数项（水/电/燃气）带读数与单价列；押金与自定义项只是一笔金额。
+interface ReceiptRow {
+  key: string
+  name: string
+  detail: string
+  amount: number
+  isReading: boolean
+  lastText?: string
+  nowText?: string
+  usageText?: string
+  priceText?: string
+}
+
+// 手机卡片的一行副文本：读数项此前只渲染 row.detail，而 detail 在读数项上恒为空
+// （读数搬到了 lastText/nowText/usageText/priceText），于是手机上只剩「水费 45.00」，
+// 用量与单价全丢（桌面表格正常，2026-10-11 审计发现的回归）。这里把三列读数
+// 拼成一行给卡片用，两条渲染路径的数据来源仍是同一份 receiptRows。
+function mobileDetail(row: ReceiptRow): string {
+  if (!row.isReading) return row.detail
+  const parts: string[] = []
+  if (row.lastText && row.lastText !== '—') parts.push(`上次 ${row.lastText}`)
+  if (row.nowText && row.nowText !== '—') parts.push(`本次 ${row.nowText}`)
+  if (row.usageText && row.usageText !== '—') parts.push(`用量 ${row.usageText}`)
+  if (row.priceText) parts.push(row.priceText.includes('/月') ? row.priceText : `单价 ${row.priceText}`)
+  return parts.join(' · ')
+}
+
+const receiptRows = computed<ReceiptRow[]>(() => {
   const b = props.bill
-  const rows: { name: string; detail: string; amount: number }[] = []
-  rows.push({ name: '租金', detail: '', amount: b.rent })
-  rows.push(b.water_mode === 'monthly'
-    ? { name: '水费（包月）', detail: `单价 ${fmtRead(b.water_price)} 元/月`, amount: b.water_fee }
-    : {
-        name: '水费',
-        detail: `读数 ${fmtRead(b.water_last)} → ${fmtRead(b.water_now)} 吨 · 用量 ${fmtRead(usage(b.water_last, b.water_now))} 吨 · 单价 ${fmtRead(b.water_price)} 元/吨`,
-        amount: b.water_fee,
-      })
-  rows.push({
-    name: '电费',
-    detail: `读数 ${fmtRead(b.elec_last)} → ${fmtRead(b.elec_now)} 度 · 用量 ${fmtRead(usage(b.elec_last, b.elec_now))} 度 · 单价 ${fmtRead(b.elec_price)} 元/度`,
-    amount: b.elec_fee,
-  })
-  rows.push({
-    name: '燃气费',
-    detail: `读数 ${fmtRead(b.gas_last)} → ${fmtRead(b.gas_now)} 方 · 用量 ${fmtRead(usage(b.gas_last, b.gas_now))} 方 · 单价 ${fmtRead(b.gas_price)} 元/方`,
-    amount: b.gas_fee,
-  })
-  rows.push({ name: '卫生费', detail: '', amount: b.sanitation_fee })
-  rows.push({ name: '管理费', detail: '', amount: b.management_fee })
+  const unit = (k: string) => (k === 'water' ? '吨' : k === 'elec' ? '度' : '方')
+  const reading = (key: string, name: string, last: number, now: number, price: number, amount: number, monthly: boolean): ReceiptRow => {
+    if (monthly) {
+      // 包月水费不看抄表：读数与用量列留空，单价即每月金额
+      return { key, name, detail: '', amount, isReading: true,
+        lastText: '—', nowText: '—', usageText: '—', priceText: `${fmtRead(price)} 元/月` }
+    }
+    const u = unit(key)
+    return { key, name, detail: '', amount, isReading: true,
+      lastText: `${fmtRead(last)} ${u}`, nowText: `${fmtRead(now)} ${u}`,
+      usageText: `${fmtRead(usage(last, now))} ${u}`, priceText: `${fmtRead(price)} 元/${u}` }
+  }
+
+  // 优先用后端 bill_items（含押金与自定义收费项目），保证与合计同源。
+  if (props.items && props.items.length) {
+    return props.items.map((it) => {
+      if (it.key === 'water') {
+        return reading('water', it.name, b.water_last, b.water_now, b.water_price, it.amount, b.water_mode === 'monthly')
+      }
+      if (it.key === 'elec') return reading('elec', it.name, b.elec_last, b.elec_now, b.elec_price, it.amount, false)
+      if (it.key === 'gas') return reading('gas', it.name, b.gas_last, b.gas_now, b.gas_price, it.amount, false)
+      return { key: it.key, name: it.name, detail: it.detail, amount: it.amount, isReading: false }
+    })
+  }
+
+  // 回退：后端没给明细时由 bills 固定列生成（老数据兼容），含押金与自定义合计。
+  const rows: ReceiptRow[] = []
+  rows.push({ key: 'rent', name: '租金', detail: '', amount: b.rent, isReading: false })
+  rows.push(reading('water', b.water_mode === 'monthly' ? '水费（包月）' : '水费',
+    b.water_last, b.water_now, b.water_price, b.water_fee, b.water_mode === 'monthly'))
+  rows.push(reading('elec', '电费', b.elec_last, b.elec_now, b.elec_price, b.elec_fee, false))
+  rows.push(reading('gas', '燃气费', b.gas_last, b.gas_now, b.gas_price, b.gas_fee, false))
+  rows.push({ key: 'sanitation', name: '卫生费', detail: '', amount: b.sanitation_fee, isReading: false })
+  rows.push({ key: 'management', name: '管理费', detail: '', amount: b.management_fee, isReading: false })
+  if (b.deposit_fee > 0) {
+    rows.push({ key: 'deposit', name: '押金', detail: '入住押金，退租时结算退还', amount: b.deposit_fee, isReading: false })
+  }
+  if (b.extra_amount > 0) {
+    rows.push({ key: 'custom', name: '其他费用', detail: '自定义收费项目合计', amount: b.extra_amount, isReading: false })
+  }
   return rows
 })
+
 
 function usage(last: number, now: number): number {
   return now > last ? Math.round((now - last) * 100) / 100 : 0
@@ -240,28 +266,17 @@ function fmtDate(s: string): string {
   @apply px-2 py-2 whitespace-nowrap;
 }
 
-/* 打印：仅显示单据本体 */
+/* 打印：页面隔离由 print-root.ts（body 直属 #print-root + display 隔离）负责，
+   这里只管单据本体——强制输出表格版明细、隐藏手机卡片、打印配色。
+   注意：隐藏页面其余内容的规则不能写在本组件的 scoped 样式里，
+   `body *` 会被编译成 `body[data-v-xxx] *` 而永远匹配不到（旧版打印整张网页的根因）。 */
 @media print {
-  body * {
-    visibility: hidden;
-  }
-  .receipt-wrap,
-  .receipt-wrap * {
-    visibility: visible;
-  }
   /* 打印始终输出表格版明细，隐藏手机卡片版 */
   .receipt-table {
     display: table !important;
   }
   .receipt-mobile {
     display: none !important;
-  }
-  /* 单据铺满打印页：弹窗的滚动/缩放容器全部解除 */
-  .receipt-wrap {
-    position: absolute !important;
-    left: 0 !important;
-    top: 0 !important;
-    width: 100% !important;
   }
   .receipt {
     border: none !important;

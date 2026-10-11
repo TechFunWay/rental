@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -113,9 +114,92 @@ func TestDonateSupport(t *testing.T) {
 		if received["app_name"] != "testapp" {
 			t.Fatalf("app_name = %v", received["app_name"])
 		}
+		// 未附带金额时不上报 amount 字段（omitempty）
+		if _, ok := received["amount"]; ok {
+			t.Fatalf("amount should be omitted when not provided, got %v", received["amount"])
+		}
 		// 隐私红线：不允许出现主机名字段
 		if _, ok := received["hostname"]; ok {
 			t.Fatal("hostname must never be reported")
+		}
+	})
+
+	t.Run("amount forwarded", func(t *testing.T) {
+		db := setupDB(t)
+		var received map[string]any
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&received)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer fake.Close()
+		t.Setenv("STATS_ENDPOINT", fake.URL)
+
+		Init("testapp", "v1.0.0", "", t.TempDir())
+		r := newRouter(t, db)
+
+		body := strings.NewReader(`{"amount": 6.6}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/donate/support", body)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		r.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+		}
+		if received["amount"] != 6.6 {
+			t.Fatalf("amount = %v, want 6.6", received["amount"])
+		}
+	})
+
+	t.Run("negative amount clamped to 0", func(t *testing.T) {
+		db := setupDB(t)
+		var received map[string]any
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&received)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer fake.Close()
+		t.Setenv("STATS_ENDPOINT", fake.URL)
+
+		Init("testapp", "v1.0.0", "", t.TempDir())
+		r := newRouter(t, db)
+
+		body := strings.NewReader(`{"amount": -5}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/donate/support", body)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		r.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+		}
+		// 负数金额被钳制为 0，0 值因 omitempty 不上报
+		if _, ok := received["amount"]; ok {
+			t.Fatalf("clamped amount should be omitted, got %v", received["amount"])
+		}
+	})
+
+	t.Run("oversized amount capped", func(t *testing.T) {
+		db := setupDB(t)
+		var received map[string]any
+		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&received)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer fake.Close()
+		t.Setenv("STATS_ENDPOINT", fake.URL)
+
+		Init("testapp", "v1.0.0", "", t.TempDir())
+		r := newRouter(t, db)
+
+		body := strings.NewReader(`{"amount": 99999}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/donate/support", body)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		r.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+		}
+		if received["amount"] != maxDonateAmount {
+			t.Fatalf("amount = %v, want cap %v", received["amount"], maxDonateAmount)
 		}
 	})
 
@@ -137,10 +221,13 @@ func TestDonateSupport(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled by admin config", func(t *testing.T) {
+	// 2026-10-11 用户定调：统计默认开启、应用内不可关闭，系统配置里已不再注册
+	// stats_enabled。这条测试把新口径钉死——历史库里即使还留着 stats_enabled=false
+	// 的旧记录，也必须照常上报（配置不再被读取，不再是退出开关）。
+	t.Run("legacy stats_enabled=false no longer disables", func(t *testing.T) {
 		db := setupDB(t)
 		if err := sysconfig.UpdateConfig(db, "stats_enabled", "false", 0); err != nil {
-			t.Fatalf("disable stats: %v", err)
+			t.Fatalf("seed legacy config: %v", err)
 		}
 		fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -153,8 +240,8 @@ func TestDonateSupport(t *testing.T) {
 
 		resp := httptest.NewRecorder()
 		r.ServeHTTP(resp, httptest.NewRequest(http.MethodPost, "/api/donate/support", nil))
-		if resp.Code != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403 when disabled", resp.Code)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200（旧配置不应再能关闭统计）", resp.Code)
 		}
 	})
 }

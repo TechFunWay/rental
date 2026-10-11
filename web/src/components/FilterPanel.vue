@@ -4,14 +4,15 @@
     <div class="hidden sm:block p-4">
       <slot />
     </div>
-    <!-- 手机端：默认收成一行条件摘要，点开才展开，给列表腾位置 -->
+    <!-- 手机端：默认收成一行条件摘要，点开才展开，给列表腾位置。
+         行高比桌面薄：py-3 → py-2.5、图标 8→7，摘要在 375 宽下省出约 10px。 -->
     <div class="sm:hidden">
       <button
         type="button"
-        class="w-full flex items-center gap-2.5 px-4 py-3 text-left active:bg-muted/50 transition-colors"
+        class="w-full flex items-center gap-2 px-3.5 py-2.5 text-left active:bg-muted/50 transition-colors"
         @click="open = !open"
       >
-        <span class="w-8 h-8 rounded-lg bg-brand-500/10 text-brand-600 dark:text-brand-300 flex items-center justify-center shrink-0 relative">
+        <span class="w-7 h-7 rounded-lg bg-brand-500/10 text-brand-600 dark:text-brand-300 flex items-center justify-center shrink-0 relative">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
           </svg>
@@ -25,7 +26,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      <div v-show="open" class="px-4 pb-4 pt-3 border-t border-border/60">
+      <div v-show="open" class="px-3.5 pb-3.5 pt-3 border-t border-border/60">
         <slot />
       </div>
     </div>

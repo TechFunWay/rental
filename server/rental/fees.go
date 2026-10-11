@@ -1,12 +1,13 @@
 // fees.go — 自定义收费项目、账单费用明细与收款流水。
 //
 // 模型关系：
-//   FeeItem  收费项目定义（内置租金/水/电/燃气/卫生/管理 + 用户自定义，如宽带费），
-//            每个项目有自己的收费周期（fixed 类 monthly/quarterly；读数类恒月付）。
-//   BillItem 账单费用明细快照：出账时把账单各项（内置六项 + 启用的自定义项目）
-//            落成明细行，带名称/金额/覆盖区间说明；账单编辑后重建。
-//   Payment  收款流水：每次收款一条，items JSON 按项目分摊（账单是账单、缴费是
-//            缴费——总费用、已付、欠缴以及"欠哪些项目"由明细与流水算出）。
+//
+//	FeeItem  收费项目定义（内置租金/水/电/燃气/卫生/管理 + 用户自定义，如宽带费），
+//	         每个项目有自己的收费周期（fixed 类 monthly/quarterly；读数类恒月付）。
+//	BillItem 账单费用明细快照：出账时把账单各项（内置六项 + 启用的自定义项目）
+//	         落成明细行，带名称/金额/覆盖区间说明；账单编辑后重建。
+//	Payment  收款流水：每次收款一条，items JSON 按项目分摊（账单是账单、缴费是
+//	         缴费——总费用、已付、欠缴以及"欠哪些项目"由明细与流水算出）。
 //
 // 兼容策略：bills 既有固定列（rent/water/...）继续承担内置项目计费与读数；
 // 自定义项目金额汇总进 bills.extra_amount；TotalAmount = 六项 + extra。
@@ -40,6 +41,7 @@ const (
 	feeKeySanitation  = "sanitation"
 	feeKeyManagement  = "management"
 	feeKeyUnallocated = "_unallocated" // 升级前历史收款：未按项目分摊
+	feeKeyDeposit     = "deposit"      // 押金：只在租户首张账单上收一次
 )
 
 // FeeItem 收费项目定义。BuiltIn 项目不可删除（bills 固定列依赖），可改名、
@@ -48,11 +50,12 @@ const (
 type FeeItem struct {
 	ID            uint      `gorm:"primarykey" json:"id"`
 	UserID        uint      `gorm:"index" json:"-"`
+	LedgerID      uint      `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账
 	Key           string    `gorm:"not null;index" json:"key"`
 	Name          string    `gorm:"not null" json:"name"`
-	Kind          string    `gorm:"not null" json:"kind"` // fixed / meter
-	Unit          string    `json:"unit"`                 // meter 类计量单位（吨/度/方），fixed 为空
-	Cycle         string    `gorm:"default:monthly" json:"cycle"` // fixed 类收费周期；meter 类恒月付
+	Kind          string    `gorm:"not null" json:"kind"`            // fixed / meter
+	Unit          string    `json:"unit"`                            // meter 类计量单位（吨/度/方），fixed 为空
+	Cycle         string    `gorm:"default:monthly" json:"cycle"`    // fixed 类收费周期；meter 类恒月付
 	DefaultAmount float64   `gorm:"default:0" json:"default_amount"` // fixed 类默认金额（元/期）
 	Enabled       bool      `gorm:"default:true" json:"enabled"`
 	Sort          int       `json:"sort"`
@@ -64,15 +67,16 @@ type FeeItem struct {
 // BillItem 账单费用明细快照。账单是账单、缴费是缴费：应付按行看，已收从
 // Payment.Items 按 key 汇总，差额即"该项目还差多少"。
 type BillItem struct {
-	ID      uint    `gorm:"primarykey" json:"id"`
-	UserID  uint    `gorm:"index" json:"-"`
-	BillID  uint    `gorm:"index;uniqueIndex:idx_rental_bill_item_key" json:"bill_id"`
-	FeeKey  string  `gorm:"not null;uniqueIndex:idx_rental_bill_item_key" json:"fee_key"`
-	Name    string  `json:"name"`
-	Kind    string  `json:"kind"`
-	Amount  float64 `json:"amount"`
-	Detail  string  `json:"detail"` // 计费说明快照：读数/单价/覆盖区间
-	Cycle   string  `json:"cycle"`  // 该项目本次收费周期快照
+	ID       uint    `gorm:"primarykey" json:"id"`
+	UserID   uint    `gorm:"index" json:"-"`
+	LedgerID uint    `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账
+	BillID   uint    `gorm:"index;uniqueIndex:idx_rental_bill_item_key" json:"bill_id"`
+	FeeKey   string  `gorm:"not null;uniqueIndex:idx_rental_bill_item_key" json:"fee_key"`
+	Name     string  `json:"name"`
+	Kind     string  `json:"kind"`
+	Amount   float64 `json:"amount"`
+	Detail   string  `json:"detail"` // 计费说明快照：读数/单价/覆盖区间
+	Cycle    string  `json:"cycle"`  // 该项目本次收费周期快照
 }
 
 // Payment 收款流水。Items 是 []PaymentItem 的 JSON：某次收款缴了哪些项目、
@@ -80,6 +84,7 @@ type BillItem struct {
 type Payment struct {
 	ID        uint      `gorm:"primarykey" json:"id"`
 	UserID    uint      `gorm:"index" json:"-"`
+	LedgerID  uint      `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账
 	BillID    uint      `gorm:"index" json:"bill_id"`
 	PaidAt    time.Time `json:"paid_at"`
 	Amount    float64   `json:"amount"`
@@ -113,7 +118,7 @@ func paymentItemsJSON(items []PaymentItem) string {
 	return string(data)
 }
 
-// defaultFeeItems 内置收费项目（首次访问时惰性 seed，全局一份）。
+// defaultFeeItems 内置收费项目模板（每台账一份）。LedgerID 由 seed 处按目标台账填充。
 // 租金/卫生/管理是 fixed 类，默认跟随租户缴费周期；水/电/燃气是 meter 类恒月付。
 func defaultFeeItems() []FeeItem {
 	return []FeeItem{
@@ -126,22 +131,43 @@ func defaultFeeItems() []FeeItem {
 	}
 }
 
-// ensureFeeItems 惰性 seed：还没有任何收费项目定义时写入内置六项。
-func ensureFeeItems(db *gorm.DB) {
-	var count int64
-	db.Model(&FeeItem{}).Count(&count)
-	if count > 0 {
-		return
-	}
+// seedDefaultFeeItems 把内置六项写入指定台账。
+func seedDefaultFeeItems(db *gorm.DB, ledgerID uint) {
 	items := defaultFeeItems()
+	for i := range items {
+		items[i].LedgerID = ledgerID
+	}
 	db.Create(&items)
 }
 
-// enabledCustomFeeItems 启用的自定义（fixed 类）收费项目，出账并入账单。
-func enabledCustomFeeItems(db *gorm.DB) []FeeItem {
+// ensureFeeItems 惰性 seed：指定台账内还没有任何收费项目定义时写入内置六项。
+//
+// v0.6.0 起收费项目按台账各一套：各台账的启用项目与自定义项目互不干扰。
+// 老库在 ledger_id 列补齐前退回旧口径（按整表是否为空判断），避免启动期报
+// 「no such column: ledger_id」。
+func ensureFeeItems(db *gorm.DB, ledgerID uint) {
+	var count int64
+	q := db.Model(&FeeItem{})
+	if !ledgerColumnReady(db, "fee_items") {
+		q.Count(&count)
+		if count > 0 {
+			return
+		}
+		seedDefaultFeeItems(db, ledgerID)
+		return
+	}
+	q.Where("org_id = ?", ledgerID).Count(&count)
+	if count > 0 {
+		return
+	}
+	seedDefaultFeeItems(db, ledgerID)
+}
+
+// enabledCustomFeeItems 指定台账启用的自定义（fixed 类）收费项目，出账并入账单。
+func enabledCustomFeeItems(db *gorm.DB, ledgerID uint) []FeeItem {
 	items := make([]FeeItem, 0)
-	db.Where("enabled = ? AND kind = ? AND built_in = ?",
-		true, feeKindFixed, false).Order("sort ASC, id ASC").Find(&items)
+	db.Where("enabled = ? AND kind = ? AND built_in = ? AND org_id = ?",
+		true, feeKindFixed, false, ledgerID).Order("sort ASC, id ASC").Find(&items)
 	return items
 }
 
@@ -160,12 +186,17 @@ func fixedItemDue(db *gorm.DB, room *Room, period string) bool {
 
 // quarterAnchorDue 季付锚点到期判断：与最近一张"含固定费"的账期整差
 // 3 个月及以上才算到期。季付自定义收费项目（无论房间缴费周期）共用此口径。
+// 锚点只在同台账内找：别台账的同房号账单不能当作本台账的收费锚点。
 func quarterAnchorDue(db *gorm.DB, room *Room, period string) bool {
 	var last Bill
-	err := db.Where(
+	q := db.Where(
 		"room_id = ? AND (rent > ? OR sanitation_fee > ? OR management_fee > ? OR extra_amount > ?)",
 		room.ID, 0, 0, 0, 0,
-	).Order("period DESC").First(&last).Error
+	)
+	if ledgerColumnReady(db, "bills") {
+		q = q.Where("org_id = ?", room.LedgerID)
+	}
+	err := q.Order("period DESC").First(&last).Error
 	if err != nil {
 		return true // 首账月
 	}
@@ -178,22 +209,39 @@ func quarterAnchorDue(db *gorm.DB, room *Room, period string) bool {
 
 // setupFeeRoutes 收费项目 / 收款流水 / 统计分析的接口。
 func setupFeeRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	read := requireAccess(db, AccessReadonly)
-	edit := requireAccess(db, AccessEdit)
-	full := requireAccess(db, AccessFull)
-	api.GET("/rental/fee-items", read, handleFeeItemList(db))
-	api.POST("/rental/fee-items", edit, handleFeeItemCreate(db))
-	api.PUT("/rental/fee-items/:id", edit, handleFeeItemUpdate(db))
-	api.DELETE("/rental/fee-items/:id", full, handleFeeItemDelete(db))
-	api.GET("/rental/payments", read, handlePaymentList(db))
-	api.GET("/rental/analytics", read, handleAnalytics(db))
+	// 收费项在账单弹窗与偏好设置里用，归「账单」模块；收款流水与统计
+	// 分析是独立的只读模块。
+	// 读（收费项列表、收款流水、统计分析）用并集口径；写（新增/编辑/删除
+	// 收费项）用单台账口径（详见 rooms.go）。
+	billView := requireModule(db, ModuleBills, PermView)
+	billEdit := requireLedgerModule(db, ModuleBills, PermEdit)
+	billFull := requireLedgerModule(db, ModuleBills, PermFull)
+	api.GET("/rental/fee-items", billView, handleFeeItemList(db))
+	api.POST("/rental/fee-items", billEdit, handleFeeItemCreate(db))
+	api.PUT("/rental/fee-items/:id", billEdit, handleFeeItemUpdate(db))
+	api.DELETE("/rental/fee-items/:id", billFull, handleFeeItemDelete(db))
+	api.GET("/rental/payments", requireModule(db, ModulePayments, PermView), handlePaymentList(db))
+	api.GET("/rental/analytics", requireModule(db, ModuleAnalytics, PermView), handleAnalytics(db))
 }
 
 func handleFeeItemList(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ensureFeeItems(db)
+		// 收费项目按台账各一套：列表只给本次请求可见台账的项目。
+		// 无一台账可见时返回空数组，不 seed（避免建出「无主」的内置项目）。
+		ledgerIDs := visibleLedgerIDs(c)
+		if len(ledgerIDs) == 0 {
+			response.Success(c, []FeeItem{})
+			return
+		}
+		// 惰性 seed 默认落在写入目标台账（未指定 ledger_id 时为公共台账）。
+		seedLedger := ledgerIDs[0]
+		if writeLedger, ok := writeLedgerID(c); ok {
+			seedLedger = writeLedger
+		}
+		ensureFeeItems(db, seedLedger)
 		items := make([]FeeItem, 0)
-		db.Order("built_in DESC, sort ASC, id ASC").Find(&items)
+		q, _ := scopeLedger(db.Order("built_in DESC, sort ASC, id ASC"), c)
+		q.Find(&items)
 		response.Success(c, items)
 	}
 }
@@ -220,10 +268,17 @@ func handleFeeItemCreate(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		cycle := normalizePayCycle(req.Cycle)
-		ensureFeeItems(db)
+		// 新增项目落在写入目标台账；该台账的内置项目先补齐（幂等）。
+		writeLedger, ok := writeLedgerID(c)
+		if !ok {
+			response.ErrorBadRequest(c, "请指定要操作的台账（ledger_id）")
+			return
+		}
+		ensureFeeItems(db, writeLedger)
 
 		item := FeeItem{
 			UserID:        currentUserID(c), // 录入人戳
+			LedgerID:      writeLedger,      // 归属本次写入的台账
 			Key:           "custom_" + strconv.FormatInt(time.Now().UnixNano(), 36),
 			Name:          name,
 			Kind:          feeKindFixed,
@@ -247,8 +302,12 @@ func handleFeeItemUpdate(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		var item FeeItem
-		if err := db.First(&item, id).Error; err != nil {
+		// 收费项目按 ID 直取后必须校验台账归属：别的台账的项目不能改。
+		if err := db.First(&item, id).Error; err != nil || !inLedgerScope(c, item.LedgerID) {
 			response.ErrorNotFound(c, "收费项目不存在")
+			return
+		}
+		if !requireLedgerWrite(db, c, item.LedgerID, ModuleBills, PermEdit) {
 			return
 		}
 		var req feeItemRequest
@@ -279,8 +338,12 @@ func handleFeeItemDelete(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, _ := strconv.Atoi(c.Param("id"))
 		var item FeeItem
-		if err := db.First(&item, id).Error; err != nil {
+		// 同更新：越权项目一律按「不存在」处理（404 不泄漏存在性）。
+		if err := db.First(&item, id).Error; err != nil || !inLedgerScope(c, item.LedgerID) {
 			response.ErrorNotFound(c, "收费项目不存在")
+			return
+		}
+		if !requireLedgerWrite(db, c, item.LedgerID, ModuleBills, PermFull) {
 			return
 		}
 		if item.BuiltIn {
@@ -299,12 +362,19 @@ func handleFeeItemDelete(db *gorm.DB) gin.HandlerFunc {
 // 内置六项从 bills 固定列生成；自定义 fixed 项目金额已在 ExtraAmount，
 // 明细从传 入的 custom 行生成。
 func syncBillItems(db *gorm.DB, bill *Bill, customs []BillItem) {
-	db.Where("bill_id = ?", bill.ID).Delete(&BillItem{})
+	// 明细重建只清本账单 + 本台账的旧行，不误删跨台账孤儿明细。
+	dq := db.Where("bill_id = ?", bill.ID)
+	if ledgerColumnReady(db, "bill_items") {
+		dq = dq.Where("org_id = ?", bill.LedgerID)
+	}
+	dq.Delete(&BillItem{})
 	items := billBuiltInItems(*bill)
 	items = append(items, customs...)
 	for i := range items {
 		items[i].UserID = bill.UserID
 		items[i].BillID = bill.ID
+		// 明细继承账单台账：账单在哪个台账，明细就落在哪个台账。
+		items[i].LedgerID = bill.LedgerID
 	}
 	if len(items) > 0 {
 		db.Create(&items)
@@ -353,6 +423,13 @@ func billBuiltInItems(b Bill) []BillItem {
 			Amount: b.ManagementFee, Cycle: b.PayCycle,
 			Detail: coveredItemDetail(covered, months, "")})
 	}
+	// 押金：只在首张账单上出现一次（判定见 firstBillDeposit），明细里单列一项，
+	// 让房东一眼看出"这笔钱是押金、要退"，而不是混在租金里。
+	if b.DepositFee > 0 {
+		items = append(items, BillItem{FeeKey: feeKeyDeposit, Name: "押金", Kind: feeKindFixed,
+			Amount: b.DepositFee, Cycle: payCycleMonthly,
+			Detail: "入住押金，退租时结算退还"})
+	}
 	return items
 }
 
@@ -377,12 +454,13 @@ func fmtAmount(v float64) string {
 
 // customBillItems 按启用的自定义 fixed 项目生成账单明细行（金额按项目周期与
 // 到期情况计：quarterly 项目到期时收 3 个月，monthly 每月收）。
+// 项目只在账单所属台账内取：别台账的自定义项目不能并入本台账的账单。
 // 租户勾选排除的项目（该房生效的"不参与计费项目"）不并入。
 func customBillItems(db *gorm.DB, room *Room, period string) ([]BillItem, float64) {
 	items := make([]BillItem, 0)
 	excluded := excludedFeeSet(effectiveRoomExcludedFees(db, room))
 	var extra float64
-	for _, fi := range enabledCustomFeeItems(db) {
+	for _, fi := range enabledCustomFeeItems(db, room.LedgerID) {
 		if excluded[fi.Key] {
 			continue // 租户不参与该项目，本期不收
 		}
@@ -417,6 +495,8 @@ func handlePaymentList(db *gorm.DB) gin.HandlerFunc {
 		from := strings.TrimSpace(c.Query("period_from"))
 		to := strings.TrimSpace(c.Query("period_to"))
 		keyword := strings.TrimSpace(c.Query("keyword"))
+		roomID := utils.Atoi(c.Query("room_id"), 0)
+		community := strings.TrimSpace(c.Query("community"))
 
 		type paymentRow struct {
 			Payment
@@ -427,6 +507,15 @@ func handlePaymentList(db *gorm.DB) gin.HandlerFunc {
 		query := db.Table("payments").
 			Select("payments.*, bills.room_no as room_no, bills.tenant_name as tenant_name, bills.period as period").
 			Joins("LEFT JOIN bills ON bills.id = payments.bill_id")
+		// v0.6.0：流水按台账隔离。收款自身有 ledger_id；账单快照列再限定一次，
+		// 免得孤儿流水（历史脏数据）把别台账的房号/租户名带出来。
+		ledgerIDs := visibleLedgerIDs(c)
+		if len(ledgerIDs) == 0 {
+			response.SuccessPage(c, []gin.H{}, 0, page, pageSize)
+			return
+		}
+		query = query.Where("payments.org_id IN ?", ledgerIDs).
+			Where("(payments.bill_id = 0 OR bills.org_id IN ?)", ledgerIDs)
 		if from != "" {
 			query = query.Where("payments.paid_at >= ?", from+"-01 00:00:00")
 		}
@@ -436,6 +525,15 @@ func handlePaymentList(db *gorm.DB) gin.HandlerFunc {
 		if keyword != "" {
 			like := "%" + keyword + "%"
 			query = query.Where("bills.room_no LIKE ? OR bills.tenant_name LIKE ? OR payments.note LIKE ?", like, like, like)
+		}
+		if roomID > 0 {
+			// 直收款（bill_id=0）不挂房源，按房源筛选时自然排除
+			query = query.Where("bills.room_id = ?", roomID)
+		}
+		if community != "" {
+			// 按小区/村组筛收款：账单的房源限定在可见台账内，避免跨台账同名小区串数据
+			query = query.Where("bills.room_id IN (SELECT id FROM rooms WHERE community = ? AND org_id IN ?)",
+				community, ledgerIDs)
 		}
 
 		var total int64
@@ -455,7 +553,7 @@ func handlePaymentList(db *gorm.DB) gin.HandlerFunc {
 			result = append(result, gin.H{
 				"id": row.ID, "bill_id": row.BillID, "paid_at": row.PaidAt,
 				"amount": row.Amount, "note": row.Note,
-				"items": paymentItems(row.Items),
+				"items":   paymentItems(row.Items),
 				"room_no": row.RoomNo, "tenant_name": row.TenantName, "period": row.Period,
 			})
 		}
@@ -473,7 +571,17 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		if months > 24 {
 			months = 24
 		}
-		start := addMonths(currentPeriodStr(), -(months - 1)) + "-01"
+		start := addMonths(currentPeriodStr(), -(months-1)) + "-01"
+
+		// v0.6.0：统计分析按台账隔离，所有聚合都限定在本次请求的可见台账内。
+		ledgerIDs := visibleLedgerIDs(c)
+		if len(ledgerIDs) == 0 {
+			response.Success(c, gin.H{
+				"series": []gin.H{}, "items": []gin.H{},
+				"summary": gin.H{"billed": 0, "received": 0, "arrears": 0, "rate": 0},
+			})
+			return
+		}
 
 		// 月度应收（按账期）与实收（按收款时间）。
 		type monthRow struct {
@@ -483,6 +591,7 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		billedRows := make([]monthRow, 0)
 		db.Model(&Bill{}).Select("period, SUM(total_amount) as billed").
 			Where("period >= ?", start[:7]).
+			Where("org_id IN ?", ledgerIDs).
 			Group("period").Order("period ASC").Scan(&billedRows)
 
 		type paidRow struct {
@@ -492,6 +601,7 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		paidRows := make([]paidRow, 0)
 		db.Model(&Payment{}).Select("strftime('%Y-%m', paid_at) as month, SUM(amount) as paid").
 			Where("paid_at >= ?", start).
+			Where("org_id IN ?", ledgerIDs).
 			Group("month").Order("month ASC").Scan(&paidRows)
 
 		paidByMonth := map[string]float64{}
@@ -521,12 +631,13 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 		}
 		itemRows := make([]itemRow, 0)
 		db.Table("bill_items").Select("name, SUM(amount) as amount").
-			Where("bill_id IN (SELECT id FROM bills WHERE period >= ?)", start[:7]).
+			Where("bill_id IN (SELECT id FROM bills WHERE period >= ? AND org_id IN ?)", start[:7], ledgerIDs).
 			Group("name").Order("amount DESC").Scan(&itemRows)
 
-		// 当前欠缴总额（全部未缴清账单）。
+		// 当前欠缴总额（可见台账内全部未缴清账单）。
 		var arrears float64
 		db.Model(&Bill{}).Where("status <> ?", billStatusPaid).
+			Where("org_id IN ?", ledgerIDs).
 			Select("COALESCE(SUM(total_amount - paid_amount), 0)").Scan(&arrears)
 		arrears = round2(arrears)
 

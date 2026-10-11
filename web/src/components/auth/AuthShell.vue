@@ -10,14 +10,16 @@
     <div class="vignette"></div>
 
     <!-- Content -->
-    <div class="auth-content relative z-10 flex flex-col items-center justify-center px-6 py-12">
+    <!-- 手机端（<640px）整页收紧：页边距 24→16、上下留白 48→20，品牌区与卡片
+         内边距同步缩小，目标是登录/注册一屏内不出滚动条（375×667）。 -->
+    <div class="auth-content relative z-10 flex flex-col items-center justify-center px-4 py-5 sm:px-6 sm:py-12">
       <div class="w-full max-w-md">
         <!-- Brand -->
-        <div class="flex flex-col items-center text-center mb-7 animate-fade-in">
+        <div class="flex flex-col items-center text-center mb-3.5 sm:mb-7 animate-fade-in">
           <div class="logo-badge">
-            <span class="font-display font-extrabold text-xl text-white">{{ siteInitial }}</span>
+            <span class="font-display font-extrabold text-lg sm:text-xl text-white">{{ siteInitial }}</span>
           </div>
-          <h1 class="mt-4 font-display text-lg font-bold tracking-tight text-white/90">{{ authStore.siteTitle }}</h1>
+          <h1 class="mt-2 sm:mt-4 font-display text-base sm:text-lg font-bold tracking-tight text-white/90">{{ authStore.siteTitle }}</h1>
         </div>
 
         <!-- Glass card -->
@@ -25,9 +27,9 @@
           <div class="card-glow"></div>
           <div class="auth-card">
             <div class="relative z-10">
-              <h2 class="font-display text-[1.75rem] leading-tight font-extrabold tracking-tight text-white">{{ title }}</h2>
-              <p v-if="subtitle" class="mt-2 text-sm text-white/50">{{ subtitle }}</p>
-              <div class="mt-7">
+              <h2 class="font-display text-[1.35rem] sm:text-[1.75rem] leading-tight font-extrabold tracking-tight text-white">{{ title }}</h2>
+              <p v-if="subtitle" class="mt-1 sm:mt-2 text-xs sm:text-sm leading-5 text-white/50">{{ subtitle }}</p>
+              <div class="mt-4 sm:mt-7">
                 <slot />
               </div>
             </div>
@@ -35,7 +37,7 @@
         </div>
 
         <!-- Footer -->
-        <div v-if="$slots.footer" class="mt-7 text-center text-sm text-white/50">
+        <div v-if="$slots.footer" class="mt-4 sm:mt-7 text-center text-xs sm:text-sm text-white/50">
           <slot name="footer" />
         </div>
       </div>
@@ -179,8 +181,9 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 .auth-card {
   position: relative;
   z-index: 1;
-  border-radius: 26px;
-  padding: 2.25rem;
+  /* 手机端内边距 36px → 20px（卡片高度占屏比明显下降），桌面端在下方媒体查询恢复 */
+  border-radius: 20px;
+  padding: 1.25rem;
   background: rgba(18, 18, 30, 0.55);
   backdrop-filter: blur(26px) saturate(140%);
   -webkit-backdrop-filter: blur(26px) saturate(140%);
@@ -219,9 +222,10 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
 
 /* logo */
 .logo-badge {
-  width: 3.5rem;
-  height: 3.5rem;
-  border-radius: 1.1rem;
+  /* 手机端 56px → 44px，桌面端在媒体查询里恢复，避免品牌区吃掉首屏高度 */
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 0.9rem;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -261,6 +265,21 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
   .grid-overlay,
   .grain {
     display: none;
+  }
+}
+
+/* 桌面端恢复：手机端收紧的卡片内边距/圆角与品牌徽标只作用于 <640px。
+   这条媒体查询必须放在 .auth-card / .logo-badge 定义**之后**——同优先级下
+   后写的规则生效，放前面会被基础规则盖掉（首版就这么错过一次）。 */
+@media (min-width: 641px) {
+  .auth-card {
+    border-radius: 26px;
+    padding: 2.25rem;
+  }
+  .logo-badge {
+    width: 3.5rem;
+    height: 3.5rem;
+    border-radius: 1.1rem;
   }
 }
 </style>

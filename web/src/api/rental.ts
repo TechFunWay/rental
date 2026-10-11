@@ -1,5 +1,48 @@
 import request from './request'
 import { toast } from '../utils/toast'
+import { currentLedgerQuery } from '../stores/ledger'
+
+// ---------- 台账范围（0.5.2 数据隔离） ----------
+//
+// 业务数据按台账归属，后端在 resolveLedger 里按 `?ledger_id=` 解析本次请求的范围：
+//   - 带 ledger_id：只看/只写该台账（写操作必须带，否则被 requireLedgerModule 挡下）；
+//   - 不带 ledger_id：按用户名下全部台账并集查询（写操作会被拒绝）。
+//
+// 前端**不在业务代码里逐个调用点塞参数**（6 个列表页 + 多个弹窗 + 导出下载
+// 共几十处，漏一个就会出现「切了台账但某个页面还是旧数据」这种难查的 bug），
+// 而是集中在这里：
+//
+//   withLedger(params)  —— 给对象型 params 补上 ledger_id（列表/详情 GET）；
+//   withLedgerUrl(url)  —— 给已拼好 query 的 URL 补上 ledger_id（导出下载类）。
+//
+// ledger_id 的来源是 stores/ledger.ts 的 currentLedgerQuery()：它读的是台账 store
+// 写入 localStorage 的同一个键，因此这里不需要 import store 实例，也不会
+// 形成 api/rental → stores/ledger → api/org → api/rental 的模块循环。
+//
+// 查询类接口的每个入口都显式调用这两个函数（而不是放在 axios 拦截器里），
+// 是为了让「哪些请求带 ledger_id」在代码里一目了然——写路径（POST/PUT/DELETE
+// 的 body）刻意不自动附加 ledger_id，由用户在页面上选定的台账决定，且后端只
+// 读 query 参数。
+
+/** 给查询参数补上当前台账的 ledger_id；尚未选好台账时不补。 */
+function withLedger<T extends Record<string, unknown> | undefined>(params: T): T & { ledger_id?: number } {
+  const ledgerId = currentLedgerQuery()
+  if (ledgerId === null) return (params ?? {}) as T & { ledger_id?: number }
+  return { ...(params ?? ({} as T)), ledger_id: ledgerId }
+}
+
+/** 给已拼好 query 的路径补上 ledger_id（导出/模板下载等直接走 URL 的接口）。 */
+function withLedgerUrl(url: string): string {
+  const ledgerId = currentLedgerQuery()
+  if (ledgerId === null) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}ledger_id=${ledgerId}`
+}
+
+/** 当前生效的 ledger_id（写操作/自定义 URL 需要时使用）。 */
+export function activeLedgerId(): number | null {
+  return currentLedgerQuery()
+}
 
 // ---------- 类型 ----------
 
@@ -10,6 +53,8 @@ export interface Room {
   building: string
   unit: string
   floor: string
+  /** 标签（如 物业代管/临街/精装），自定义分组用 */
+  tags: string[]
   default_rent: number
   default_sanitation_fee: number
   default_management_fee: number
@@ -63,6 +108,8 @@ export interface Tenant {
   phone: string
   /** 身份证号，选填 */
   id_card: string
+  /** 标签（如 优质/中介/长租），自定义分组用 */
+  tags: string[]
   move_in_date: string
   lease_end_date: string
   move_out_date: string
@@ -87,6 +134,8 @@ export interface Tenant {
   room_label?: string
   /** 该租户名下的合同文件数（列表接口补充，非表字段） */
   contracts_count?: number
+  /** 该租户名下的资料附件数（列表接口补充，非表字段） */
+  attachments_count?: number
 }
 
 export interface Contract {
@@ -146,6 +195,8 @@ export interface Bill {
   gas_fee: number
   sanitation_fee: number
   management_fee: number
+  /** 押金（元）：只在租户首张账单上收一次，与租金一起结清（退租时结算退还） */
+  deposit_fee: number
   /** 自定义收费项目（宽带费等）金额合计 */
   extra_amount: number
   total_amount: number
@@ -273,66 +324,66 @@ function download(url: string) {
 
 // ---------- 房源 ----------
 
-export function getRooms(params: { page?: number; pageSize?: number; keyword?: string; status?: string }) {
-  return request.get('/api/rental/rooms', { params })
+export function getRooms(params: { page?: number; pageSize?: number; keyword?: string; status?: string; community?: string; building?: string; tag?: string }) {
+  return request.get('/api/rental/rooms', { params: withLedger(params) })
 }
 
 export function createRoom(data: Partial<Room>) {
-  return request.post('/api/rental/rooms', data)
+  return request.post(withLedgerUrl('/api/rental/rooms'), data)
 }
 
 export function updateRoom(id: number, data: Partial<Room>) {
-  return request.put(`/api/rental/rooms/${id}`, data)
+  return request.put(withLedgerUrl(`/api/rental/rooms/${id}`), data)
 }
 
 export function deleteRoom(id: number) {
-  return request.delete(`/api/rental/rooms/${id}`)
+  return request.delete(withLedgerUrl(`/api/rental/rooms/${id}`))
 }
 
 // ---------- 租户 ----------
 
-export function getTenants(params: { page?: number; pageSize?: number; keyword?: string; active?: string; room_id?: number }) {
-  return request.get('/api/rental/tenants', { params })
+export function getTenants(params: { page?: number; pageSize?: number; keyword?: string; active?: string; room_id?: number; community?: string; tag?: string }) {
+  return request.get('/api/rental/tenants', { params: withLedger(params) })
 }
 
-export function createTenant(data: Partial<Tenant>) {
-  return request.post('/api/rental/tenants', data)
+export function createTenant(data: Partial<Tenant> & { application_id?: number }) {
+  return request.post(withLedgerUrl('/api/rental/tenants'), data)
 }
 
 export function updateTenant(id: number, data: Partial<Tenant>) {
-  return request.put(`/api/rental/tenants/${id}`, data)
+  return request.put(withLedgerUrl(`/api/rental/tenants/${id}`), data)
 }
 
 export function checkoutTenant(id: number, moveOutDate?: string) {
-  return request.post(`/api/rental/tenants/${id}/checkout`, { move_out_date: moveOutDate || '' })
+  return request.post(withLedgerUrl(`/api/rental/tenants/${id}/checkout`), { move_out_date: moveOutDate || '' })
 }
 
 export function deleteTenant(id: number) {
-  return request.delete(`/api/rental/tenants/${id}`)
+  return request.delete(withLedgerUrl(`/api/rental/tenants/${id}`))
 }
 
 // ---------- 合同存档 ----------
 
 export function getContracts(tenantId: number) {
-  return request.get(`/api/rental/tenants/${tenantId}/contracts`)
+  return request.get(`/api/rental/tenants/${tenantId}/contracts`, { params: withLedger({}) })
 }
 
 export function uploadContracts(tenantId: number, files: File[]) {
   const form = new FormData()
   for (const f of files) form.append('files', f)
-  return request.post(`/api/rental/tenants/${tenantId}/contracts`, form, {
+  return request.post(withLedgerUrl(`/api/rental/tenants/${tenantId}/contracts`), form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
 
 export function deleteContract(id: number) {
-  return request.delete(`/api/rental/contracts/${id}`)
+  return request.delete(withLedgerUrl(`/api/rental/contracts/${id}`))
 }
 
 // 合同文件必须带登录态读取（不走公开的 /uploads），统一用 blob 中转：
 // fetchContractBlob 供弹窗内预览（图片直接渲染 / PDF 内嵌）与下载使用。
 export async function fetchContractBlob(id: number): Promise<Blob> {
-  const res = await request.get(`/api/rental/contracts/${id}/file`, { responseType: 'blob' })
+  const res = await request.get(withLedgerUrl(`/api/rental/contracts/${id}/file`), { responseType: 'blob' })
   return res.data as Blob
 }
 
@@ -346,10 +397,97 @@ export async function downloadContract(id: number, fileName: string) {
   URL.revokeObjectURL(url)
 }
 
+// ---------- 拉全量列表（跨页合并） ----------
+//
+// 为什么需要它：服务端 utils.NormalizePage 把 pageSize 硬上限钳在 100
+// （MaxPageSize，框架层常量，各实例一致，不宜按单个应用改）。任何「要一次拿全
+// 房间/账单来配对」的场景写 pageSize: 200 都会被**静默截到 100**——房间超过
+// 100 间时抄表弹窗就会缺房、串房（2026-10-11 粉丝报的「费用是别的房间」的
+// 根因之一）。这里显式翻页合并，把「拿全」这件事做对，而不是赌一个更大的数字。
+export async function fetchAllPages<T>(
+  fetchPage: (page: number, pageSize: number) => Promise<{ data?: { code?: number; data?: { items?: T[]; total?: number } } }>,
+  opts: { pageSize?: number; maxPages?: number } = {},
+): Promise<T[]> {
+  const pageSize = opts.pageSize ?? 100   // 与 MaxPageSize 对齐
+  const maxPages = opts.maxPages ?? 100   // 兜底：最多 100 页（1 万条），防死循环
+  const all: T[] = []
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await fetchPage(page, pageSize)
+    if (res.data?.code !== 0) break
+    const items = res.data.data?.items ?? []
+    all.push(...items)
+    const total = res.data.data?.total ?? 0
+    if (items.length === 0 || all.length >= total) break
+  }
+  return all
+}
+
+export function getAllRooms(params: { keyword?: string; status?: string } = {}) {
+  return fetchAllPages<RoomView>((page, pageSize) => getRooms({ ...params, page, pageSize }))
+}
+
+export function getAllTenants(params: { keyword?: string; active?: string; room_id?: number; community?: string; tag?: string } = {}) {
+  return fetchAllPages<Tenant>((page, pageSize) => getTenants({ ...params, page, pageSize }))
+}
+
+export function getAllBills(params: { period?: string; status?: string; keyword?: string } = {}) {
+  return fetchAllPages<Bill>((page, pageSize) => getBills({ ...params, page, pageSize }))
+}
+
+// ---------- 租户资料附件 ----------
+// 与「合同存档」分开：合同是签约凭证，附件是房东自用留档（租房协议照片、
+// 汽车车牌、租客本人照片、身份证正反面）。两者各自独立入口、独立表。
+
+export interface TenantAttachment {
+  id: number
+  ledger_id: number
+  tenant_id: number
+  file_name: string
+  file_size: number
+  mime_type: string
+  label: string
+  created_at: string
+}
+
+export function getAttachments(tenantId: number) {
+  return request.get(`/api/rental/tenants/${tenantId}/attachments`, { params: withLedger({}) })
+}
+
+// label 是整批共用的用途备注（如「身份证」），选填。
+export function uploadAttachments(tenantId: number, files: File[], label = '') {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  if (label) form.append('label', label)
+  return request.post(withLedgerUrl(`/api/rental/tenants/${tenantId}/attachments`), form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+export function deleteAttachment(id: number) {
+  return request.delete(withLedgerUrl(`/api/rental/attachments/${id}`))
+}
+
+// 附件必须带登录态读取（不走公开的 /uploads），统一用 blob 中转：
+// 图片直接渲染、PDF 内嵌预览，也可下载。
+export async function fetchAttachmentBlob(id: number): Promise<Blob> {
+  const res = await request.get(withLedgerUrl(`/api/rental/attachments/${id}/file`), { responseType: 'blob' })
+  return res.data as Blob
+}
+
+export async function downloadAttachment(id: number, fileName: string) {
+  const blob = await fetchAttachmentBlob(id)
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName || '附件'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // ---------- 抄表台账 ----------
 
-export function getMeterRecords(params: { page?: number; pageSize?: number; period?: string; room_id?: number }) {
-  return request.get('/api/rental/meter-records', { params })
+export function getMeterRecords(params: { page?: number; pageSize?: number; period?: string; period_from?: string; period_to?: string; room_id?: number; community?: string }) {
+  return request.get('/api/rental/meter-records', { params: withLedger(params) })
 }
 
 export function upsertMeterRecord(data: {
@@ -360,11 +498,11 @@ export function upsertMeterRecord(data: {
   gas: number
   note?: string
 }) {
-  return request.post('/api/rental/meter-records', data)
+  return request.post(withLedgerUrl('/api/rental/meter-records'), data)
 }
 
 export function deleteMeterRecord(id: number) {
-  return request.delete(`/api/rental/meter-records/${id}`)
+  return request.delete(withLedgerUrl(`/api/rental/meter-records/${id}`))
 }
 
 // ---------- 账单 ----------
@@ -374,16 +512,17 @@ export function getBills(params: {
   period_from?: string; period_to?: string
   bill_type?: 'monthly' | 'quarterly'
   status?: string; keyword?: string
+  room_id?: number; community?: string
 }) {
-  return request.get('/api/rental/bills', { params })
+  return request.get('/api/rental/bills', { params: withLedger(params) })
 }
 
 export function getBillPeriods() {
-  return request.get('/api/rental/bills/periods')
+  return request.get('/api/rental/bills/periods', { params: withLedger({}) })
 }
 
 export function getBillDetail(id: number) {
-  return request.get(`/api/rental/bills/${id}`)
+  return request.get(`/api/rental/bills/${id}`, { params: withLedger({}) })
 }
 
 export function createBill(roomId: number, period: string, readings?: {
@@ -391,15 +530,15 @@ export function createBill(roomId: number, period: string, readings?: {
   water_mode?: 'meter' | 'monthly'
   water_price?: number; elec_price?: number; gas_price?: number; rent?: number
 }) {
-  return request.post('/api/rental/bills', { room_id: roomId, period, ...readings })
+  return request.post(withLedgerUrl('/api/rental/bills'), { room_id: roomId, period, ...readings })
 }
 
 export function generateBills(period: string) {
-  return request.post('/api/rental/bills/generate', { period })
+  return request.post(withLedgerUrl('/api/rental/bills/generate'), { period })
 }
 
 export function updateBill(id: number, data: Partial<Bill>) {
-  return request.put(`/api/rental/bills/${id}`, data)
+  return request.put(withLedgerUrl(`/api/rental/bills/${id}`), data)
 }
 
 export function payBill(
@@ -408,47 +547,56 @@ export function payBill(
   note = '',
   items?: { key: string; name: string; amount: number }[],
 ) {
-  return request.post(`/api/rental/bills/${id}/pay`, { amount, note, items })
+  return request.post(withLedgerUrl(`/api/rental/bills/${id}/pay`), { amount, note, items })
 }
 
 export function deleteBill(id: number) {
-  return request.delete(`/api/rental/bills/${id}`)
+  return request.delete(withLedgerUrl(`/api/rental/bills/${id}`))
 }
 
 // ---------- 导入导出 ----------
 
 export function downloadTemplate() {
-  download('/api/rental/template')
+  download(withLedgerUrl('/api/rental/template'))
 }
 
-export function exportBills(period: string) {
-  download(`/api/rental/export${period ? `?period=${encodeURIComponent(period)}` : ''}`)
+export function exportBills(period?: string, periodFrom?: string, periodTo?: string) {
+  // 账期筛选三选一：单月（period）优先；否则用区间 period_from / period_to
+  // （两端闭区间，可只给一端）；都不给则导出全部月份。
+  const qs = new URLSearchParams()
+  if (period) qs.set('period', period)
+  else {
+    if (periodFrom) qs.set('period_from', periodFrom)
+    if (periodTo) qs.set('period_to', periodTo)
+  }
+  const q = qs.toString()
+  download(withLedgerUrl(`/api/rental/export${q ? `?${q}` : ''}`))
 }
 
 export function exportRooms() {
-  download('/api/rental/rooms/export')
+  download(withLedgerUrl('/api/rental/rooms/export'))
 }
 
 export function downloadRoomTemplate() {
-  download('/api/rental/rooms/template')
+  download(withLedgerUrl('/api/rental/rooms/template'))
 }
 
 export function importRooms(file: File) {
   const form = new FormData()
   form.append('file', file)
-  return request.post('/api/rental/rooms/import', form, {
+  return request.post(withLedgerUrl('/api/rental/rooms/import'), form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
 
 export function downloadTenantTemplate() {
-  download('/api/rental/tenants/template')
+  download(withLedgerUrl('/api/rental/tenants/template'))
 }
 
 export function importTenants(file: File) {
   const form = new FormData()
   form.append('file', file)
-  return request.post('/api/rental/tenants/import', form, {
+  return request.post(withLedgerUrl('/api/rental/tenants/import'), form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
@@ -468,13 +616,13 @@ export function getBillReceipts(from: string, to: string) {
   const params = new URLSearchParams()
   if (from) params.set('from', from)
   if (to) params.set('to', to)
-  return request.get(`/api/rental/bills/receipts?${params.toString()}`)
+  return request.get(withLedgerUrl(`/api/rental/bills/receipts?${params.toString()}`))
 }
 
 export function importBills(file: File) {
   const form = new FormData()
   form.append('file', file)
-  return request.post('/api/rental/import', form, {
+  return request.post(withLedgerUrl('/api/rental/import'), form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
@@ -482,7 +630,7 @@ export function importBills(file: File) {
 // ---------- 统计 ----------
 
 export function getStats(period?: string) {
-  return request.get('/api/rental/stats', { params: period ? { period } : {} })
+  return request.get('/api/rental/stats', { params: withLedger(period ? { period } : {}) })
 }
 
 // ---------- 缴费通知渠道 ----------
@@ -561,19 +709,19 @@ export interface FeeItem {
 }
 
 export function getFeeItems() {
-  return request.get('/api/rental/fee-items')
+  return request.get('/api/rental/fee-items', { params: withLedger({}) })
 }
 
 export function createFeeItem(data: { name: string; cycle: 'monthly' | 'quarterly'; default_amount: number; enabled?: boolean }) {
-  return request.post('/api/rental/fee-items', data)
+  return request.post(withLedgerUrl('/api/rental/fee-items'), data)
 }
 
 export function updateFeeItem(id: number, data: { name: string; cycle: 'monthly' | 'quarterly'; default_amount: number; enabled?: boolean }) {
-  return request.put(`/api/rental/fee-items/${id}`, data)
+  return request.put(withLedgerUrl(`/api/rental/fee-items/${id}`), data)
 }
 
 export function deleteFeeItem(id: number) {
-  return request.delete(`/api/rental/fee-items/${id}`)
+  return request.delete(withLedgerUrl(`/api/rental/fee-items/${id}`))
 }
 
 /** 账单费用明细行（详情接口返回，paid/arrears 服务端算好） */
@@ -601,8 +749,63 @@ export interface PaymentRecord {
   period: string
 }
 
-export function getPayments(params: { page?: number; pageSize?: number; period_from?: string; period_to?: string; keyword?: string }) {
-  return request.get('/api/rental/payments', { params })
+export function getPayments(params: { page?: number; pageSize?: number; period_from?: string; period_to?: string; keyword?: string; room_id?: number; community?: string }) {
+  return request.get('/api/rental/payments', { params: withLedger(params) })
+}
+
+// ---------- 租客自助登记（链接收集 → 房东审核入库） ----------
+
+/** 入住申请：租客通过登记链接提交，待房东审核转入租户 */
+export interface TenantApplication {
+  id: number
+  room_id: number
+  name: string
+  phone: string
+  id_card: string
+  address: string
+  remark: string
+  status: 'pending' | 'approved' | 'rejected'
+  review_note: string
+  tenant_id: number
+  reviewed_at: string | null
+  created_at: string
+  room_label: string
+  photo_url: string
+}
+
+/** 生成/取回房源的登记 token（?regenerate=1 换新，旧链接失效） */
+export function getRoomApplyLink(roomId: number, regenerate = false) {
+  return request.post(`/api/rental/rooms/${roomId}/apply-link${regenerate ? '?regenerate=1' : ''}`, {})
+}
+
+/** 公开页：按 token 取房源位置信息（无需登录） */
+export function getApplyInfo(token: string) {
+  return request.get(`/api/rental/apply/${token}`)
+}
+
+/** 公开页：身份证照片 AI 识别（multipart: photo） */
+export function ocrIdCard(token: string, form: FormData) {
+  return request.post(`/api/rental/apply/${token}/ocr`, form)
+}
+
+/** 公开页：提交入住申请（multipart: name/phone/id_card/address/remark/photo） */
+export function submitApply(token: string, form: FormData) {
+  return request.post(`/api/rental/apply/${token}`, form)
+}
+
+/** 申请队列（房东侧，status=pending/approved/rejected，空=全部） */
+export function getTenantApplications(status?: string) {
+  return request.get('/api/rental/tenant-applications', { params: withLedger({ status: status || undefined }) })
+}
+
+export function rejectTenantApplication(id: number, note: string) {
+  return request.post(`/api/rental/tenant-applications/${id}/reject`, { note })
+}
+
+/** 取申请身份证照片（登录态鉴权流），返回 objectURL 供 <img> 使用 */
+export async function fetchApplicationPhoto(id: number): Promise<string> {
+  const res = await request.get(`/api/rental/tenant-applications/${id}/photo`, { responseType: 'blob' })
+  return URL.createObjectURL(res.data as Blob)
 }
 
 /** 统计分析：近 N 月应收/实收序列 + 项目收入构成 + 收缴率 */
@@ -613,7 +816,7 @@ export interface Analytics {
 }
 
 export function getAnalytics(months = 12) {
-  return request.get('/api/rental/analytics', { params: { months } })
+  return request.get('/api/rental/analytics', { params: withLedger({ months }) })
 }
 
 // ---------- 业务权限（数据共享后管理员按用户授权） ----------
@@ -622,21 +825,6 @@ export function getAnalytics(months = 12) {
 export type ModuleKey = 'rooms' | 'tenants' | 'meters' | 'bills' | 'payments' | 'analytics'
 export type ModulePerm = 'view' | 'edit' | 'full'
 export type ModulePerms = Partial<Record<ModuleKey, ModulePerm>>
-
-/** 当前登录用户的业务权限勾选 */
-export function getMyAccess() {
-  return request.get('/api/rental/access/me')
-}
-
-/** 全部非管理员用户的授权清单（仅管理员） */
-export function getAccessList() {
-  return request.get('/api/rental/access')
-}
-
-/** 给用户设置模块权限勾选（仅管理员；空勾选 = 撤销全部授权） */
-export function setAccess(userID: number, perms: ModulePerms) {
-  return request.put(`/api/rental/access/${userID}`, { perms })
-}
 
 /** 共享计费默认值（系统级租房设置；开票/抄表弹窗"跟随全局默认"用） */
 export interface BillingDefaultsPayload {
@@ -651,5 +839,8 @@ export interface BillingDefaultsPayload {
 }
 
 export function getBillingDefaults() {
-  return request.get<{ code: number; data: BillingDefaultsPayload }>('/api/rental/billing-defaults')
+  return request.get<{ code: number; data: BillingDefaultsPayload }>(
+    '/api/rental/billing-defaults',
+    { params: withLedger({}) },
+  )
 }

@@ -10,4 +10,7 @@ export const SK = {
   // 安全提示的「稍后再说」时间戳：也必须是带前缀的键——网关域下与兄弟应用
   // 共享 localStorage，裸键会互相覆盖。
   securityPromptDismissed: `${P}security_prompt_dismissed_at`,
+  // 当前选中的台账（0.5.2 台账隔离）：存台账 id 的十进制字符串。
+  // 同样必须带前缀：网关域下与兄弟应用共享 localStorage。
+  currentLedger: `${P}current_ledger`,
 } as const

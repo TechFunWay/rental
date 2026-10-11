@@ -1,12 +1,18 @@
 // Package rental — 租房管理系统业务模块。
 //
 // 提供房源、租户、月度抄表账单（水电气费用自动计算）、收款与欠缴跟踪、
-// CSV 模板导入导出与收费单据数据。业务数据全员共享（user_id 列只作
-// 录入人溯源，不再隔离数据），谁能看、谁能录由管理员按用户授权
-// （access.go：无/只读/录入/完全）。
+// CSV 模板导入导出与收费单据数据，以及租客自助登记（公开登记链接）。
+//
+// 数据归属（2026-10-09 起，见 ledger.go）：每条业务数据必属于恰好一个**台账**。
+// 每个账号注册即拥有只有自己能用「个人台账」；任何用户可自建「共同台账」并邀请
+// 他人，按人按模块勾选权限（房源/租户/抄表/账单/收款/统计 各 view/edit/full）。
+// user_id 列只作录入人溯源，不再用于隔离。超管在业务数据上没有特权：不是某个
+// 台账的成员就看不到它的数据（数据库整库备份属系统级能力，仍对超管开放——
+// 服务器持有者本来就能直接读库文件，这一点在 ledger.go 的口径里已注明）。
 package rental
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -14,6 +20,7 @@ import (
 	"smallgo/server/database"
 	"smallgo/server/notify"
 	"smallgo/server/sysconfig"
+	"smallgo/server/version"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -72,11 +79,14 @@ func parseWaterMode(v string) string {
 type Room struct {
 	ID                   uint      `gorm:"primarykey" json:"id"`
 	UserID               uint      `gorm:"index" json:"-"`
-	Community            string    `json:"community"` // 小区（单小区可留空）
+	LedgerID             uint      `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账，0=公共台账
+	Community            string    `json:"community"`                                               // 小区（单小区可留空）
 	RoomNo               string    `gorm:"not null" json:"room_no"`
 	Building             string    `json:"building"`
 	Unit                 string    `json:"unit"`
 	Floor                string    `json:"floor"`
+	Tags                 []string  `gorm:"serializer:json" json:"tags"` // 标签（如 物业代管/临街/精装），自定义分组用
+	ApplyToken           string    `gorm:"index;size:64" json:"-"`      // 租客登记链接 token（公开页 /apply/<token>），json:- 防泄漏
 	DefaultRent          float64   `gorm:"default:0" json:"default_rent"`
 	DefaultSanitationFee float64   `gorm:"default:0" json:"default_sanitation_fee"`
 	DefaultManagementFee float64   `gorm:"default:0" json:"default_management_fee"`
@@ -109,24 +119,26 @@ type Room struct {
 // 勾选 = 参与，未勾选的 key 存进这里。存排除而非勾选，是为了让之后新增的
 // 自定义收费项目默认参与全部租户计费，不用逐租户补勾。
 type Tenant struct {
-	ID              uint    `gorm:"primarykey" json:"id"`
-	UserID          uint    `gorm:"index" json:"-"` // 录入人戳，仅溯源
-	RoomID          uint    `gorm:"index" json:"room_id"`
-	Name            string  `gorm:"not null" json:"name"`
-	Phone           string  `json:"phone"`
-	IDCard          string  `json:"id_card"` // 身份证号，选填
-	MoveInDate      string  `json:"move_in_date"`
-	LeaseEndDate    string  `json:"lease_end_date"` // 租约到期时间 YYYY-MM-DD（空=未约定）
-	MoveOutDate     string  `json:"move_out_date"`
-	Deposit         float64 `gorm:"default:0" json:"deposit"` // 押金（元），退租结算时参考
-	WaterMode       string  `gorm:"default:''" json:"water_mode"`
-	WaterPrice      float64 `gorm:"default:0" json:"water_price"`       // 按吨单价 元/吨，0=跟随全局
-	WaterMonthlyFee float64 `gorm:"default:0" json:"water_monthly_fee"` // 包月金额 元/月，0=跟随全局
-	PayCycle        string  `gorm:"default:''" json:"pay_cycle"`        // ""跟随全局；monthly 月付；quarterly 季付
+	ID              uint     `gorm:"primarykey" json:"id"`
+	UserID          uint     `gorm:"index" json:"-"`                                          // 录入人戳，仅溯源
+	LedgerID        uint     `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账
+	RoomID          uint     `gorm:"index" json:"room_id"`
+	Name            string   `gorm:"not null" json:"name"`
+	Phone           string   `json:"phone"`
+	IDCard          string   `json:"id_card"`                     // 身份证号，选填
+	Tags            []string `gorm:"serializer:json" json:"tags"` // 标签（如 优质/中介/长租），自定义分组用
+	MoveInDate      string   `json:"move_in_date"`
+	LeaseEndDate    string   `json:"lease_end_date"` // 租约到期时间 YYYY-MM-DD（空=未约定）
+	MoveOutDate     string   `json:"move_out_date"`
+	Deposit         float64  `gorm:"default:0" json:"deposit"` // 押金（元），退租结算时参考
+	WaterMode       string   `gorm:"default:''" json:"water_mode"`
+	WaterPrice      float64  `gorm:"default:0" json:"water_price"`       // 按吨单价 元/吨，0=跟随全局
+	WaterMonthlyFee float64  `gorm:"default:0" json:"water_monthly_fee"` // 包月金额 元/月，0=跟随全局
+	PayCycle        string   `gorm:"default:''" json:"pay_cycle"`        // ""跟随全局；monthly 月付；quarterly 季付
 	// PayDay/RemindDays 不用 gorm default 标签：0 是合法取值（不提醒 / 当天提醒），
 	// 打了 default 标签会让显式的 0 被默认值顶掉。-1 = 跟随全局默认。
-	PayDay     int       `json:"pay_day"`
-	RemindDays int       `json:"remind_days"`
+	PayDay       int       `json:"pay_day"`
+	RemindDays   int       `json:"remind_days"`
 	ExcludedFees []string  `gorm:"serializer:json" json:"excluded_fees"` // 不参与计费的项目 key（空=全部参与）
 	Active       bool      `gorm:"default:true" json:"active"`
 	Notes        string    `json:"notes"`
@@ -147,39 +159,45 @@ type Tenant struct {
 // 见 effectiveRoomExcludedFees）：recalc 对这些项目一律清零，账单不会因
 // 租户后续改动勾选而变化。
 type Bill struct {
-	ID            uint       `gorm:"primarykey" json:"id"`
-	UserID        uint       `gorm:"index" json:"-"`
-	RoomID        uint       `gorm:"index" json:"room_id"`
-	Period        string     `gorm:"not null;index" json:"period"` // YYYY-MM
-	RoomNo        string     `gorm:"not null" json:"room_no"`
-	TenantName    string     `json:"tenant_name"`
-	Rent          float64    `json:"rent"`
-	WaterLast     float64    `json:"water_last"`
-	WaterNow      float64    `json:"water_now"`
-	ElecLast      float64    `json:"elec_last"`
-	ElecNow       float64    `json:"elec_now"`
-	GasLast       float64    `json:"gas_last"`
-	GasNow        float64    `json:"gas_now"`
-	PayCycle      string     `gorm:"default:monthly" json:"pay_cycle"` // 开票快照：monthly 月付 / quarterly 季付
-	WaterMode     string     `gorm:"default:meter" json:"water_mode"`  // 开票快照：meter 按吨 / monthly 包月
-	ExcludedFees  []string   `gorm:"serializer:json" json:"excluded_fees"` // 开票快照：不参与计费的项目 key
-	WaterPrice    float64    `json:"water_price"`                      // 按吨=元/吨，包月=元/月
-	ElecPrice     float64    `json:"elec_price"`
-	GasPrice      float64    `json:"gas_price"`
-	WaterFee      float64    `json:"water_fee"`
-	ElecFee       float64    `json:"elec_fee"`
-	GasFee        float64    `json:"gas_fee"`
-	SanitationFee float64    `json:"sanitation_fee"`
-	ManagementFee float64    `json:"management_fee"`
-	ExtraAmount   float64    `json:"extra_amount"` // 自定义收费项目（宽带费等）金额合计
-	TotalAmount   float64    `json:"total_amount"`
-	PaidAmount    float64    `gorm:"default:0" json:"paid_amount"`
-	Status        string     `gorm:"default:unpaid" json:"status"` // paid / partial / unpaid
-	ReceiptNo     string     `json:"receipt_no"`
-	Remark        string     `json:"remark"`
-	PaidAt        *time.Time `json:"paid_at"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID            uint     `gorm:"primarykey" json:"id"`
+	UserID        uint     `gorm:"index" json:"-"`
+	LedgerID      uint     `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账
+	RoomID        uint     `gorm:"index" json:"room_id"`
+	Period        string   `gorm:"not null;index" json:"period"` // YYYY-MM
+	RoomNo        string   `gorm:"not null" json:"room_no"`
+	TenantName    string   `json:"tenant_name"`
+	Rent          float64  `json:"rent"`
+	WaterLast     float64  `json:"water_last"`
+	WaterNow      float64  `json:"water_now"`
+	ElecLast      float64  `json:"elec_last"`
+	ElecNow       float64  `json:"elec_now"`
+	GasLast       float64  `json:"gas_last"`
+	GasNow        float64  `json:"gas_now"`
+	PayCycle      string   `gorm:"default:monthly" json:"pay_cycle"`     // 开票快照：monthly 月付 / quarterly 季付
+	WaterMode     string   `gorm:"default:meter" json:"water_mode"`      // 开票快照：meter 按吨 / monthly 包月
+	ExcludedFees  []string `gorm:"serializer:json" json:"excluded_fees"` // 开票快照：不参与计费的项目 key
+	WaterPrice    float64  `json:"water_price"`                          // 按吨=元/吨，包月=元/月
+	ElecPrice     float64  `json:"elec_price"`
+	GasPrice      float64  `json:"gas_price"`
+	WaterFee      float64  `json:"water_fee"`
+	ElecFee       float64  `json:"elec_fee"`
+	GasFee        float64  `json:"gas_fee"`
+	SanitationFee float64  `json:"sanitation_fee"`
+	ManagementFee float64  `json:"management_fee"`
+	// DepositFee 押金（元）：**只在租户的首张账单**上收一次，与租金一起结清
+	// （2026-10-11 粉丝需求：新租户入住第一次，押金和房租要在账单里一起收）。
+	// 金额取开票时该房租户的 Tenant.Deposit，快照进账单——之后改租户押金不影响
+	// 已开出的账单。已有历史账单不会被补收（判定见 isFirstBillForRoom）。
+	DepositFee  float64    `json:"deposit_fee"`
+	ExtraAmount float64    `json:"extra_amount"` // 自定义收费项目（宽带费等）金额合计
+	TotalAmount float64    `json:"total_amount"`
+	PaidAmount  float64    `gorm:"default:0" json:"paid_amount"`
+	Status      string     `gorm:"default:unpaid" json:"status"` // paid / partial / unpaid
+	ReceiptNo   string     `json:"receipt_no"`
+	Remark      string     `json:"remark"`
+	PaidAt      *time.Time `json:"paid_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 func init() {
@@ -200,6 +218,67 @@ func init() {
 				return nil
 			}
 			return db.Create(&database.SystemConfig{Key: "site_title", Value: "租房管理", Public: true}).Error
+		},
+	})
+
+	// 0.4.0：清掉英文站名残留。站名的框架默认值是内部应用名（version.AppName，
+	// 即 "rental"）。0.0.1 的种子只在 system_configs 没有 site_title 记录时才写入，
+	// 而用未打版本号的开发包（version.Version 为 "dev"）初始化过数据库时，升级阶梯
+	// 因版本比较被整体跳过、框架默认配置先落库，种子随后看到已有记录直接返回——
+	// 站名的英文就这样固化下来，且这类库的 upgrade_records 是空的，之后换正式版本包
+	// 也不会自愈。这里只在站名仍是框架默认值（内部应用名 / smallgo / 空）时改写为
+	// 「租房管理」；管理员自己改过的标题一律保留。
+	database.Upgrades = append(database.Upgrades, database.Upgrade{
+		Version: "0.4.0",
+		Name:    "rental_fix_default_site_title",
+		Upgrade: func(db *gorm.DB) error {
+			var cfg database.SystemConfig
+			err := db.Where("user_id = ? AND `key` = ?", 0, "site_title").First(&cfg).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			switch cfg.Value {
+			case version.AppName, "smallgo", "":
+				return db.Model(&database.SystemConfig{}).
+					Where("id = ?", cfg.ID).
+					Update("value", "租房管理").Error
+			}
+			return nil
+		},
+	})
+
+	// 0.5.4：站点描述与匿名统计口径（2026-10-11 用户要求）。
+	//   1) 站点描述的框架默认值原本是「现代化的全栈应用框架」，凡是用旧默认值
+	//      初始化过的库都已把它固化进 system_configs，改 registry 默认值救不了
+	//      存量安装；这里只在值仍是那句框架文案时改写为租房管理口径，管理员
+	//      自己改过的一律保留。
+	//   2) stats_enabled 已从系统配置里摘掉（统计默认开启、应用内不可关闭），
+	//      顺手删掉历史遗留的配置行，避免它继续躺在库里让人误以为还能关。
+	database.Upgrades = append(database.Upgrades, database.Upgrade{
+		Version: "0.5.4",
+		Name:    "rental_site_description_and_stats_default",
+		Upgrade: func(db *gorm.DB) error {
+			const legacyDesc = "现代化的全栈应用框架"
+			const newDesc = "面向房东、公寓与宿舍管理者的租房管理：房源与租户登记、抄表出账、收款与欠缴跟踪，数据按台账隔离"
+			var cfg database.SystemConfig
+			err := db.Where("user_id = ? AND `key` = ?", 0, "site_description").First(&cfg).Error
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				if err := db.Create(&database.SystemConfig{Key: "site_description", Value: newDesc, Public: true}).Error; err != nil {
+					return err
+				}
+			case err != nil:
+				return err
+			case cfg.Value == legacyDesc:
+				if err := db.Model(&database.SystemConfig{}).Where("id = ?", cfg.ID).Update("value", newDesc).Error; err != nil {
+					return err
+				}
+			}
+			return db.Where("user_id = ? AND `key` = ?", 0, "stats_enabled").
+				Delete(&database.SystemConfig{}).Error
 		},
 	})
 
@@ -358,18 +437,76 @@ func init() {
 		},
 	})
 
+	// 台账数据隔离与归属（功能随 v0.6.0 发布）。
+	//
+	// 老库升级后行为必须与升级前一致：全部业务数据归 0 号「公共台账」台账，
+	// 全部现有用户加入该台账，原全局权限平移到成员关系上。想隔离的新用户
+	// 由管理员另建台账并单独加入。详见 ledger.go 与 migrate_ledger.go。
+	//
+	// ⚠️ 迁移版本用 0.5.1 而不是 0.6.0：升级阶梯只跑「迁移版本 ≤ 应用 VERSION」
+	// 的迁移。本功能尚未发版（dev 包 VERSION=0.5.1），若迁移标 0.6.0 会被跳过，
+	// 老库升级会丢权限。发版时：已装 0.5.1 的库迁移记录为 0.5.1 ≤ 新版本号
+	// 不重复跑，全新库正常跑。护栏见 version_gate_test.go。
+	//
+	// 0.5.2 起这条迁移只在**老库**上有效（见 legacyTenantDataExists）：全新
+	// 安装没有账号也没有历史权限，跑它只会留下一张空的公共台账。
+	database.Upgrades = append(database.Upgrades, database.Upgrade{
+		Version: "0.5.1",
+		Name:    "rental_ledger_data_isolation",
+		// DDL（ALTER TABLE / 索引重建）在 SQLite 上不能安全地包在事务里，
+		// 与 0.3.3 同策略：整段迁移以 NoTx 执行，靠 IF NOT EXISTS 与
+		// 列存在性判断保证可重入。
+		NoTx: true,
+		Upgrade: func(db *gorm.DB) error {
+			if err := migrateOrgEraSchema(db); err != nil {
+				return err
+			}
+			return migrateAccessToLedgers(db)
+		},
+	})
+
+	// 0.5.2：台账模型换成「个人台账 + 共同台账」。
+	//
+	// 只做加法：老台账补 kind/owner、成员行补 role/status、给每个存量账号建
+	// 个人台账；**业务数据一行不动**，老用户升级后仍在自己原来的台账里看到
+	// 原来的数据。DDL（DROP INDEX）同样不包事务，理由同 0.5.1。
+	database.Upgrades = append(database.Upgrades, database.Upgrade{
+		Version: "0.5.2",
+		Name:    "rental_personal_ledgers",
+		NoTx:    true,
+		Upgrade: migratePersonalLedgers,
+	})
+
 	registerConfigs()
 
-	// 数据共享后业务数据不属于任何个人：删除用户不再受名下业务数据限制，
-	// 也不清理业务数据（房源/租户/账单是全员共享的台账）；只清这个人自己的
-	// 授权行与录入人戳保留在原行上（历史溯源）。
+	// 删号守卫（0.5.2 新模型）：数据归属台账，所以「有数据的账号」不能一删了之。
+	//   - 自己是共同台账的管理者：台账会变成无主（本版没有转让功能）→ 拒绝；
+	//   - 个人台账里有业务数据（房源/租户/合同/抄表/账单/收款）→ 拒绝，
+	//     免得把台账与数据一起变成孤儿。
+	// 其它情况放行：清掉成员关系与空台账即可，业务数据留在它所属的台账里。
 	database.RegisterUserDeleteGuard(func(db *gorm.DB, userID uint) (bool, error) {
-		return false, nil
+		return userOwnsLedgerWithData(db, userID)
 	})
 	database.RegisterUserDeleteCleanup(func(db *gorm.DB, userID uint) error {
-		// 通知渠道绑定等个人配置随账号清理；合同挂在租户（共享数据）名下，
-		// 不随用户删除。
-		return db.Where("user_id = ?", userID).Delete(&RentalAccess{}).Error
+		if err := db.Where("user_id = ?", userID).Delete(&LedgerMember{}).Error; err != nil {
+			return err
+		}
+		// 空的无主台账一并清掉：个人台账只属于本人；共同台账能走到这里说明
+		// 守卫已经确认它没有数据（有数据或自己是管理者的都被拦下了）。
+		q := db.Where("owner_user_id = ?", userID)
+		if ids := businessDataLedgerIDs(db); len(ids) > 0 {
+			q = q.Where("id NOT IN ?", ids)
+		}
+		if err := q.Delete(&Ledger{}).Error; err != nil {
+			return err
+		}
+		// 0.5.x 时代的全局权限表：只有老库有，且 0.6 起不再读，顺手清掉。
+		if tableExists(db, "rental_accesses") {
+			if err := db.Where("user_id = ?", userID).Delete(&RentalAccess{}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 
 	apps.Register(apps.App{
@@ -378,11 +515,20 @@ func init() {
 		Icon:        "house",
 		RoutePrefix: "/api/rental",
 		NavPosition: 10,
-		SetupAuth:   setupRoutes,
-		// 授权管理只给管理员：列出各用户业务权限、按用户设置等级。
-		SetupAdmin: setupAccessAdminRoutes,
+		SetupAuth:   setupRoutesWithApprovalGate,
+		// 公开路由：租客自助登记（/api/rental/apply/<token>），走 publicGroup 限流
+		Setup: setupApplyPublicRoutes,
+		// 管理后台只保留「账号」相关能力：注册审核（待审核用户通过/驳回）。
+		// 台账由用户自己建、自己管成员；超管在业务数据上没有特权（0.5.2 起）。
+		SetupAdmin: func(admin *gin.RouterGroup, db *gorm.DB) {
+			setupLedgerAdminRoutes(admin, db)
+		},
 		// Migrate 在框架迁移阶段调用一次：把 db 注入给缴费提醒的调度任务
 		// 与通知渠道层（QQ 网关等）。
+		//
+		// 台账不再需要「启动时保证某行存在」：个人台账在注册钩子里建
+		// （ensurePersonalLedger），共同台账由用户自己建；历史库由 0.5.2
+		// 升级补齐。这里只做依赖注入。
 		Migrate: func(db *gorm.DB) error {
 			appDB = db
 			notify.SetDB(db)
@@ -391,23 +537,36 @@ func init() {
 	})
 }
 
-// setupRoutes 挂载全部业务路由（框架 authGroup，登录后可用）。数据全员共享，
-// 每条路由按业务权限等级放行（requireAccess：读 readonly、写 edit、
-// 删除与导入 full），无权限的用户统一 403。
+// setupRoutes 挂载全部业务路由（框架 authGroup，登录后可用）。
+//
+// v0.6.0 起权限与数据范围都按**台账**判定：
+//   - resolveLedger 先把本次请求的台账范围（?ledger_id= 或用户全部所属台账）
+//     解析进 context；
+//   - requireModule 做模块准入（跨台账并集口径，防误挡只读员工）；
+//   - 各 handler 用 ledgerScope(c) 把查询收窄到可见台账，写入落到目标台账。
+//
+// 默认不传 ledger_id 时：查询范围 = 我的全部正式成员台账，写入落个人台账。
 func setupRoutes(api *gin.RouterGroup, db *gorm.DB) {
-	setupAccessMeRoutes(api, db)
-	setupRoomRoutes(api, db)
-	setupTenantRoutes(api, db)
-	setupContractRoutes(api, db)
-	setupMeterRoutes(api, db)
-	setupBillRoutes(api, db)
-	setupDataRoutes(api, db)
-	setupStatsRoutes(api, db)
-	setupFeeRoutes(api, db)
+	// 台账范围解析必须挂在所有业务路由之前。
+	scoped := api.Group("", resolveLedger(db))
+
+	setupLedgerAuthRoutes(scoped, db)
+	setupRoomRoutes(scoped, db)
+	setupTenantRoutes(scoped, db)
+	setupApplicationRoutes(scoped, db)
+	setupContractRoutes(scoped, db)
+	setupAttachmentRoutes(scoped, db)
+	setupMeterRoutes(scoped, db)
+	setupBillRoutes(scoped, db)
+	setupDataRoutes(scoped, db)
+	setupStatsRoutes(scoped, db)
+	setupFeeRoutes(scoped, db)
 	// 共享计费默认值：设置升为系统级后，员工在偏好设置里看不到租房设置组，
 	// 开票/抄表弹窗的"跟随全局默认"改走这个接口。
-	api.GET("/rental/billing-defaults", requireAccess(db, AccessReadonly), handleBillingDefaults(db))
-	notify.SetupRoutes(api, db, requireAccess(db, AccessReadonly))
+	// 共享计费默认值：开票/收款弹窗的"跟随全局默认"走这个接口，归账单模块。
+	scoped.GET("/rental/billing-defaults", requireModule(db, ModuleBills, PermView), handleBillingDefaults(db))
+	// 通知渠道是个人提醒配置，任一模块可看即允许绑自己的渠道。
+	notify.SetupRoutes(scoped, db, requireAnyView(db))
 }
 
 // registerConfigs 注册系统级共享设置：默认单价与单据抬头。数据共享后这些
@@ -418,6 +577,23 @@ func registerConfigs() {
 		Key: "rental_water_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "5.00", Group: "租房设置", Label: "水费单价（元/吨）",
 		Description: "按吨计费时的默认水价，可在租户或账单中覆盖",
+	})
+	// AI 证件识别（租客自助登记用）：OpenAI 兼容视觉接口，Key 留空 = 关闭识别，
+	// 登记页自动退化为手填。默认指向智谱开放平台（glm-4v-flash 免费档）。
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "rental_ai_base_url", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
+		Default: "https://open.bigmodel.cn/api/paas/v4", Group: "租房设置", Label: "AI 识别接口地址",
+		Description: "OpenAI 兼容的 chat/completions 基址（含版本号），用于身份证照片识别",
+	})
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "rental_ai_api_key", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
+		Default: "", Group: "租房设置", Label: "AI 识别 API Key",
+		Description: "留空则关闭识别，租客登记页自动退化为手动填写",
+	})
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "rental_ai_model", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
+		Default: "glm-4v-flash", Group: "租房设置", Label: "AI 识别模型",
+		Description: "支持图片输入的视觉模型，如 glm-4v-flash",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
 		Key: "rental_water_mode", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeSelect,
@@ -470,5 +646,28 @@ func registerConfigs() {
 		Key: "rental_receipt_note", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "", Group: "租房设置", Label: "单据底部备注",
 		Description: "打印收费单据时显示在底部的提示文字",
+	})
+
+	// v0.6.0：注册审核开关。开户给别人用时打开，新注册账号先进「待审核」，
+	// 管理员在用户管理里审核通过后才可用（首个管理员不受影响；个人台账在注册时就建好）。
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "register_need_approval", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeBool,
+		Default: "true", Group: "访问控制", Label: "注册需管理员审核",
+		Description: "开启后新注册账号为「待审核」，可登录但看不到任何业务数据，需管理员审核通过后才能使用",
+	})
+
+	// 注册手机号（2026-10-11 粉丝需求）：管理员在用户列表里要能看出谁是谁。
+	// 手机号只作联系/认人用途——不做唯一校验、不参与登录、不作为身份凭据。
+	// Public: true —— 注册页（未登录）要读这两个开关来决定显不显示输入框、
+	// 以及要不要标成必填；只暴露开关本身，不涉及任何用户数据。
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "register_phone_enabled", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeBool,
+		Default: "true", Public: true, Group: "访问控制", Label: "注册时收集手机号",
+		Description: "关闭后注册页不显示手机号输入框；手机号仅用于管理员识别账号归属，不做登录凭据",
+	})
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "register_phone_required", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeBool,
+		Default: "true", Public: true, Group: "访问控制", Label: "注册手机号必填",
+		Description: "开启后不填手机号无法注册；仅在「注册时收集手机号」开启时生效",
 	})
 }

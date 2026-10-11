@@ -3,9 +3,9 @@
     <PageHeader title="抄表记录" description="每月水/电/燃气表读数台账，独立于账单：空置房、季付房的中间月份也能记">
       <template #actions>
         <!-- 录入读数按「抄表」模块的操作档开放；抄表开票生成账单，要账单操作档 -->
-        <template v-if="accessStore.canEdit('meters')">
+        <template v-if="ledgerStore.canEdit('meters')">
           <button class="btn-ghost" @click="openForm()">录入读数</button>
-          <button v-if="accessStore.canEdit('bills')" class="btn-brand" @click="showMetering = true">⚡ 抄表开票</button>
+          <button v-if="ledgerStore.canEdit('bills')" class="btn-brand" @click="showMetering = true">⚡ 抄表开票</button>
         </template>
       </template>
     </PageHeader>
@@ -13,10 +13,16 @@
     <!-- 筛选：桌面平铺，手机收成一行摘要 -->
     <FilterPanel ref="filterRef" :summary="metersFilterSummary" :active-count="metersFilterCount">
       <div class="flex flex-wrap items-center gap-3">
-        <DateField v-model="period" type="month" class="!py-2 !w-[150px]" @change="load(1)" />
-        <select v-model="roomId" class="input-field !py-2 !w-auto" @change="load(1)">
+        <DateField v-model="periodFrom" type="month" class="!py-2 !w-[140px]" placeholder="账期开始" @change="load(1)" />
+        <span class="text-xs text-muted-foreground shrink-0">至</span>
+        <DateField v-model="periodTo" type="month" class="!py-2 !w-[140px]" placeholder="账期结束" @change="load(1)" />
+        <select v-model="community" class="input-field !py-2 !w-auto max-w-[150px]" @change="onCommunityChange">
+          <option value="">全部小区</option>
+          <option v-for="c in communityOptions" :key="c" :value="c">{{ c }}</option>
+        </select>
+        <select v-model="roomId" class="input-field !py-2 !w-auto max-w-[150px]" @change="load(1)">
           <option :value="0">全部房源</option>
-          <option v-for="r in allRooms" :key="r.id" :value="r.id">{{ r.room_no }}</option>
+          <option v-for="r in roomOptions" :key="r.id" :value="r.id">{{ r.room_no }}</option>
         </select>
         <button class="btn-brand !py-2" @click="applyFilters">查询</button>
         <span class="ml-auto text-xs text-muted-foreground hidden sm:block">开票时会自动沉淀当期读数；读数倒挂（换表）按 0 计用量</span>
@@ -58,8 +64,8 @@
                 </td>
                 <td class="py-2.5 px-4 text-muted-foreground max-w-[200px] truncate" :title="r.note">{{ r.note || '—' }}</td>
                 <td class="py-2.5 px-4 text-right whitespace-nowrap">
-                  <button v-if="accessStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openForm(r)">修改</button>
-                  <button v-if="accessStore.canFull('meters')" class="text-destructive hover:underline" @click="remove(r)">删除</button>
+                  <button v-if="ledgerStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openForm(r)">修改</button>
+                  <button v-if="ledgerStore.canFull('meters')" class="text-destructive hover:underline" @click="remove(r)">删除</button>
                 </td>
               </tr>
             </tbody>
@@ -75,8 +81,8 @@
                 <span class="text-[11px] text-muted-foreground ml-1.5 tabular-nums">{{ r.period }}</span>
               </div>
               <div class="flex items-center gap-3 text-xs shrink-0">
-                <button v-if="accessStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300" @click="openForm(r)">修改</button>
-                <button v-if="accessStore.canFull('meters')" class="text-destructive" @click="remove(r)">删除</button>
+                <button v-if="ledgerStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300" @click="openForm(r)">修改</button>
+                <button v-if="ledgerStore.canFull('meters')" class="text-destructive" @click="remove(r)">删除</button>
               </div>
             </div>
             <div class="text-[11px] leading-5 text-muted-foreground rounded-md bg-muted/50 px-2 py-1.5 tabular-nums">
@@ -109,7 +115,7 @@
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" @input="formTouched = true">
           <div v-for="m in meterFields" :key="m.key">
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">{{ m.label }}（{{ m.unit }}）</label>
-            <input v-model.number="form[m.key]" type="number" step="0.01" min="0" class="input-field" :placeholder="String(prevOf(m.key))" />
+            <input v-model.number="form[m.key]" type="number" step="1" min="0" class="input-field" :placeholder="String(prevOf(m.key))" />
             <p class="text-[11px] text-muted-foreground mt-1 tabular-nums">上期 {{ fmtRead(prevOf(m.key)) }} {{ m.unit }}</p>
           </div>
         </div>
@@ -151,14 +157,14 @@ import MeterReadingModal from '../components/MeterReadingModal.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
-import { useRentalAccessStore } from '../stores/rentalAccess'
+import { useLedgerStore } from '../stores/ledger'
 import { toast } from '../utils/toast'
 import {
-  deleteMeterRecord, getMeterRecords, getRooms, upsertMeterRecord,
+  deleteMeterRecord, getAllRooms, getMeterRecords, upsertMeterRecord,
   type MeterRecord, type RoomView,
 } from '../api/rental'
 
-const accessStore = useRentalAccessStore()
+const ledgerStore = useLedgerStore()
 
 const records = ref<MeterRecord[]>([])
 const allRooms = ref<RoomView[]>([])
@@ -166,17 +172,32 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = 20
 const loading = ref(false)
-const period = ref('')
+// 账期区间（YYYY-MM 闭区间，两端可留空）+ 小区/村组 + 房源（随小区收窄）
+const periodFrom = ref('')
+const periodTo = ref('')
+const community = ref('')
 const roomId = ref(0)
+const communityOptions = computed(() => [...new Set(allRooms.value.map((r) => r.community).filter(Boolean))])
+const roomOptions = computed(() =>
+  community.value ? allRooms.value.filter((r) => r.community === community.value) : allRooms.value,
+)
 
-// 手机端筛选摘要行与非默认条件数（徽标，月份常驻不计入）
+function onCommunityChange() {
+  if (roomId.value && !roomOptions.value.some((r) => r.id === roomId.value)) roomId.value = 0
+  load(1)
+}
+
+// 手机端筛选摘要行与非默认条件数（徽标，账期区间常驻不计入）
 const metersFilterSummary = computed(() =>
   [
-    period.value || '全部月份',
+    periodFrom.value && periodTo.value ? `${periodFrom.value} ~ ${periodTo.value}` : periodFrom.value || periodTo.value || '全部月份',
+    community.value || '全部小区',
     roomId.value ? (allRooms.value.find((r) => r.id === roomId.value)?.room_no || '指定房源') : '全部房源',
   ].join(' · '),
 )
-const metersFilterCount = computed(() => (roomId.value ? 1 : 0))
+// 徽标统计非默认条件：账期区间此前漏算（只填区间时徽标为 0）。
+const metersFilterCount = computed(() =>
+  (periodFrom.value || periodTo.value ? 1 : 0) + (community.value ? 1 : 0) + (roomId.value ? 1 : 0))
 
 const filterRef = ref<InstanceType<typeof FilterPanel> | null>(null)
 
@@ -276,15 +297,20 @@ function currentPeriod(): string {
 }
 
 async function loadRooms() {
-  const res = await getRooms({ page: 1, pageSize: 200 })
-  if (res.data?.code === 0) allRooms.value = res.data.data.items || []
+  // 跨页拉全：服务端 pageSize 上限是 100，写 pageSize: 200 会被静默截断，
+  // 房间超过 100 间时下拉会缺房。
+  allRooms.value = await getAllRooms()
 }
 
 async function load(p = page.value) {
   loading.value = true
   try {
     const res = await getMeterRecords({
-      page: p, pageSize, period: period.value || undefined, room_id: roomId.value || undefined,
+      page: p, pageSize,
+      period_from: periodFrom.value || undefined,
+      period_to: periodTo.value || undefined,
+      room_id: roomId.value || undefined,
+      community: community.value || undefined,
     })
     if (res.data?.code === 0) {
       records.value = res.data.data.items || []

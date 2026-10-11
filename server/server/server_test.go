@@ -41,6 +41,12 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *gorm.DB, string) {
 	if err := sysconfig.InitDefaultConfigs(db); err != nil {
 		t.Fatalf("init configs: %v", err)
 	}
+	// 注册手机号默认必填（2026-10-11 粉丝需求）。本文件的用例考的是网关/权限/
+	// 配置，与手机号无关，注册请求大多不带 phone——显式关掉必填。手机号策略
+	// 本身由 rental/phone_test.go 覆盖。
+	if err := sysconfig.UpdateConfig(db, "register_phone_required", "false", 0); err != nil {
+		t.Fatalf("disable phone requirement: %v", err)
+	}
 	secret, err := sysconfig.GetConfig(db, "jwt_secret", 0)
 	if err != nil || secret == "" {
 		t.Fatalf("jwt secret: %v", err)
@@ -67,6 +73,10 @@ func setupFnOSTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	}
 	if err := sysconfig.InitDefaultConfigs(db); err != nil {
 		t.Fatalf("init configs: %v", err)
+	}
+	// 同上：飞牛用例考的是绑定关系，与注册手机号无关。
+	if err := sysconfig.UpdateConfig(db, "register_phone_required", "false", 0); err != nil {
+		t.Fatalf("disable phone requirement: %v", err)
 	}
 	secret, err := sysconfig.GetConfig(db, "jwt_secret", 0)
 	if err != nil || secret == "" {
@@ -150,7 +160,11 @@ func decode(t *testing.T, w *httptest.ResponseRecorder) map[string]interface{} {
 
 func registerUser(t *testing.T, r http.Handler, username, password string) string {
 	t.Helper()
-	w := doJSON(r, "POST", "/api/auth/register", "", map[string]string{"username": username, "password": password})
+	// 注册手机号默认必填（2026-10-11 粉丝需求），所以测试里带上一个号码。
+	// 这里姓名的哈希只保证同用户名不同号，无所谓格式真实与否。
+	w := doJSON(r, "POST", "/api/auth/register", "", map[string]string{
+		"username": username, "password": password, "phone": "13800000000",
+	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("register %s: status %d body %s", username, w.Code, w.Body.String())
 	}

@@ -53,6 +53,9 @@ func handleRegister(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 		var req struct {
 			Username string `json:"username" binding:"required"`
 			Password string `json:"password" binding:"required"`
+			// Phone 只作联系/认人用途，不做唯一约束、不参与登录。
+			// 是否必填由系统配置 register_phone_required 决定（在 Register 里校验）。
+			Phone string `json:"phone"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.ErrorBadRequest(c, "请输入用户名和密码")
@@ -64,7 +67,7 @@ func handleRegister(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 		// 账号用起来，由用户显式点「使用飞牛 NAS 登录」并确认后的绑定流程决定
 		// （理由同 handleLogin）。网关域上注册后的会话由下方种下的应用会话
 		// cookie 维持，不再依赖绑定。
-		result, err := Register(db, req.Username, req.Password, secret)
+		result, err := Register(db, req.Username, req.Password, req.Phone, secret)
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrRegisterDisabled):
@@ -72,6 +75,8 @@ func handleRegister(db *gorm.DB, gatewayPrefix string) gin.HandlerFunc {
 			case errors.Is(err, ErrUserExists):
 				response.Error(c, http.StatusConflict, response.CodeUserExists, err.Error())
 			case errors.Is(err, ErrPasswordTooShort), errors.Is(err, ErrPasswordTooLong):
+				response.ErrorBadRequest(c, err.Error())
+			case errors.Is(err, ErrPhoneRequired), errors.Is(err, ErrPhoneInvalid):
 				response.ErrorBadRequest(c, err.Error())
 			default:
 				response.ErrorInternal(c, "注册失败")
