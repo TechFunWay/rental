@@ -22,6 +22,12 @@ func TestPayCycleHelpers(t *testing.T) {
 	if got := normalizePayCycle("quarterly"); got != payCycleQuarterly {
 		t.Errorf("normalizePayCycle(quarterly) = %q, want quarterly", got)
 	}
+	if got := normalizePayCycle("semiannual"); got != payCycleSemiannual {
+		t.Errorf("normalizePayCycle(semiannual) = %q, want semiannual", got)
+	}
+	if got := normalizePayCycle("annual"); got != payCycleAnnual {
+		t.Errorf("normalizePayCycle(annual) = %q, want annual", got)
+	}
 	if got := normalizePayCycle("weekly"); got != payCycleMonthly {
 		t.Errorf("normalizePayCycle(weekly) = %q, want monthly", got)
 	}
@@ -31,8 +37,26 @@ func TestPayCycleHelpers(t *testing.T) {
 	if got := cycleMonths(payCycleQuarterly); got != 3 {
 		t.Errorf("cycleMonths(quarterly) = %d, want 3", got)
 	}
+	if got := cycleMonths(payCycleSemiannual); got != 6 {
+		t.Errorf("cycleMonths(semiannual) = %d, want 6", got)
+	}
+	if got := cycleMonths(payCycleAnnual); got != 12 {
+		t.Errorf("cycleMonths(annual) = %d, want 12", got)
+	}
+	if got := cycleMonths("weekly"); got != 1 {
+		t.Errorf("cycleMonths(weekly) = %d, want 1（未知降级月付）", got)
+	}
 	if got := cycleLabel(payCycleQuarterly); got != "季付" {
 		t.Errorf("cycleLabel(quarterly) = %q, want 季付", got)
+	}
+	if got := cycleLabel(payCycleSemiannual); got != "半年付" {
+		t.Errorf("cycleLabel(semiannual) = %q, want 半年付", got)
+	}
+	if got := cycleLabel(payCycleAnnual); got != "年付" {
+		t.Errorf("cycleLabel(annual) = %q, want 年付", got)
+	}
+	if got := cycleLabel(""); got != "月付" {
+		t.Errorf("cycleLabel(\"\") = %q, want 月付", got)
 	}
 	if got := parsePayCycle("季付"); got != payCycleQuarterly {
 		t.Errorf("parsePayCycle(季付) = %q, want quarterly", got)
@@ -40,8 +64,37 @@ func TestPayCycleHelpers(t *testing.T) {
 	if got := parsePayCycle("MONTHLY"); got != payCycleMonthly {
 		t.Errorf("parsePayCycle(MONTHLY) = %q, want monthly", got)
 	}
-	if got := parsePayCycle("半年付"); got != "" {
-		t.Errorf("parsePayCycle(半年付) = %q, want 空", got)
+	// 半年付/年付：中文、英文、大小写、首尾空格都要认。
+	if got := parsePayCycle("半年付"); got != payCycleSemiannual {
+		t.Errorf("parsePayCycle(半年付) = %q, want semiannual", got)
+	}
+	if got := parsePayCycle(" 年付 "); got != payCycleAnnual {
+		t.Errorf("parsePayCycle( 年付 ) = %q, want annual", got)
+	}
+	if got := parsePayCycle("SEMIANNUAL"); got != payCycleSemiannual {
+		t.Errorf("parsePayCycle(SEMIANNUAL) = %q, want semiannual", got)
+	}
+	if got := parsePayCycle("Annual"); got != payCycleAnnual {
+		t.Errorf("parsePayCycle(Annual) = %q, want annual", got)
+	}
+	if got := parsePayCycle("weekly"); got != "" {
+		t.Errorf("parsePayCycle(weekly) = %q, want 空", got)
+	}
+}
+
+// TestCoveredPeriodText 覆盖区间按周期自身月数生成，不再是写死的 +2 个月。
+func TestCoveredPeriodText(t *testing.T) {
+	cases := []struct{ period, cycle, want string }{
+		{"2026-09", payCycleMonthly, "2026-09"},
+		{"2026-09", payCycleQuarterly, "2026-09 ~ 2026-11"},
+		{"2026-09", payCycleSemiannual, "2026-09 ~ 2027-02"},
+		{"2026-09", payCycleAnnual, "2026-09 ~ 2027-08"},
+		{"2026-09", "", "2026-09"},
+	}
+	for _, tc := range cases {
+		if got := coveredPeriodText(tc.period, tc.cycle); got != tc.want {
+			t.Errorf("coveredPeriodText(%s, %s) = %q, want %q", tc.period, tc.cycle, got, tc.want)
+		}
 	}
 }
 
@@ -371,6 +424,241 @@ func TestStatsPaymentDue(t *testing.T) {
 	}
 	if item["period"] != period {
 		t.Errorf("payment_due period = %v, want %v", item["period"], period)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 半年付 / 年付开票（issue #4 需求 1+2 的关键回归）
+// ---------------------------------------------------------------------------
+
+// TestLongCycleAnchorBilling 半年付/年付房：账单仍然每月一张，
+//   - 锚点月固定费 = 单价×N（半年付 ×6、年付 ×12）；
+//   - 非锚点月固定费为 0，但水电与包月水费照常每月入账（按月抄表）；
+//   - 锚点判断保证不会每月重复收 N 个月租金。
+func TestLongCycleAnchorBilling(t *testing.T) {
+	env := setupEnv(t)
+	// 租金 1000、卫生 20、管理 30、包月水 40。
+	w := env.do(http.MethodPost, "/api/rental/rooms", map[string]interface{}{
+		"room_no": "H1", "default_rent": 1000, "default_sanitation_fee": 20,
+		"default_management_fee": 30,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("seed room: %d %s", w.Code, w.Body.String())
+	}
+	roomID := uint(field(t, decodeBody(t, w), "data", "id").(float64))
+	if w := env.do(http.MethodPost, "/api/rental/tenants", map[string]interface{}{
+		"room_id": roomID, "name": "半年租户", "water_mode": "monthly", "water_monthly_fee": 40,
+		"pay_cycle": "semiannual", "pay_day": 5,
+	}); w.Code != http.StatusOK {
+		t.Fatalf("seed semiannual tenant: %d %s", w.Code, w.Body.String())
+	}
+
+	// 首账月 2026-09（锚点）：固定费 ×6 + 包月水费按月 = 6300 + 40。
+	if w := env.do(http.MethodPost, "/api/rental/bills/generate", map[string]interface{}{"period": "2026-09"}); w.Code != http.StatusOK {
+		t.Fatalf("generate 09: %d %s", w.Code, w.Body.String())
+	}
+	b := env.fetchBill("2026-09", "H1")
+	if b["pay_cycle"] != payCycleSemiannual {
+		t.Fatalf("pay_cycle = %v, want semiannual", b["pay_cycle"])
+	}
+	if !almostEqual(num(b["rent"]), 6000) || !almostEqual(num(b["sanitation_fee"]), 120) || !almostEqual(num(b["management_fee"]), 180) {
+		t.Errorf("锚点月 = 租金 %v / 卫生 %v / 管理 %v, want 6000/120/180（×6）",
+			b["rent"], b["sanitation_fee"], b["management_fee"])
+	}
+	if !almostEqual(num(b["water_fee"]), 40) {
+		t.Errorf("water_fee = %v, want 40（包月水费恒按月，不随周期放大）", b["water_fee"])
+	}
+	if !almostEqual(num(b["total_amount"]), 6340) {
+		t.Errorf("total = %v, want 6340", b["total_amount"])
+	}
+
+	// 非锚点月（10 月、2027-01 都还没跨 6 个月）：固定费为 0，水费照收 40。
+	for _, period := range []string{"2026-10", "2027-01"} {
+		if w := env.do(http.MethodPost, "/api/rental/bills/generate", map[string]interface{}{"period": period}); w.Code != http.StatusOK {
+			t.Fatalf("generate %s: %d %s", period, w.Code, w.Body.String())
+		}
+		mid := env.fetchBill(period, "H1")
+		if !almostEqual(num(mid["rent"]), 0) || !almostEqual(num(mid["sanitation_fee"]), 0) || !almostEqual(num(mid["management_fee"]), 0) {
+			t.Errorf("%s 非锚点月固定费 = %v/%v/%v, want 0/0/0（不得重复收 6 个月）",
+				period, mid["rent"], mid["sanitation_fee"], mid["management_fee"])
+		}
+		if !almostEqual(num(mid["water_fee"]), 40) || !almostEqual(num(mid["total_amount"]), 40) {
+			t.Errorf("%s 月账单 = water %v total %v, want 40/40", period, mid["water_fee"], mid["total_amount"])
+		}
+	}
+
+	// 2027-03 与首账月整差 6 个月 → 下一个锚点月，固定费再收 ×6。
+	if w := env.do(http.MethodPost, "/api/rental/bills/generate", map[string]interface{}{"period": "2027-03"}); w.Code != http.StatusOK {
+		t.Fatalf("generate 2027-03: %d %s", w.Code, w.Body.String())
+	}
+	next := env.fetchBill("2027-03", "H1")
+	if !almostEqual(num(next["rent"]), 6000) || !almostEqual(num(next["sanitation_fee"]), 120) || !almostEqual(num(next["management_fee"]), 180) {
+		t.Errorf("第二个锚点月 = %v/%v/%v, want 6000/120/180", next["rent"], next["sanitation_fee"], next["management_fee"])
+	}
+	if !almostEqual(num(next["total_amount"]), 6340) {
+		t.Errorf("第二个锚点月 total = %v, want 6340", next["total_amount"])
+	}
+}
+
+// TestAnnualCycleAnchorBilling 年付房：锚点月固定费 ×12，非锚点月只有水电，
+// 缴费提醒的下一期步长与预计应缴也按 12 个月口径。
+func TestAnnualCycleAnchorBilling(t *testing.T) {
+	env := setupEnv(t)
+	roomID := env.seedRoom("Y1", 1000, 0)
+	env.setRoomFees(roomID, "Y1", 1000, 20, 30, 0)
+	env.seedTenantViaAPI(roomID, map[string]interface{}{
+		"name": "年付租户", "water_mode": "monthly", "water_monthly_fee": 40,
+		"pay_cycle": "annual", "pay_day": 5, "remind_days": 3,
+	})
+
+	// 锚点月 2026-09：固定费 ×12 + 包月水费（按月）= 12600 + 40。
+	if w := env.do(http.MethodPost, "/api/rental/bills/generate", map[string]interface{}{"period": "2026-09"}); w.Code != http.StatusOK {
+		t.Fatalf("generate: %d %s", w.Code, w.Body.String())
+	}
+	b := env.fetchBill("2026-09", "Y1")
+	if b["pay_cycle"] != payCycleAnnual {
+		t.Fatalf("pay_cycle = %v, want annual", b["pay_cycle"])
+	}
+	if !almostEqual(num(b["rent"]), 12000) || !almostEqual(num(b["sanitation_fee"]), 240) || !almostEqual(num(b["management_fee"]), 360) {
+		t.Errorf("年付锚点月 = %v/%v/%v, want 12000/240/360（×12）",
+			b["rent"], b["sanitation_fee"], b["management_fee"])
+	}
+	if !almostEqual(num(b["water_fee"]), 40) || !almostEqual(num(b["total_amount"]), 12640) {
+		t.Errorf("water/total = %v/%v, want 40/12640", b["water_fee"], b["total_amount"])
+	}
+
+	// 中间月 2026-10：固定费 0，包月水费照收。
+	if w := env.do(http.MethodPost, "/api/rental/bills/generate", map[string]interface{}{"period": "2026-10"}); w.Code != http.StatusOK {
+		t.Fatalf("generate oct: %d %s", w.Code, w.Body.String())
+	}
+	oct := env.fetchBill("2026-10", "Y1")
+	if !almostEqual(num(oct["rent"]), 0) || !almostEqual(num(oct["total_amount"]), 40) {
+		t.Errorf("年付中间月 = rent %v total %v, want 0/40", oct["rent"], oct["total_amount"])
+	}
+
+	// 缴费提醒：年付口径下 Months=12、预计应缴 = 固定费 ×12 + 包月水（按月）。
+	// 由最近一张未收清账单驱动：10 月月账单还没收 → 待收账期就是 2026-10。
+	var room Room
+	if err := env.db.First(&room, roomID).Error; err != nil {
+		t.Fatalf("reload room: %v", err)
+	}
+	today := time.Date(2026, 10, 3, 0, 0, 0, 0, time.Local)
+	item := nextPaymentDue(env.db, &room, env.billingOf(&room), today)
+	if item == nil {
+		t.Fatalf("annual payment due = nil")
+	}
+	if item.PayCycle != payCycleAnnual || item.Months != 12 {
+		t.Errorf("annual due = %v/%d, want annual/12", item.PayCycle, item.Months)
+	}
+	if !almostEqual(item.ExpectedAmount, 12640) {
+		t.Errorf("annual expected = %v, want 12640（固定费 ×12，包月水费按月）", item.ExpectedAmount)
+	}
+
+	// 全部收清后，下一期按 12 个月的步长推进：最近一张 2026-10 已收清 →
+	// 2027-10（步长 12 个月，验证年付下 12 次循环足够推进）。
+	env.db.Model(&Bill{}).Where("room_id = ?", roomID).
+		Updates(map[string]interface{}{"paid_amount": 12640, "status": billStatusPaid})
+	if err := env.db.First(&room, roomID).Error; err != nil {
+		t.Fatalf("reload room: %v", err)
+	}
+	item = nextPaymentDue(env.db, &room, env.billingOf(&room), today)
+	if item == nil {
+		t.Fatalf("annual due after paid = nil")
+	}
+	if item.Period != "2027-10" || item.Months != 12 {
+		t.Errorf("年付下一期 = %s/%d, want 2027-10/12（步长 12 个月）", item.Period, item.Months)
+	}
+}
+
+
+// TestBillTypeFilterAllCycles bill_type 筛选接受四周期值（回归：此前只认
+// monthly/quarterly，半年付/年付账单会被筛丢）。
+func TestBillTypeFilterAllCycles(t *testing.T) {
+	env := setupEnv(t)
+	// 三间房各自一个周期，各出一张账单。
+	for _, tc := range []struct {
+		roomNo string
+		cycle  string
+	}{{"F1", payCycleMonthly}, {"F2", payCycleSemiannual}, {"F3", payCycleAnnual}} {
+		roomID := env.seedRoom(tc.roomNo, 1000, 0)
+		env.seedTenantViaAPI(roomID, map[string]interface{}{
+			"name": tc.roomNo + "租户", "pay_cycle": tc.cycle, "pay_day": 5,
+		})
+	}
+	if w := env.do(http.MethodPost, "/api/rental/bills/generate", map[string]interface{}{"period": "2026-09"}); w.Code != http.StatusOK {
+		t.Fatalf("generate: %d %s", w.Code, w.Body.String())
+	}
+
+	for _, cycle := range []string{payCycleMonthly, payCycleSemiannual, payCycleAnnual} {
+		w := env.do(http.MethodGet, "/api/rental/bills?period=2026-09&bill_type="+cycle, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("list bill_type=%s: %d %s", cycle, w.Code, w.Body.String())
+		}
+		items := env.items(decodeBody(t, w))
+		if len(items) != 1 {
+			t.Fatalf("bill_type=%s 返回 %d 张, want 1: %s", cycle, len(items), w.Body.String())
+		}
+		if got := items[0].(map[string]interface{})["pay_cycle"]; got != cycle {
+			t.Errorf("bill_type=%s 命中 %v", cycle, got)
+		}
+	}
+	// 未传/未知值不过滤：三张都在。
+	if items := env.items(decodeBody(t, env.do(http.MethodGet, "/api/rental/bills?period=2026-09", nil))); len(items) != 3 {
+		t.Errorf("无筛选 bill_type 返回 %d 张, want 3", len(items))
+	}
+}
+
+// TestBillCreateRentAndRemarkOverride 抄录开票时可改租金与备注（issue #4 需求 3）：
+//   - 传 rent 覆盖 newBillFromRoom 按周期预填的金额；
+//   - 传 remark 落库（trim），空串/不传保持空。
+func TestBillCreateRentAndRemarkOverride(t *testing.T) {
+	env := setupEnv(t)
+	roomID := env.seedRoom("G1", 1000, 0)
+	env.seedTenantViaAPI(roomID, map[string]interface{}{
+		"name": "半年租户", "pay_cycle": payCycleSemiannual, "pay_day": 5,
+	})
+
+	// 不传 rent/remark：半年付预填 1000×6 = 6000，备注为空。
+	w := env.do(http.MethodPost, "/api/rental/bills", map[string]interface{}{
+		"room_id": roomID, "period": "2026-09",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create bill: %d %s", w.Code, w.Body.String())
+	}
+	b := field(t, decodeBody(t, w), "data").(map[string]interface{})
+	if !almostEqual(num(b["rent"]), 6000) {
+		t.Errorf("默认 rent = %v, want 6000（半年付预填 ×6）", b["rent"])
+	}
+	if b["remark"] != "" {
+		t.Errorf("默认 remark = %v, want 空", b["remark"])
+	}
+
+	// 传 rent 与 remark：覆盖预填值，备注 trim 后落库。
+	w = env.do(http.MethodPost, "/api/rental/bills", map[string]interface{}{
+		"room_id": roomID, "period": "2026-10", "rent": 800,
+		"remark": "  本月只收半个月租  ",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create with rent/remark: %d %s", w.Code, w.Body.String())
+	}
+	b = field(t, decodeBody(t, w), "data").(map[string]interface{})
+	if !almostEqual(num(b["rent"]), 800) {
+		t.Errorf("覆盖后 rent = %v, want 800", b["rent"])
+	}
+	if got, _ := b["remark"].(string); got != "本月只收半个月租" {
+		t.Errorf("remark = %q, want 已 trim 的文本", got)
+	}
+
+	// 传空白 remark：视作不写，保持空。
+	w = env.do(http.MethodPost, "/api/rental/bills", map[string]interface{}{
+		"room_id": roomID, "period": "2026-11", "remark": "   ",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create with blank remark: %d %s", w.Code, w.Body.String())
+	}
+	b = field(t, decodeBody(t, w), "data").(map[string]interface{})
+	if b["remark"] != "" {
+		t.Errorf("空白 remark = %v, want 空", b["remark"])
 	}
 }
 

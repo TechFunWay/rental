@@ -140,12 +140,15 @@ func ledgerBillingDefaultsFor(db *gorm.DB, ledgerID uint) ledgerBillingDefaults 
 	return out
 }
 
-// rentalConfigKeys 可被台账覆盖的租房设置键（与 registerConfigs 登记的 11 个一致）。
+// rentalConfigKeys 可被台账覆盖的租房设置键（与 registerConfigs 登记的一致）。
 var rentalConfigKeys = []string{
 	"rental_water_price", "rental_water_mode", "rental_water_monthly_fee",
 	"rental_pay_cycle", "rental_pay_day",
 	"rental_elec_price", "rental_gas_price", "rental_remind_days",
 	"rental_property_name", "rental_contact", "rental_receipt_note",
+	// 少交/多交结转开关（issue #5 需求 7）：默认关闭，按台账开启。
+	// 必须列在这里，否则台账设置接口的白名单会把它挡掉（见 ledger_api.go 的校验）。
+	carryoverConfigKey,
 }
 
 // receiptHeaderFor 某台账的单据抬头（出租方名称/联系电话/底部备注）。

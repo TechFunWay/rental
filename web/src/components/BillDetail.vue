@@ -5,7 +5,7 @@
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-center gap-2 min-w-0">
           <span class="text-base font-bold text-foreground">{{ bill.room_no }}</span>
-          <span v-if="bill.pay_cycle === 'quarterly'" class="badge !px-1.5 !py-0.5 text-[11px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" :title="coveredText">季付</span>
+          <span v-if="cycleMonths(bill.pay_cycle) > 1" class="badge !px-1.5 !py-0.5 text-[11px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" :title="cycleBadgeTitle">{{ cycleLabel(bill.pay_cycle) }}</span>
         </div>
         <span class="badge shrink-0" :class="statusClass">{{ statusText }}</span>
       </div>
@@ -16,6 +16,11 @@
         <div class="flex justify-between gap-2"><span class="text-muted-foreground shrink-0">单据编号</span><span class="text-foreground tabular-nums truncate">{{ bill.receipt_no || '—' }}</span></div>
         <div v-if="bill.remark" class="flex justify-between gap-2 col-span-2"><span class="text-muted-foreground shrink-0">备注</span><span class="text-foreground truncate" :title="bill.remark">{{ bill.remark }}</span></div>
       </div>
+    </div>
+
+    <!-- 抄表照片：本期读数凭证（只看不传，上传在抄表入口）。没拍过就不占地方。 -->
+    <div class="rounded-xl border border-border p-3">
+      <MeterPhotoGallery :room-id="bill.room_id" :period="bill.period" :water-mixed="bill.water_mode === 'monthly'" />
     </div>
 
     <!-- 费用项目：桌面表格 / 手机卡片 -->
@@ -43,9 +48,17 @@
           </tr>
         </tbody>
         <tfoot>
+          <!-- 有上期结转时把差额单列一行，再给「本期应缴」合计；
+               没有结转（未开启或首账）时只剩一行，与改造前完全一致。 -->
+          <tr v-if="carryInOf(bill)" class="text-amber-600 dark:text-amber-300">
+            <td class="py-1.5 px-2.5" colspan="3">{{ carryInOf(bill) > 0 ? '加：上期少交结转' : '减：上期多交结转' }}</td>
+            <td class="py-1.5 px-2.5 text-right tabular-nums">{{ carryInOf(bill) > 0 ? '+' : '-' }}{{ fmtMoney(Math.abs(carryInOf(bill))) }}</td>
+            <td class="py-1.5 px-2.5"></td>
+            <td class="py-1.5 px-2.5"></td>
+          </tr>
           <tr class="border-t-2 border-border font-bold bg-muted/40">
-            <td class="py-2 px-2.5" colspan="3">应付合计</td>
-            <td class="py-2 px-2.5 text-right tabular-nums">{{ fmtMoney(bill.total_amount) }}</td>
+            <td class="py-2 px-2.5" colspan="3">{{ carryInOf(bill) ? '本期应缴' : '应付合计' }}</td>
+            <td class="py-2 px-2.5 text-right tabular-nums">{{ fmtMoney(payableOf(bill)) }}</td>
             <td class="py-2 px-2.5 text-right tabular-nums text-emerald-600 dark:text-emerald-400">{{ fmtMoney(bill.paid_amount) }}</td>
             <td class="py-2 px-2.5 text-right tabular-nums" :class="isArrears(bill) ? 'text-rose-500' : 'text-muted-foreground'">{{ fmtMoney(arrearsOf(bill)) }}</td>
           </tr>
@@ -110,8 +123,9 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { arrearsOf, fmtMoney, isArrears, type Bill, type BillItemDetail, type FeeItem } from '../api/rental'
-import { coveredPeriodText, cycleLabel, cycleMonths } from '../utils/cycle'
+import MeterPhotoGallery from './MeterPhotoGallery.vue'
+import { arrearsOf, carryInOf, fmtMoney, isArrears, payableOf, type Bill, type BillItemDetail, type FeeItem } from '../api/rental'
+import { coveredPeriodText, cycleLabel, cycleMonths, cycleShort as cycleShortFn } from '../utils/cycle'
 
 // 账单详情：全部费用项目（含自定义项目）逐项列出金额/已收/欠缴，
 // 附收款流水。数据来自 /api/rental/bills/:id（服务端算好分摊）。
@@ -137,14 +151,23 @@ const statusClass = computed(() => {
 })
 
 const coveredText = computed(() => coveredPeriodText(props.bill.period, props.bill.pay_cycle))
+// 角标 title：显示文字只有周期名，而年付房在非到期月出的水电账单同样带「年付」
+// 角标，所以 title 要说清「周期只管固定费，本单水电仍按月」，避免被误读成整单
+// 收了 N 个月租金。
+const cycleBadgeTitle = computed(() => {
+  const months = cycleMonths(props.bill.pay_cycle)
+  return `${cycleLabel(props.bill.pay_cycle)}：固定费每 ${months} 个月收一次，本单水电按月 · 覆盖 ${coveredText.value}`
+})
+// 缴费周期文案：多月周期写清覆盖区间与月数（季付 3 / 半年付 6 / 年付 12），
+// 月付直接显示周期名——不再把「非月付」一律说成季付。
 const cycleText = computed(() => {
   const months = cycleMonths(props.bill.pay_cycle)
-  return months > 1 ? `季付（${coveredText.value}）` : cycleLabel(props.bill.pay_cycle)
+  const label = cycleLabel(props.bill.pay_cycle)
+  return months > 1 ? `${label}（${coveredText.value}，共 ${months} 个月）` : label
 })
 
-function cycleShort(cycle: string): string {
-  return cycle === 'quarterly' ? '季' : '月'
-}
+// 明细行的周期缩写统一走 cycleShort（月/季/半/年）。
+const cycleShort = cycleShortFn
 
 // 排除项目名称（租户收费项目勾选中未勾选的部分，账单快照）
 const excludedNames = computed(() =>

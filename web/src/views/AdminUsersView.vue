@@ -7,7 +7,7 @@
         <div class="text-2xl font-extrabold text-foreground mt-1">{{ total }}</div>
       </div>
       <div class="surface rounded-2xl p-5">
-        <div class="text-sm text-muted-foreground">管理员</div>
+        <div class="text-sm text-muted-foreground">系统管理员</div>
         <div class="text-2xl font-extrabold text-foreground mt-1">{{ adminCount }}</div>
       </div>
       <div class="surface rounded-2xl p-5">
@@ -18,6 +18,44 @@
         <div class="text-sm text-muted-foreground">待审核</div>
         <div class="text-2xl font-extrabold text-amber-600 dark:text-amber-300 mt-1">{{ pendingUsers.length }}</div>
       </div>
+    </div>
+
+    <!-- 房东入驻申请（平台化）：申请资料比账号本身更有用——姓名、电话、规模、地区。
+         通过 = 账号可用 + 个人台账就绪；驳回 = 账号停用（可逆，保留申请行）。 -->
+    <div v-if="landlordApps.length" class="surface rounded-2xl overflow-hidden border-brand-500/30">
+      <div class="p-4 sm:p-6 border-b border-border">
+        <h2 class="text-lg font-bold text-foreground flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-brand-500"></span>
+          房东入驻申请（{{ landlordApps.length }}）
+        </h2>
+        <p class="text-sm text-muted-foreground mt-1">
+          房东在注册页填的入驻资料。通过后他能管理自己的房源与租户（数据在自己的个人台账里，
+          与他人默认隔离）；驳回会把账号停用，之后想放行可在用户列表里重新启用。
+        </p>
+      </div>
+      <ul class="divide-y divide-border">
+        <li v-for="a in landlordApps" :key="a.id" class="px-4 sm:px-6 py-3.5 space-y-2">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="font-semibold text-foreground">
+                {{ a.name }}
+                <span class="text-xs font-normal text-muted-foreground ml-1.5">@{{ a.username }}</span>
+              </div>
+              <div class="text-xs text-muted-foreground tabular-nums mt-0.5">
+                电话 {{ a.phone }}<template v-if="a.wechat"> · 微信 {{ a.wechat }}</template>
+                <template v-if="a.region"> · {{ a.region }}</template>
+                <template v-if="a.room_scale"> · 规模 {{ a.room_scale }}</template>
+              </div>
+              <div v-if="a.intro" class="text-xs text-muted-foreground mt-0.5">说明：{{ a.intro }}</div>
+              <div class="text-[11px] text-muted-foreground mt-0.5">提交时间：{{ (a.created_at || '').slice(0, 10) }}</div>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <button class="btn-brand !py-1.5 !px-3 text-xs" @click="approveLandlord(a)">通过</button>
+              <button class="btn-ghost !py-1.5 !px-3 text-xs text-destructive" @click="askRejectLandlord(a)">驳回</button>
+            </div>
+          </div>
+        </li>
+      </ul>
     </div>
 
     <!-- 待审核注册申请（status === 2） -->
@@ -92,8 +130,7 @@
                 </div>
               </td>
               <td class="py-3.5 px-4">
-                <span v-if="user.role === 'admin'" class="badge bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">管理员</span>
-                <span v-else class="badge bg-muted text-muted-foreground">普通用户</span>
+                <span class="badge" :class="roleBadgeClass(user.role)">{{ roleLabel(user.role) }}</span>
               </td>
               <td class="py-3.5 px-4">
                 <span v-if="user.status === 2" class="badge bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
@@ -198,6 +235,16 @@
       @update:model-value="rejectTarget = null"
       @confirm="doReject"
     />
+    <!-- 驳回房东入驻申请：账号停用但保留，平台之后可在用户列表里重新启用 -->
+    <ConfirmDialog
+      :model-value="!!rejectLandlordTarget"
+      title="驳回入驻申请"
+      :message="`确定驳回「${rejectLandlordTarget?.name || ''}（@${rejectLandlordTarget?.username || ''}）」的入驻申请？账号会被停用并保留，之后可在用户列表里重新启用。`"
+      confirm-type="danger"
+      confirm-text="驳回"
+      @update:model-value="rejectLandlordTarget = null"
+      @confirm="doRejectLandlord"
+    />
   </div>
 </template>
 
@@ -212,10 +259,18 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import Modal from '../components/Modal.vue'
 import { getUsers, toggleUserStatus, deleteUser, resetUserPassword } from '../api/user'
 import { approveUser, getPendingUsers, rejectUser, type PendingUser } from '../api/ledger'
+import {
+  approveLandlordApplication, getLandlordApplications, rejectLandlordApplication,
+  type LandlordApplication,
+} from '../api/rental'
+import { roleBadgeClass, roleLabel } from '../utils/role'
 import { passwordValidationError } from '../utils/password'
 import { toast } from '../utils/toast'
 
 const users = ref<any[]>([])
+// 房东入驻申请（平台化）
+const landlordApps = ref<LandlordApplication[]>([])
+const rejectLandlordTarget = ref<LandlordApplication | null>(null)
 const search = ref('')
 const page = ref(1)
 const pageSize = ref(10)
@@ -238,6 +293,48 @@ function avatarClass(name: string): string {
 }
 
 // ---- 列表 ----
+
+async function loadLandlordApps() {
+  try {
+    const res = await getLandlordApplications('pending')
+    landlordApps.value = res.data?.code === 0 ? (res.data.data ?? []) : []
+  } catch {
+    landlordApps.value = []
+  }
+}
+
+async function approveLandlord(a: LandlordApplication) {
+  const res = await approveLandlordApplication(a.id)
+  if (res.data?.code !== 0) {
+    toast(res.data?.message || '通过失败', 'error')
+    return
+  }
+  toast(`已通过「${a.name}」的入驻申请，他现在可以管理自己的房源与租户`)
+  await Promise.all([loadLandlordApps(), loadPending(), loadUsers()])
+}
+
+// 驳回入驻申请：复用本页既有的「驳回并写明原因」流程（rejectTarget + doReject），
+// 只是目标换成申请行——房东拒了之后仍可被平台重新启用，所以保留账号行。
+function askRejectLandlord(a: LandlordApplication) {
+  rejectLandlordTarget.value = a
+}
+
+async function doRejectLandlord() {
+  const a = rejectLandlordTarget.value
+  if (!a) return
+  rejectLandlordTarget.value = null
+  try {
+    const res = await rejectLandlordApplication(a.id, '')
+    if (res.data?.code !== 0) {
+      toast(res.data?.message || '驳回失败', 'error')
+      return
+    }
+    toast('已驳回，账号已停用')
+    await Promise.all([loadLandlordApps(), loadPending(), loadUsers()])
+  } catch (e: any) {
+    toast(e?.response?.data?.message || '驳回失败', 'error')
+  }
+}
 
 async function loadUsers() {
   try {
@@ -405,5 +502,6 @@ async function loadPending() {
 onMounted(() => {
   void loadUsers()
   void loadPending()
+  void loadLandlordApps()
 })
 </script>

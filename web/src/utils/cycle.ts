@@ -1,22 +1,49 @@
-// utils/cycle.ts — 缴费周期（月付 / 季付）的换算与展示口径。
+// utils/cycle.ts — 缴费周期（月付 / 季付 / 半年付 / 年付）的换算与展示口径。
 //
-// 后端口径：季付每 3 个月一张账单，租金/卫生费/管理费/包月水费按月数放大，
-// 账期与该房首张账单月对齐。缴费周期自 v0.2.3 起在租户上设置（未设置跟随
-// 偏好设置里的全局默认），这里只放周期换算与文案，供房源/租户/账单页共用。
+// 后端口径：一个缴费周期覆盖 N 个月（月付 1、季付 3、半年付 6、年付 12）。
+// 账单仍然每月一张——水/电/燃气（读数类）与包月水费恒按月收，租金/卫生费/
+// 管理费等固定费项目只在「到期月」（锚点月）按 N 个月一次收，非锚点月的固定费
+// 为 0（到期判断在服务端 fixedItemDue）。缴费周期自 v0.2.3 起在租户上设置
+// （未设置跟随台账/全局默认），这里只放周期换算与文案，供房源/租户/账单页共用。
 
-export type PayCycle = 'monthly' | 'quarterly'
+export type PayCycle = 'monthly' | 'quarterly' | 'semiannual' | 'annual'
 
-/** 一个缴费周期覆盖的月数：月付 1、季付 3 */
-export function cycleMonths(cycle: PayCycle | string | undefined | null): number {
-  return normalizeCycle(cycle) === 'quarterly' ? 3 : 1
+/** 各缴费周期覆盖的月数（与后端 cycleMonths 同表） */
+const CYCLE_MONTHS: Record<PayCycle, number> = {
+  monthly: 1,
+  quarterly: 3,
+  semiannual: 6,
+  annual: 12,
 }
 
+/** 各缴费周期的中文名（与后端 cycleLabel 同表） */
+const CYCLE_LABELS: Record<PayCycle, string> = {
+  monthly: '月付',
+  quarterly: '季付',
+  semiannual: '半年付',
+  annual: '年付',
+}
+
+/** 下拉/筛选用的周期选项（由短到长） */
+export const payCycleOptions: { value: PayCycle; label: string }[] = [
+  { value: 'monthly', label: '月付' },
+  { value: 'quarterly', label: '季付' },
+  { value: 'semiannual', label: '半年付' },
+  { value: 'annual', label: '年付' },
+]
+
+/** 一个缴费周期覆盖的月数：月付 1、季付 3、半年付 6、年付 12 */
+export function cycleMonths(cycle: PayCycle | string | undefined | null): number {
+  return CYCLE_MONTHS[normalizeCycle(cycle)]
+}
+
+/** 规范化缴费周期：未知值与空值一律按月付处理（与后端 normalizePayCycle 一致） */
 export function normalizeCycle(cycle: PayCycle | string | undefined | null): PayCycle {
-  return cycle === 'quarterly' ? 'quarterly' : 'monthly'
+  return typeof cycle === 'string' && cycle in CYCLE_MONTHS ? (cycle as PayCycle) : 'monthly'
 }
 
 export function cycleLabel(cycle: PayCycle | string | undefined | null): string {
-  return normalizeCycle(cycle) === 'quarterly' ? '季付' : '月付'
+  return CYCLE_LABELS[normalizeCycle(cycle)]
 }
 
 /** 账期加 n 个月：YYYY-MM → YYYY-MM（基于 1 号，无月末溢出） */
@@ -35,19 +62,38 @@ export function monthsBetween(a: string, b: string): number {
   return (yb - ya) * 12 + (mb - ma)
 }
 
-/** 季付账单的覆盖区间文案：月付 "2026-09"，季付 "2026-09~11月" */
+/** 多月账单的覆盖区间文案：月付 "2026-09"，季付 "2026-09 ~ 2026-11" */
 export function coveredPeriodText(period: string, cycle: PayCycle | string | undefined | null): string {
-  if (normalizeCycle(cycle) !== 'quarterly') return period
-  const [y, m] = period.split('-').map(Number)
-  if (!y || !m) return period
-  const end = m + 2 > 12 ? `${y + 1}年${String(m + 2 - 12).padStart(2, '0')}月` : `${String(m + 2).padStart(2, '0')}月`
-  return `${period}~${end}`
+  const months = cycleMonths(cycle)
+  if (months <= 1) return period
+  return `${period} ~ ${addMonths(period, months - 1)}`
 }
 
-/** 季付房该月是否应出账：无历史账单任意月可为首账月，有则整差 3 个月 */
-export function onBillSchedule(payCycle: PayCycle | string | undefined | null, period: string, lastBillPeriod: string | null | undefined): boolean {
-  if (normalizeCycle(payCycle) !== 'quarterly') return true
-  if (!lastBillPeriod) return true
-  const diff = monthsBetween(lastBillPeriod, period)
-  return diff > 0 && diff % 3 === 0
+/**
+ * 某房该月是否应出账。
+ *
+ * 收费项目周期化后账单**按月**出：水/电/燃气与包月水费恒按月，房租等固定费
+ * 只在到期月计入。因此这里恒为 true，与后端 onBillSchedule 保持同一口径——
+ * 抄表开票名单不再按缴费周期过滤房间（年付房同样要每月抄水电）。
+ */
+export function onBillSchedule(_payCycle?: PayCycle | string | null, _period?: string, _lastBillPeriod?: string | null): boolean {
+  return true
+}
+
+/** 账单类型名：月账单 / 季账单 / 半年账单 / 年账单 */
+export function billTypeLabel(cycle: PayCycle | string | undefined | null): string {
+  const months = cycleMonths(cycle)
+  if (months >= 12) return '年账单'
+  if (months >= 6) return '半年账单'
+  if (months >= 3) return '季账单'
+  return '月账单'
+}
+
+/** 角标用的单字缩写：月 / 季 / 半 / 年 */
+export function cycleShort(cycle: PayCycle | string | undefined | null): string {
+  const months = cycleMonths(cycle)
+  if (months >= 12) return '年'
+  if (months >= 6) return '半'
+  if (months >= 3) return '季'
+  return '月'
 }

@@ -32,6 +32,7 @@ import (
 	"smallgo/server/database"
 	"smallgo/server/response"
 	"smallgo/server/sysconfig"
+	"smallgo/server/user"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -84,9 +85,12 @@ func userStatusName(status int) string {
 //	/api/rental/ledgers/mine 自己的台账列表：待审核用户要看到「还没有共同台账」
 //	                      这个事实；他的个人台账在注册时就建好了。
 //	/api/rental/users/me/approval 自己读自己的审核状态。
+//	/api/rental/portal/status v0.6.10：租户门户状态。未关联的租户（status=2）
+//	                      唯一能读的接口，用来渲染「等待房东关联」页。
 //	/api/health           存活探针。
 //
-// 明确**不**放行：任何业务数据接口（/api/rental/rooms 等）、成员与邀请接口、
+// 明确**不**放行：任何业务数据接口（/api/rental/rooms 等）、**门户其余接口**
+// （/api/rental/portal/profile 等——未关联就不该看到任何数据）、成员与邀请接口、
 // /api/users、/api/backups、/api/audit、/api/upgrade-history。
 var pendingWhitelist = []string{
 	"/api/auth/",
@@ -96,6 +100,12 @@ var pendingWhitelist = []string{
 	"/api/realtime",
 	"/api/rental/ledgers/mine",
 	"/api/rental/users/me/approval",
+	// 房东入驻申请（v0.6.10）：待审核房东在等待审核期间**必须**能提交/更新自己的
+	// 入驻资料并读取自己的申请状态，否则「注册 → 填资料」这条链路直接断掉。
+	// 只放行房东自己那两个接口（/landlord-apply 与 /landlord-apply/me）；
+	// 管理员的审核队列走 /landlord-applications，不在白名单里，且挂在 admin 组。
+	"/api/rental/landlord-apply",
+	"/api/rental/portal/status",
 	"/api/health",
 }
 
@@ -773,8 +783,12 @@ func handleUserSearch(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		rows := make([]row, 0)
+		// v0.6.10：**排除租户账号**（role=tenant）。这个接口是「邀请台账成员」
+		// 用的，而租户不是协作者——他不该被邀请进任何台账（进了就会拿到业务
+		// 权限，与「租户只读本人数据」冲突）。过滤放在 SQL 里，租户账号根本
+		// 不出现在候选里。
 		query := db.Table("users").Select("id, username").
-			Where("status = ? AND id <> ?", UserStatusActive, userID).
+			Where("status = ? AND id <> ? AND role <> ?", UserStatusActive, userID, user.RoleTenant).
 			Where("username LIKE ?", "%"+q+"%")
 		if err := query.Order("id ASC").Limit(10).Scan(&rows).Error; err != nil {
 			response.ErrorInternal(c, "查询用户失败")
@@ -817,16 +831,26 @@ func handleMyApproval(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.GetUint("userID")
 		status := UserStatusActive
+		role := user.RoleUser
 		var u struct {
 			Status int
+			Role   string
 		}
-		if err := db.Table("users").Select("status").Where("id = ?", userID).Take(&u).Error; err == nil {
+		if err := db.Table("users").Select("status, role").Where("id = ?", userID).Take(&u).Error; err == nil {
 			status = u.Status
+			if u.Role != "" {
+				role = u.Role
+			}
 		}
 		response.Success(c, map[string]interface{}{
 			"status":  status,
 			"pending": status == UserStatusPending,
 			"message": PendingUserMessage,
+			// v0.6.10：带上角色。前端在 /auth/check 认不下待审核会话时靠这个接口
+			// 恢复登录态，而**待关联的租户也是 status=2**——少了角色，前端会把
+			// 租户恢复成 user，从而把他送进房东的「等待审核」页而不是租户的
+			// 「等待房东关联」页。
+			"role": role,
 		})
 	}
 }
@@ -1052,6 +1076,9 @@ func buildLedgerSettings(db *gorm.DB, ledgerID uint) ledgerSettingsResponse {
 		"rental_property_name":     name,
 		"rental_contact":           contact,
 		"rental_receipt_note":      note,
+		// 结转开关（issue #5 需求 7）：必须出现在 effective 里，否则台账设置
+		// 弹窗读不到当前值，开关永远显示成默认态，房东改完看不到变化。
+		carryoverConfigKey: strconv.FormatBool(carryoverEnabled(db, ledgerID)),
 	}
 	overrides := map[string]string{}
 	for _, key := range rentalConfigKeys {

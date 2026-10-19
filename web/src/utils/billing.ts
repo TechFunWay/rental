@@ -156,8 +156,14 @@ export function resolveTenantBilling(t: BillingLike | null | undefined, d: Billi
   const amountFollows = waterAmount <= 0
   if (amountFollows) waterAmount = waterMode === 'monthly' ? d.waterMonthlyFee : d.waterMeterPrice
 
-  const explicitCycle = t?.pay_cycle === 'monthly' || t?.pay_cycle === 'quarterly'
-  const payCycle: PayCycle = explicitCycle ? (t!.pay_cycle as PayCycle) : d.payCycle
+  // 显式设置的判定不能只认月付/季付：半年付（semiannual）与年付（annual）
+  // 是 v0.2.3 新增的合法周期，早先的 `=== 'monthly' || === 'quarterly'`
+  // 会把它们误判成"跟随全局"，于是租户页显示全局周期、编辑时又把用户选的
+  // 半年付/年付丢掉。这里改用 normalizeCycle：它只认四个合法值，空串/未知
+  // 才算"未显式设置"（与后端 normalizePayCycle 同一张词表）。
+  const rawCycle = t?.pay_cycle
+  const explicitCycle = typeof rawCycle === 'string' && rawCycle !== '' && normalizeCycle(rawCycle) === rawCycle
+  const payCycle: PayCycle = explicitCycle ? (rawCycle as PayCycle) : d.payCycle
 
   const rawPayDay = Number(t?.pay_day)
   const payDayFollowsGlobal = !(Number.isFinite(rawPayDay) && rawPayDay >= 0)

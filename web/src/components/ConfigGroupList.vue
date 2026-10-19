@@ -114,6 +114,7 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
 import type { ConfigMeta } from '../api/config'
+import { cycleMonths, payCycleOptions } from '../utils/cycle'
 
 interface RowState {
   editValue: string
@@ -133,9 +134,19 @@ const groupTitleMap: Record<string, string> = {
   access: '访问控制',
   appearance: '外观',
   system: '系统维护',
+  // 租房管理自己的配置组（server/rental/rental.go 的 registerConfigs）
+  billing: '计费默认',
+  referral: '介绍费',
+  rental: '租客登记与单据',
+  export: '数据安全（定时导出）',
 }
 
 const selectOptionLabelMap: Record<string, Record<string, string>> = {
+  rental_referral_policy: {
+    free: '自愿填写（房东自己决定给不给、给多少）',
+    min: '最低介绍费（房东必须填，且不低于下面的最低金额）',
+    off: '无介绍费（不设这个功能）',
+  },
   theme_mode: {
     system: '跟随系统',
     light: '浅色',
@@ -145,10 +156,13 @@ const selectOptionLabelMap: Record<string, Record<string, string>> = {
     meter: '按吨计价（元/吨）',
     monthly: '包月（元/月）',
   },
-  rental_pay_cycle: {
-    monthly: '月付（每月一张账单）',
-    quarterly: '季付（每 3 个月一张账单）',
-  },
+  // 缴费周期的**选项**来自后端 ConfigDef.Options（monthly/quarterly/semiannual/
+  // annual），这个元数据驱动的 select 直接按它渲染；这里只负责把值翻成中文，所以
+  // 标签与 utils/cycle.ts 的 payCycleOptions 同源，后端再加周期时不会出现「选项有
+  // 了、标签还是英文值」的错位。
+  rental_pay_cycle: Object.fromEntries(
+    payCycleOptions.map((o) => [o.value, `${o.label}（每 ${cycleMonths(o.value)} 个月一张账单）`]),
+  ),
 }
 
 function groupTitle(key: string): string {
@@ -237,6 +251,35 @@ defineExpose({
   },
 })
 
+// 面板顺序：按用户阅读习惯排（对外的东西在前，算钱的其次，站点/维护靠后）。
+// 不在表里的组排在这些之后（按出现顺序）。
+const groupOrder: string[] = ['rental', 'billing', 'export', 'access', 'general', 'backup', 'system']
+
+// 组内条目顺序：同组里把「决策类」开关放最前、接着是跟随开关的配置，最后是纯展示项。
+// 不在表里的键排在其组内已知键之后（保持后端返回顺序）。
+const itemOrder: Record<string, string[]> = {
+  rental: [
+    'rental_ai_enabled', 'rental_ai_api_key', 'rental_ai_model', 'rental_ai_base_url',
+    'rental_apply_base', 'rental_property_name', 'rental_contact', 'rental_receipt_note',
+  ],
+  billing: [
+    'rental_water_mode', 'rental_water_price', 'rental_water_monthly_fee', 'rental_elec_price',
+    'rental_gas_price', 'rental_pay_cycle', 'rental_pay_day', 'rental_remind_days',
+  ],
+  export: ['rental_export_enabled', 'rental_export_interval_hours', 'rental_export_keep_count'],
+  access: [
+    'allow_register', 'require_login', 'register_need_approval',
+    'register_phone_enabled', 'register_phone_required', 'login_expiry_days',
+  ],
+}
+
+const itemRank = (group: string, key: string): number => {
+  const list = itemOrder[group]
+  if (!list) return Number.MAX_SAFE_INTEGER
+  const i = list.indexOf(key)
+  return i === -1 ? Number.MAX_SAFE_INTEGER : i
+}
+
 const groups = computed(() => {
   const map = new Map<string, ConfigMeta[]>()
   for (const item of props.items) {
@@ -244,10 +287,20 @@ const groups = computed(() => {
     if (!map.has(g)) map.set(g, [])
     map.get(g)!.push(item)
   }
-  return Array.from(map.entries()).map(([key, items]) => ({
+  const entries = Array.from(map.entries())
+  // 组顺序：groupOrder 优先（按下标），未收录的组保持后端出现顺序排在最后。
+  entries.sort((a, b) => {
+    const ia = groupOrder.indexOf(a[0])
+    const ib = groupOrder.indexOf(b[0])
+    if (ia !== -1 && ib !== -1) return ia - ib
+    if (ia !== -1) return -1
+    if (ib !== -1) return 1
+    return 0
+  })
+  return entries.map(([key, items]) => ({
     key,
     title: groupTitle(key),
-    items,
+    items: [...items].sort((a, b) => itemRank(key, a.key) - itemRank(key, b.key)),
   }))
 })
 </script>

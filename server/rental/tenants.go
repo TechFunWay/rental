@@ -2,10 +2,12 @@
 package rental
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
 
+	"smallgo/server/logger"
 	"smallgo/server/response"
 	"smallgo/server/utils"
 
@@ -22,25 +24,35 @@ import (
 // ExcludedFees 是不参与计费的收费项目 key 列表（前端"收费项目勾选"里
 // 未勾选的项）；nil/空 = 全部项目参与。IDCard 身份证号选填。
 type tenantRequest struct {
-	RoomID          uint     `json:"room_id" binding:"required"`
-	Name            string   `json:"name" binding:"required"`
-	Phone           string   `json:"phone"`
-	IDCard          string   `json:"id_card"`
-	MoveInDate      string   `json:"move_in_date"`
-	LeaseEndDate    string   `json:"lease_end_date"` // 租约到期时间
-	Deposit         float64  `json:"deposit"`        // 押金（元）
-	WaterMode       string   `json:"water_mode"`
-	WaterPrice      float64  `json:"water_price"`
-	WaterMonthlyFee float64  `json:"water_monthly_fee"`
-	PayCycle        string   `json:"pay_cycle"`
-	PayDay          *int     `json:"pay_day"`
-	RemindDays      *int     `json:"remind_days"`
-	ExcludedFees    []string `json:"excluded_fees"`
-	Tags            []string `json:"tags"`
+	RoomID uint   `json:"room_id" binding:"required"`
+	Name   string `json:"name" binding:"required"`
+	Phone  string `json:"phone"`
+	IDCard string `json:"id_card"`
+	// Address / EmergencyContact / EmergencyPhone 是 v0.6.10 补上的租户档案字段：
+	// 住址原先只存在于登记申请（转入登记后丢失），紧急联系人由租户在门户里申请、
+	// 房东审核后写入。房东在登记/编辑弹窗里也直接可填可改（保留最终决定权）。
+	Address          string   `json:"address"`
+	EmergencyContact string   `json:"emergency_contact"`
+	EmergencyPhone   string   `json:"emergency_phone"`
+	MoveInDate       string   `json:"move_in_date"`
+	LeaseEndDate     string   `json:"lease_end_date"` // 租约到期时间
+	Deposit          float64  `json:"deposit"`        // 押金（元）
+	WaterMode        string   `json:"water_mode"`
+	WaterPrice       float64  `json:"water_price"`
+	WaterMonthlyFee  float64  `json:"water_monthly_fee"`
+	PayCycle         string   `json:"pay_cycle"`
+	PayDay           *int     `json:"pay_day"`
+	RemindDays       *int     `json:"remind_days"`
+	ExcludedFees     []string `json:"excluded_fees"`
+	Tags             []string `json:"tags"`
 	// ApplicationID 选填：由「租客自助登记」转入登记时带上，租户创建成功后
 	// 服务端把申请标记为已入库并转移身份证照片到资料附件。
 	ApplicationID uint   `json:"application_id"`
 	Notes         string `json:"notes"`
+	// Members 住户成员（选填）：登记/编辑租户表单里「入住成员」那一列，与租户
+	// **一起保存**（一个事务）。带 id 的改、不带 id 的新增、数组里没有的删除；
+	// 字段不出现时不动成员（老客户端与接口调用方不受影响）。
+	Members []memberRequest `json:"members"`
 }
 
 // tenantRow 是租户列表的出参视图：附加所属房源的位置标签
@@ -53,6 +65,12 @@ type tenantRow struct {
 	RoomLabel        string `gorm:"-" json:"room_label"`
 	ContractsCount   int64  `gorm:"-" json:"contracts_count"`
 	AttachmentsCount int64  `gorm:"-" json:"attachments_count"`
+	// MembersCount 该租户名下**在住**的住户成员数（已搬离的不计），列表页据此
+	// 显示「成员 n」入口；成员弹窗里才完整列出（含已搬离）。
+	MembersCount int64 `gorm:"-" json:"members_count"`
+	// DepositPhotosCount 该租户名下「押金单」附件的张数。押金单是实物凭证，
+	// 列表与房源详情据此显示押金单入口（标签约定见 attachments.go）。
+	DepositPhotosCount int64 `gorm:"-" json:"deposit_photos_count"`
 }
 
 func setupTenantRoutes(api *gin.RouterGroup, db *gorm.DB) {
@@ -65,6 +83,10 @@ func setupTenantRoutes(api *gin.RouterGroup, db *gorm.DB) {
 	api.PUT("/rental/tenants/:id", edit, handleTenantUpdate(db))
 	api.POST("/rental/tenants/:id/checkout", edit, handleTenantCheckout(db))
 	api.DELETE("/rental/tenants/:id", full, handleTenantDelete(db))
+	// 粘贴识别（外网不通时的录入路径，见 tenant_parse.go）：解析不写库、只读档；
+	// 批量入库会整批写库，按 CSV 导入同口径的单台账完全档。
+	api.POST("/rental/tenants/parse-text", view, handleTenantTextParse())
+	api.POST("/rental/tenants/batch", requireLedgerModule(db, ModuleTenants, PermFull), handleTenantsBatch(db))
 }
 
 func handleTenantList(db *gorm.DB) gin.HandlerFunc {
@@ -169,14 +191,60 @@ func handleTenantList(db *gorm.DB) gin.HandlerFunc {
 				attachmentCounts[cr.TenantID] = cr.Cnt
 			}
 		}
+		// 在住住户成员数批量补齐（同样一条 GROUP BY；已搬离的不计）。
+		memberCounts := map[uint]int64{}
+		if len(tenantIDs) > 0 {
+			type countRow struct {
+				TenantID uint
+				Cnt      int64
+			}
+			counts := make([]countRow, 0, len(tenantIDs))
+			mq, _ := scopeLedger(db.Model(&TenantMember{}), c)
+			mq.Select("tenant_id, COUNT(*) as cnt").
+				Where("tenant_id IN ? AND active = ?", tenantIDs, true).
+				Group("tenant_id").Scan(&counts)
+			for _, cr := range counts {
+				memberCounts[cr.TenantID] = cr.Cnt
+			}
+		}
+		// 押金单照片张数：单独一条 GROUP BY，只数 label=押金单 的附件。
+		// 与上面的「资料附件总数」分开，押金单入口要显示的是自己的张数。
+		depositPhotoCounts := map[uint]int64{}
+		if len(tenantIDs) > 0 {
+			type countRow struct {
+				TenantID uint
+				Cnt      int64
+			}
+			counts := make([]countRow, 0, len(tenantIDs))
+			dpq, _ := scopeLedger(db.Model(&TenantAttachment{}), c)
+			dpq.Select("tenant_id, COUNT(*) as cnt").
+				Where("tenant_id IN ? AND label = ?", tenantIDs, attachmentLabelDeposit).
+				Group("tenant_id").Scan(&counts)
+			for _, cr := range counts {
+				depositPhotoCounts[cr.TenantID] = cr.Cnt
+			}
+		}
 		for i := range rows {
 			rows[i].RoomNo = roomNos[rows[i].RoomID]
 			rows[i].RoomLabel = roomLabels[rows[i].RoomID]
 			rows[i].ContractsCount = contractCounts[rows[i].ID]
 			rows[i].AttachmentsCount = attachmentCounts[rows[i].ID]
+			rows[i].MembersCount = memberCounts[rows[i].ID]
+			rows[i].DepositPhotosCount = depositPhotoCounts[rows[i].ID]
 		}
 		response.SuccessPage(c, rows, total, page, pageSize)
 	}
+}
+
+// applyTenantDerived 从身份证号派生出生日期与性别（issue #5 需求 1）。
+//
+// 复用入住成员那套 deriveFromIDCard（tenant_members.go），保证主档案与成员
+// 口径完全一致：只认 18 位号，解析不出日期就整体留空，15 位老号段不猜。
+//
+// 身份证号变化即重算；清空证件号时派生字段一并清空——避免「删了证件号、
+// 生日性别还挂着」的残留，那种数据会误导导出与派出所核对。
+func applyTenantDerived(t *Tenant) {
+	t.Birthday, t.Gender = deriveFromIDCard(strings.TrimSpace(t.IDCard))
 }
 
 func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
@@ -202,27 +270,52 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 		if !validateTenantBillingRequest(c, &req) {
 			return
 		}
+		if msg := validateMemberPayload(req.Members); msg != "" {
+			response.ErrorBadRequest(c, msg)
+			return
+		}
 
 		tenant := Tenant{
 			// UserID 录入人戳，仅溯源；数据归属看 LedgerID。
 			UserID: currentUserID(c),
 			// 子记录继承父记录的台账：租户必须落在其房源所属台账里，
 			// 否则用构造出的 room_id 就能在别的台账里造孤儿租户。
-			LedgerID:     room.LedgerID,
-			RoomID:       req.RoomID,
-			Name:         req.Name,
-			Phone:        req.Phone,
-			IDCard:       strings.TrimSpace(req.IDCard),
-			MoveInDate:   req.MoveInDate,
-			LeaseEndDate: req.LeaseEndDate,
-			Deposit:      req.Deposit,
-			Active:       true,
-			Notes:        req.Notes,
+			LedgerID:         room.LedgerID,
+			RoomID:           req.RoomID,
+			Name:             req.Name,
+			Phone:            req.Phone,
+			IDCard:           strings.TrimSpace(req.IDCard),
+			Address:          strings.TrimSpace(req.Address),
+			EmergencyContact: strings.TrimSpace(req.EmergencyContact),
+			EmergencyPhone:   strings.TrimSpace(req.EmergencyPhone),
+			MoveInDate:       req.MoveInDate,
+			LeaseEndDate:     req.LeaseEndDate,
+			Deposit:          req.Deposit,
+			Active:           true,
+			Notes:            req.Notes,
 		}
 		applyTenantBilling(&tenant, &req)
 		tenant.ExcludedFees = normalizeExcludedFeeKeys(req.ExcludedFees)
 		tenant.Tags = normalizeTags(req.Tags)
-		if err := db.Create(&tenant).Error; err != nil {
+		// 身份证号派生出生日期/性别（issue #5 需求 1）：快照落库，
+		// 供租户列表、导出租户信息（派出所用）直接展示。
+		applyTenantDerived(&tenant)
+		// 租户与「入住成员」一个事务落库：任一步失败就整体回滚，
+		// 不会出现「租户建好了、成员没进去」这种半成品档案。
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&tenant).Error; err != nil {
+				return err
+			}
+			if req.Members == nil {
+				return nil
+			}
+			return applyMemberPayload(tx, tenant.LedgerID, tenant.ID, tenant.UserID, req.Members)
+		}); err != nil {
+			var bad memberPayloadError
+			if errors.As(err, &bad) {
+				response.ErrorBadRequest(c, bad.msg)
+				return
+			}
 			response.ErrorInternal(c, "创建租户失败")
 			return
 		}
@@ -280,6 +373,9 @@ func handleTenantUpdate(db *gorm.DB) gin.HandlerFunc {
 		tenant.Name = req.Name
 		tenant.Phone = req.Phone
 		tenant.IDCard = strings.TrimSpace(req.IDCard)
+		tenant.Address = strings.TrimSpace(req.Address)
+		tenant.EmergencyContact = strings.TrimSpace(req.EmergencyContact)
+		tenant.EmergencyPhone = strings.TrimSpace(req.EmergencyPhone)
 		tenant.MoveInDate = req.MoveInDate
 		tenant.LeaseEndDate = req.LeaseEndDate
 		tenant.Deposit = req.Deposit
@@ -287,8 +383,28 @@ func handleTenantUpdate(db *gorm.DB) gin.HandlerFunc {
 		applyTenantBilling(tenant, &req)
 		tenant.ExcludedFees = normalizeExcludedFeeKeys(req.ExcludedFees)
 		tenant.Tags = normalizeTags(req.Tags)
+		// 改证件号即重算派生字段；清空证件号则一并清空（见 applyTenantDerived）。
+		applyTenantDerived(tenant)
+		if msg := validateMemberPayload(req.Members); msg != "" {
+			response.ErrorBadRequest(c, msg)
+			return
+		}
 		// 已退租的租户编辑资料不自动恢复在租，恢复需另行处理。
-		if err := db.Save(tenant).Error; err != nil {
+		// 成员与租户同一事务：表单里删掉的行在这里一并删除（表单即真相）。
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(tenant).Error; err != nil {
+				return err
+			}
+			if req.Members == nil {
+				return nil
+			}
+			return applyMemberPayload(tx, tenant.LedgerID, tenant.ID, tenant.UserID, req.Members)
+		}); err != nil {
+			var bad memberPayloadError
+			if errors.As(err, &bad) {
+				response.ErrorBadRequest(c, bad.msg)
+				return
+			}
 			response.ErrorInternal(c, "保存租户失败")
 			return
 		}
@@ -355,6 +471,8 @@ func handleTenantCheckout(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorInternal(c, "退租登记失败")
 			return
 		}
+		// 名下住户成员一并收尾（置为已搬离、补搬离日期，行保留供历史查询）。
+		checkoutTenantMembers(db, tenant.ID, tenant.LedgerID, moveOut)
 		response.Success(c, tenant)
 	}
 }
@@ -368,6 +486,17 @@ func handleTenantDelete(db *gorm.DB) gin.HandlerFunc {
 		if !requireLedgerWrite(db, c, tenant.LedgerID, ModuleTenants, PermFull) {
 			return
 		}
+		// v0.6.10：档案被删除时，把它绑定的登录账号退回「等待关联」态
+		// （账号不删）——否则账号会卡在「已关联」但档案已消失，租户登录后
+		// 门户一片空白也说不清原因。解绑失败不阻断删除（房东的删除意图优先），
+		// 账号下次尝试进门户时 portalTenant 取不到档案，同样会被引导去找房东。
+		if err := releaseTenantAccount(db, tenant); err != nil {
+			logger.Error("rental: 删除租户时解绑登录账号失败 tenant=%d: %v", tenant.ID, err)
+		}
+		// 待审的变更申请随档案一起清掉（档案都没了，审核无意义）；
+		// 历史记录一并删，避免留下指向不存在档案的孤儿申请。
+		db.Where("tenant_id = ? AND org_id = ?", tenant.ID, tenant.LedgerID).
+			Delete(&TenantChangeRequest{})
 		// 账单仅快照租户姓名，删除租户不影响历史账单；合同文件与资料附件随之清理。
 		if err := db.Delete(tenant).Error; err != nil {
 			response.ErrorInternal(c, "删除租户失败")
@@ -375,6 +504,8 @@ func handleTenantDelete(db *gorm.DB) gin.HandlerFunc {
 		}
 		deleteTenantContracts(db, tenant.ID, tenant.LedgerID)
 		deleteTenantAttachments(db, tenant.ID, tenant.LedgerID)
+		// 住户成员随档案一起删除（成员挂在租户下，档案没了就没有归属可言）。
+		deleteTenantMembers(db, tenant.ID, tenant.LedgerID)
 		response.Success(c, nil)
 	}
 }

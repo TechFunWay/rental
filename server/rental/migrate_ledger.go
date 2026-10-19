@@ -51,6 +51,9 @@ var ledgerIndexes = []string{
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_rental_bill_ledger_period ON bills(org_id, room_id, period)",
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_meter_record_ledger_period ON meter_records(org_id, room_id, period)",
 	"CREATE UNIQUE INDEX IF NOT EXISTS idx_rental_fee_item_ledger_key ON fee_items(org_id, `key`)",
+	// 非唯一索引：空置分析（vacancy.go）按房间批量取租户时走它，
+	// 避免 (org_id, room_id) 两个单列索引各扫一遍再回表。
+	"CREATE INDEX IF NOT EXISTS idx_rental_tenant_ledger_room ON tenants(org_id, room_id)",
 }
 
 // ---------------------------------------------------------------------------

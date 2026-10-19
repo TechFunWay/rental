@@ -27,7 +27,8 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 		if len(ledgerIDs) == 0 {
 			response.Success(c, gin.H{
 				"lease_due": []gin.H{}, "payment_due": []PaymentDueItem{}, "arrears_list": []gin.H{},
-				"rooms_total": 0, "rooms_occupied": 0, "rooms_vacant": 0, "tenants_active": 0,
+				"rooms_total": 0, "rooms_occupied": 0, "rooms_vacant": 0,
+				"tenants_active": 0, "members_active": 0, "residents_active": 0,
 				"month": gin.H{
 					"period": period, "total": 0, "paid": 0, "outstanding": 0,
 					"bill_count": 0, "arrears_count": 0,
@@ -38,19 +39,29 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		var roomsTotal, tenantsActive, occupied int64
+		var roomsTotal, tenantsActive, membersActive, occupied int64
 		db.Model(&Room{}).Where("org_id IN ?", ledgerIDs).Count(&roomsTotal)
 		db.Model(&Tenant{}).Where("active = ? AND org_id IN ?", true, ledgerIDs).Count(&tenantsActive)
+		// 住在这里的人数 = 在租租户 + 在住住户成员。费用口径完全不受影响：
+		// 住户成员不进账单、不进抄表、不进收款（见 docs/08 号设计文档第七节）。
+		db.Model(&TenantMember{}).Where("active = ? AND org_id IN ?", true, ledgerIDs).Count(&membersActive)
 		// 在租判定同样限定台账：跨台账的孤儿租户不能让本台账的房算作「已出租」。
 		db.Model(&Room{}).Where(
 			"org_id IN ? AND id IN (SELECT room_id FROM tenants WHERE active = ? AND org_id IN ?)",
 			ledgerIDs, true, ledgerIDs).Count(&occupied)
 
 		// 指定月应收/实收/欠缴户数——每次聚合都用全新查询链，避免条件串扰。
+		//
+		// 应收取 `payable`（本期应缴 = 本期费用 + 上期结转）而不是 total_amount：
+		// 本卡片是**单月**视角，房东看到的是「这个月租户一共该交多少」，
+		// 开了结转的台账应含上期少交的部分。同页的欠缴名单（下方 arrearsBills）
+		// 也用 payable，两者必须同口径，否则同一个屏上会自相矛盾。
+		//
+		// 未开启结转时 payable 恒等于 total_amount，因此对老用户零影响。
 		var monthTotal, monthPaid float64
 		var monthBillCount, monthArrearsCount int64
 		db.Model(&Bill{}).Where("period = ? AND org_id IN ?", period, ledgerIDs).
-			Select("COALESCE(SUM(total_amount), 0)").Scan(&monthTotal)
+			Select("COALESCE(SUM(payable), 0)").Scan(&monthTotal)
 		db.Model(&Bill{}).Where("period = ? AND org_id IN ?", period, ledgerIDs).
 			Select("COALESCE(SUM(paid_amount), 0)").Scan(&monthPaid)
 		db.Model(&Bill{}).Where("period = ? AND org_id IN ?", period, ledgerIDs).Count(&monthBillCount)
@@ -58,10 +69,40 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 			Count(&monthArrearsCount)
 
 		// 历史累计欠缴（可见台账的全部月份）。
-		var overallArrears float64
+		//
+		// 口径（2026-10-16 随结转引入修正）：
+		//
+		//	未结净额 = Σ(total_amount) - Σ(paid_amount)
+		//
+		// 早先这里是 `SUM(total_amount - paid_amount) WHERE status <> 'paid'`，
+		// 即「只把未缴清的账单加起来」。那在**不允许超收**的年代是对的，但现在
+		// 允许「多交顺延」（issue #5 需求 7）后它会算错：
+		//
+		//	1月 应缴500 收450 → partial，欠 50   ← 被统计
+		//	2月 应缴600 收700 → paid，多 100     ← 被 status<>paid 排除掉了！
+		//
+		// 于是总览显示「欠 50」，可实际上 2 月多交的 100 早已把 1 月的 50 抵平，
+		// 房东净多收 50。过滤掉多收的那张单，等于永远看不到抵扣。
+		//
+		// 改成对**全部账单**求和（不再按 status 过滤），多收自然冲减欠缴：
+		// 上例 = (500+600+350) - (450+700+350) = -50 → 下方夹到 0（不欠）。
+		// 未开启结转的台账两种算法完全等价（没有超收就没有冲减），
+		// 因此这个修正对老用户零影响。
+		var overallSum float64
+		var overallPaidSum float64
+		db.Model(&Bill{}).Where("org_id IN ?", ledgerIDs).
+			Select("COALESCE(SUM(total_amount), 0)").Scan(&overallSum)
+		db.Model(&Bill{}).Where("org_id IN ?", ledgerIDs).
+			Select("COALESCE(SUM(paid_amount), 0)").Scan(&overallPaidSum)
+		overallArrears := round2(overallSum - overallPaidSum)
+		if overallArrears < 0 {
+			// 净多收：欠缴额最小为 0（“多收”不在这里体现为负数欠款，
+			// 否则总览会出现「欠 -50 元」这种看不懂的显示）。
+			overallArrears = 0
+		}
+		// 欠缴账单数仍按「未缴清」统计——它是“有几张单还没结”，
+		// 与金额口径（净额）是两件事，不随上面的改动而变。
 		var overallArrearsCount int64
-		db.Model(&Bill{}).Where("status <> ? AND org_id IN ?", "paid", ledgerIDs).
-			Select("COALESCE(SUM(total_amount - paid_amount), 0)").Scan(&overallArrears)
 		db.Model(&Bill{}).Where("status <> ? AND org_id IN ?", "paid", ledgerIDs).
 			Count(&overallArrearsCount)
 
@@ -100,12 +141,18 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		// 欠缴户名单：当前统计账期未缴清的账单（房号/租户/欠缴额），按欠缴额降序。
+		//
+		// 欠缴额用 payable（本期费用 + 上期结转）而不是 total_amount：房东在这一栏
+		// 看到的是「这户这个月该交多少」，开了结转的台账应含上期少交的部分。
+		// 这里限定单个账期、不跨期累加，因此用 payable 不会重复计算；跨期累加的
+		// 那两处（overallArrears 与统计分析）仍必须用 total_amount，
+		// 推导见 carryover.go 顶部注释。
 		arrearsList := make([]gin.H, 0)
 		var arrearsBills []Bill
 		db.Where("period = ? AND status <> ? AND org_id IN ?", period, "paid", ledgerIDs).
-			Order("total_amount - paid_amount DESC").Limit(50).Find(&arrearsBills)
+			Order("payable - paid_amount DESC").Limit(50).Find(&arrearsBills)
 		for _, b := range arrearsBills {
-			arrears := b.TotalAmount - b.PaidAmount
+			arrears := b.Payable - b.PaidAmount
 			if arrears <= 0 {
 				continue
 			}
@@ -135,6 +182,10 @@ func handleStats(db *gorm.DB) gin.HandlerFunc {
 			"rooms_occupied": occupied,
 			"rooms_vacant":   roomsTotal - occupied,
 			"tenants_active": tenantsActive,
+			// members_active 在住住户成员数；residents_active = 租户 + 成员，
+			// 即「住在这里的人数」（总览卡片的在住人数）。
+			"members_active":   membersActive,
+			"residents_active": tenantsActive + membersActive,
 			"month": gin.H{
 				"period":        period,
 				"total":         monthTotal,

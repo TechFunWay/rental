@@ -1,8 +1,12 @@
-// cycle.go — 缴费周期(月付/季付)与缴费提醒的口径计算。
+// cycle.go — 缴费周期(月付/季付/半年付/年付)与缴费提醒的口径计算。
 //
-// 房间按 PayCycle 决定多久出一张账单:月付每月一张,季付每 3 个月一张,
-// 账期与该房首张账单的月份对齐。PayDay 是每期收租的"几号",配合
-// RemindDays(提前提醒天数)在总览与每日推送中生成缴费提醒。
+// 口径(2026-10-12 定调，issue #4 需求 1)：**账单仍然每月一张**，缴费周期
+// 只决定"固定费项目多久收一次"——月付每 1 个月、季付每 3 个月、半年付每
+// 6 个月、年付每 12 个月，账期与该房首张"含固定费"的账单月份对齐。
+// 水/电/燃气（读数类）与包月水费恒按月收，不受周期放大；非锚点月的固定费
+// 为 0（到期判断见 fees.go 的 fixedItemDue）。
+// PayDay 是每期收租的"几号",配合 RemindDays(提前提醒天数)在总览与每日
+// 推送中生成缴费提醒。
 package rental
 
 import (
@@ -13,10 +17,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// 缴费周期:monthly 月付(默认)、quarterly 季付。
+// 缴费周期:monthly 月付(默认)、quarterly 季付、semiannual 半年付、annual 年付。
+// 四者的覆盖月数见 cycleMonths；未知值一律降级为月付，老库里的
+// quarterly 等存量值不受影响。
 const (
-	payCycleMonthly   = "monthly"
-	payCycleQuarterly = "quarterly"
+	payCycleMonthly    = "monthly"
+	payCycleQuarterly  = "quarterly"
+	payCycleSemiannual = "semiannual"
+	payCycleAnnual     = "annual"
 
 	// 缴费日允许的取值范围:1-28 号,0 表示不启用缴费提醒。
 	// 不放行 29-31 号,避免大小月带来的"缴费日不存在"歧义。
@@ -26,40 +34,65 @@ const (
 	remindDaysMin = -1
 	remindDaysMax = 30
 
-	// 全局默认提前提醒天数(偏好设置 → 租房设置 → 缴费提前提醒天数)。
+	// 全局默认提前提醒天数(系统配置 → 计费默认 → 缴费提前提醒天数)。
 	defaultRemindDays = 3
 )
 
 // normalizePayCycle 规范化缴费周期,空值与未知值一律按月付处理。
+// 四个已知周期原样返回；大小写与首尾空格在此不处理（那是 parsePayCycle
+// 的职责：写库前先 parse，落库值本就是规范小写）。
 func normalizePayCycle(cycle string) string {
-	if strings.TrimSpace(cycle) == payCycleQuarterly {
+	switch strings.TrimSpace(cycle) {
+	case payCycleQuarterly:
 		return payCycleQuarterly
+	case payCycleSemiannual:
+		return payCycleSemiannual
+	case payCycleAnnual:
+		return payCycleAnnual
+	default:
+		return payCycleMonthly
 	}
-	return payCycleMonthly
 }
 
-// cycleMonths 一个账单周期覆盖的月数:月付 1、季付 3。
+// cycleMonths 一个缴费周期覆盖的月数:月付 1、季付 3、半年付 6、年付 12。
+// 未知周期经 normalizePayCycle 降级为月付，因此恒返回上表中的值。
 func cycleMonths(cycle string) int {
-	if normalizePayCycle(cycle) == payCycleQuarterly {
+	switch normalizePayCycle(cycle) {
+	case payCycleQuarterly:
 		return 3
+	case payCycleSemiannual:
+		return 6
+	case payCycleAnnual:
+		return 12
+	default:
+		return 1
 	}
-	return 1
 }
 
 // cycleLabel 缴费周期的中文名(导出 CSV 与提醒文案用)。
 func cycleLabel(cycle string) string {
-	if normalizePayCycle(cycle) == payCycleQuarterly {
+	switch normalizePayCycle(cycle) {
+	case payCycleQuarterly:
 		return "季付"
+	case payCycleSemiannual:
+		return "半年付"
+	case payCycleAnnual:
+		return "年付"
+	default:
+		return "月付"
 	}
-	return "月付"
 }
 
-// parsePayCycle 解析用户输入("季付"/"quarterly" 均可),
+// parsePayCycle 解析用户输入("半年付"/"semiannual" 均可,大小写与首尾空格容忍),
 // 未识别或未填写返回空串,由调用方决定缺省口径。
 func parsePayCycle(v string) string {
 	switch strings.TrimSpace(strings.ToLower(v)) {
 	case payCycleQuarterly, "季付":
 		return payCycleQuarterly
+	case payCycleSemiannual, "半年付":
+		return payCycleSemiannual
+	case payCycleAnnual, "年付":
+		return payCycleAnnual
 	case payCycleMonthly, "月付":
 		return payCycleMonthly
 	default:
@@ -67,13 +100,15 @@ func parsePayCycle(v string) string {
 	}
 }
 
-// coveredPeriodText 季付账单覆盖的月份区间文案："2026-10 ~ 2026-12"；
+// coveredPeriodText 多月账单覆盖的月份区间文案(按该周期自身的月数算)：
+// 季付 "2026-10 ~ 2026-12"、半年付 "2026-10 ~ 2027-03"、年付跨年同理；
 // 月付返回单月账期本身。
 func coveredPeriodText(period string, cycle string) string {
-	if normalizePayCycle(cycle) != payCycleQuarterly {
+	months := cycleMonths(cycle)
+	if months <= 1 {
 		return period
 	}
-	return period + " ~ " + addMonths(period, 2)
+	return period + " ~ " + addMonths(period, months-1)
 }
 
 // parsePeriod 把 YYYY-MM 解析成当月 1 号零点。
@@ -119,24 +154,17 @@ func lastBillPeriod(db *gorm.DB, room *Room) (string, Bill, bool) {
 }
 
 // onBillSchedule 判断房间在 period 这个月是否应出账。
-// 收费项目按各自周期出账后，读数类（水/电/燃气）恒按月收取，因此只要房间
-// 在租，每个月都可能有到期项目（季付房的中间月是"月账单"——只有水电等
-// 月付项目；锚点月是"季账单"——固定费一次收 3 个月）。固定费项目自身的
-// 到期判断见 fixedItemDue，这里不再按整单过滤。
+//
+// 恒为 true：**账单每月出**。收费项目按各自周期到期后，读数类（水/电/燃气）
+// 与包月水费每月都要收，因此只要房间在租，每个月都可能有一张账单。多月周期
+// 房（季付/半年付/年付）的非锚点月是"月账单"——只含水电等按月项目；锚点月是
+// "周期账单"——固定费一次收 N 个月（N = cycleMonths）。固定费项目自身的到期
+// 判断见 fixedItemDue，这里不再按整单过滤，否则年付房的每月水电就抄不了。
+//
+// 历史提醒：曾经有过按整单周期判断出账的 onBillScheduleLegacy（季付房非账单月
+// 整单跳过），收费项目周期化后它已无用且最容易在改周期时漏改，已删除。
 func onBillSchedule(db *gorm.DB, room *Room, period string) bool {
-	// 收费项目周期化后每个月都可能有到期项目，账单按月出（内容随项目到期情况而定）。
 	return true
-}
-func onBillScheduleLegacy(db *gorm.DB, room *Room, period string) bool {
-	if effectiveRoomBilling(db, room).PayCycle != payCycleQuarterly {
-		return true
-	}
-	lastPeriod, _, ok := lastBillPeriod(db, room)
-	if !ok {
-		return true
-	}
-	diff := monthsBetween(lastPeriod, period)
-	return diff > 0 && diff%cycleMonths(payCycleQuarterly) == 0
 }
 
 // PaymentDueItem 缴费提醒的一行:仪表盘「缴费提醒」卡片与每日推送共用。
@@ -182,7 +210,9 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 	lastPeriod, last, hasLast := lastBillPeriod(db, room)
 	period := today.Format("2006-01")
 	if hasLast {
-		// 最多向后推进 12 个账单,防止脏数据导致死循环。
+		// 最多向后推进 12 个账单，防止脏数据导致死循环。
+		// 每期步长 = cycleMonths：月付最多推进 12 个月，年付每步 12 个月、
+		// 12 步即 12 年，足够覆盖"提前补账到很久之后"的正常场景。
 		for i := 0; i < 12; i++ {
 			if last.Status != billStatusPaid {
 				period = last.Period
@@ -241,9 +271,10 @@ func nextPaymentDue(db *gorm.DB, room *Room, cfg billingConfig, today time.Time)
 	return item
 }
 
-// expectedBillAmount 预计应缴:租金/卫生费/管理费等固定费项目按月数放大;
+// expectedBillAmount 预计应缴:租金/卫生费/管理费等固定费项目按月数放大
+// (月数 = 该房生效周期 cycleMonths,月付 1、季付 3、半年付 6、年付 12);
 // 水电（含包月水费）属于按月收取的项目，包月只按每月金额计，按吨按抄表另计，
-// 都不随季付放大——收费周期按项目划分后水电每期单独收。
+// 都**不随周期放大**——水电梯度恒按月，账单每月一张，读数类每月单独收。
 func expectedBillAmount(room *Room, cfg billingConfig) float64 {
 	months := float64(cycleMonths(cfg.PayCycle))
 	amount := (room.DefaultRent + room.DefaultSanitationFee + room.DefaultManagementFee) * months

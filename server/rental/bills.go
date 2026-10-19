@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"smallgo/server/logger"
 	"smallgo/server/response"
 	"smallgo/server/sysconfig"
 	"smallgo/server/utils"
@@ -23,11 +24,17 @@ func setupBillRoutes(api *gin.RouterGroup, db *gorm.DB) {
 	api.GET("/rental/bills", view, handleBillList(db))
 	api.GET("/rental/bills/periods", view, handleBillPeriods(db))
 	api.GET("/rental/bills/receipts", view, handleBillReceipts(db))
+	// 开票预览：抄表开票弹窗在保存前就能看到自定义收费项目、押金与上期结转，
+	// 计算链与服务端建账完全一致（不写库），避免预览合计与落库账单对不上。
+	api.GET("/rental/bills/preview", view, handleBillPreview(db))
 	api.GET("/rental/bills/:id", view, handleBillDetail(db))
 	api.POST("/rental/bills", edit, handleBillCreate(db))
 	api.POST("/rental/bills/generate", edit, handleBillGenerate(db))
 	api.PUT("/rental/bills/:id", edit, handleBillUpdate(db))
 	api.POST("/rental/bills/:id/pay", edit, handleBillPay(db))
+	// 结转重算（issue #5 需求 7）：改过历史账单后，把该房后续账单的结转
+	// 沿账期重算一遍。只动结转额与应缴，不动本期费用与收款流水。
+	api.POST("/rental/bills/carryover/recalc", edit, handleCarryoverRecalc(db))
 	api.DELETE("/rental/bills/:id", full, handleBillDelete(db))
 }
 
@@ -77,11 +84,18 @@ func setIf[T any](dst *T, src *T) {
 
 // recalc 按统一口径重算费用与合计，并联动缴纳状态。PaidAt 由调用方维护。
 //
-// ExcludedFees 是开票时快照的"不参与计费项目"：被排除的内置项目一律清零
-// （固定费直接清，读数类算完再清），读数照常保留只是不参与收费；合计按
-// 清零后的值算。开票、编辑、收款三条路径都经过这里，口径唯一。
+// ExcludedFees 是开票时快照的"不参与计费项目"（租户级）：被排除的内置项目一律
+// 清零（固定费直接清，读数类算完再清），读数照常保留只是不参与收费。
+// DisabledFees 是开票时快照的"台账停用项目"（房东在收费项目里停用了燃气费）：
+// 与排除项**同一处理**——本期费用为 0、读数照记，只是不再计费。
+// 合计按清零后的值算。开票、编辑、收款三条路径都经过这里，口径唯一。
 func (b *Bill) recalc() {
+	// 两份快照合并成一个"本期不收费"集合：对计费口来说两者没有区别，
+	// 分成两份存只是为了各自的语义与来源清楚（租户勾选 vs 台账停用）。
 	excluded := excludedFeeSet(b.ExcludedFees)
+	for _, k := range b.DisabledFees {
+		excluded[k] = true
+	}
 	b.Rent = excludedAmount(b.Rent, excluded[feeKeyRent])
 	b.SanitationFee = excludedAmount(b.SanitationFee, excluded[feeKeySanitation])
 	b.ManagementFee = excludedAmount(b.ManagementFee, excluded[feeKeyManagement])
@@ -89,7 +103,11 @@ func (b *Bill) recalc() {
 	b.ElecFee = excludedAmount(meterFee(b.ElecLast, b.ElecNow, b.ElecPrice), excluded[feeKeyElec])
 	b.GasFee = excludedAmount(meterFee(b.GasLast, b.GasNow, b.GasPrice), excluded[feeKeyGas])
 	b.TotalAmount = round2(b.Rent + b.WaterFee + b.ElecFee + b.GasFee + b.SanitationFee + b.ManagementFee + b.DepositFee + b.ExtraAmount)
-	b.Status = billStatus(b.TotalAmount, b.PaidAmount)
+	// 应缴与缴纳状态都按「本期费用 + 上期结转」算：租户欠的是应缴额，不是本期费用。
+	// CarryIn 是开票快照（carryover.go），本期费用变化不改变它。
+	// 结转关闭时 CarryIn 恒 0，Payable == TotalAmount，与改造前完全一致。
+	b.syncPayable()
+	b.Status = billStatus(b.Payable, b.PaidAmount)
 }
 
 // excludedAmount 参与计费返回原值，被排除返回 0。
@@ -101,15 +119,18 @@ func excludedAmount(v float64, isExcluded bool) float64 {
 }
 
 // fixedItemsDue 本期固定费项目（租金/卫生/管理）是否到期应收。
-// 到期规则见 fixedItemDue：季付租户与最近一张含固定费的账期整差 3 个月及以上，
-// 月付恒到期；补历史账单视为到期。
+// 到期规则见 fixedItemDue：按该房生效缴费周期的月数判锚点——月付恒到期，
+// 季付/半年付/年付与最近一张含固定费的账期整差 3/6/12 个月及以上才到期；
+// 补历史账单视为到期。
 func (b *Bill) fixedItemsDue(db *gorm.DB, room *Room) bool {
 	return fixedItemDue(db, room, b.Period)
 }
 
 // waterFee 按开票时快照的计费方式算水费。水电属于按月收取的项目：
-// 包月取每月固定金额（不再随账单季付 ×3，季付只作用于租金等固定费项目），
+// 包月取每月固定金额（**不随周期 ×N**，缴费周期只作用于租金等固定费项目），
 // 按吨按用量 × 单价（WaterPrice 在包月语义下存的是元/月金额）。
+// 口径提醒：前端 waterPreview 若按周期放大包月水费即为 bug，服务端始终保持
+// 单月金额（每张账单的水费 = 一个月的水费）。
 func (b *Bill) waterFee() float64 {
 	if normalizeWaterMode(b.WaterMode) == waterModeMonthly {
 		return round2(b.WaterPrice)
@@ -168,16 +189,20 @@ func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast floa
 // newBillFromRoom 以房间默认值开票：读数衔接、单价默认值、租户名快照。
 // 本月读数默认等于上月读数（用量 0），等抄表后在编辑中录入实际值。
 // 水费连同计费方式一起快照进账单：包月房按每月固定金额开票，不依赖抄表。
-// 缴费周期一并快照：季付房的租金/卫生费/管理费按 3 个月预填，
-// 读数仍与上一张账单衔接（季付房的上一张是 3 个月前，用量跨一个季度）。
 //
 // 水费计费方式、金额与缴费周期取该房在租租户的生效设置（租户没设置时用
 // 偏好设置里的全局默认），见 billing.go。
-// newBillFromRoom 以房间默认值开票。收费项目按各自周期出账：
-//   - 水电燃气（读数类）恒按月收取，包月水费按每月固定金额收；
-//   - 租金/卫生费/管理费等固定费项目按租户缴费周期到期才收
-//     （季付租户的中间月账单只含水电等月付项目，锚点月固定费一次收 3 个月）；
+//
+// 收费项目按各自周期出账：
+//   - 水电燃气（读数类）恒按月收取，包月水费按每月固定金额收（两者都不随
+//     缴费周期放大）；
+//   - 租金/卫生费/管理费等固定费项目按该房生效缴费周期到期才收：锚点月固定费
+//     一次收 N 个月（N = cycleMonths，月付 1/季付 3/半年付 6/年付 12），
+//     非锚点月固定费为 0，但水电与包月水费照常每月入账；
 //   - 启用的自定义收费项目（宽带费等）按各自周期并入。
+//
+// 缴费周期一并快照进账单（b.PayCycle）；读数仍与上一张账单衔接
+// （多月周期房的上一张是 N 个月前，用量跨一个周期）。
 func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 	cfg := effectiveRoomBilling(db, room)
 	waterLast, elecLast, gasLast := prefillReadings(db, room)
@@ -220,9 +245,16 @@ func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 		// 不参与计费的项目随账单快照：租户勾选的排除项（被排除的内置项目
 		// 在 recalc 清零），历史账单不随租户后续改动而变化。
 		ExcludedFees: effectiveRoomExcludedFees(db, room),
+		// 台账停用的收费项目同样快照（粉丝反馈：停用燃气费后账单与单据还在收）：
+		// recalc 会把它们清零，并在明细里不生成对应行。
+		DisabledFees: disabledBuiltInFeeKeys(db, room.LedgerID),
 	}
 	b.recalc()
-	b.Status = billStatus(b.TotalAmount, 0)
+	// 结转（issue #5 需求 7）：把上期少交/多交带入本期应缴。
+	// 放在 recalc 之后——CarryIn 要加成在已算好的本期费用上。
+	// 台账未开启结转时这里恒为 0，Payable == TotalAmount，行为与改造前一致。
+	applyCarryIn(db, b, room)
+	b.Status = billStatus(b.Payable, 0)
 	return b
 }
 
@@ -300,9 +332,11 @@ func handleBillList(db *gorm.DB) gin.HandlerFunc {
 		if periodTo != "" {
 			query = query.Where("period <= ?", periodTo)
 		}
-		// 账单类型：monthly 月账单 / quarterly 季度账单（含季付项目的账单）。
-		if billType == "monthly" || billType == "quarterly" {
-			query = query.Where("pay_cycle = ?", billType)
+		// 账单类型：按账单快照的缴费周期筛（monthly 月账单 / quarterly 季账单 /
+		// semiannual 半年账单 / annual 年账单）。参数就是周期值，未知值不筛，
+		// 避免新增周期（半年付/年付）的账单被筛丢。
+		if billType != "" && parsePayCycle(billType) != "" {
+			query = query.Where("pay_cycle = ?", normalizePayCycle(billType))
 		}
 		switch status {
 		case "paid", "partial", "unpaid":
@@ -391,22 +425,7 @@ func handleBillReceipts(db *gorm.DB) gin.HandlerFunc {
 		rows := make([]gin.H, 0, len(bills))
 		for i := range bills {
 			bill := &bills[i]
-			items := make([]BillItem, 0)
-			// 明细按账单溯源即可保证归属；再按可见台账收窄是为了不让
-			// 历史脏数据（跨台账孤儿明细）出现在单据里。
-			iq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
-			iq.Order("id ASC").Find(&items)
-			_, paids := billItemChargesAndPaids(db, c, bill)
-			itemRows := make([]gin.H, 0, len(items))
-			for _, it := range items {
-				itemRows = append(itemRows, gin.H{
-					"key": it.FeeKey, "name": it.Name, "kind": it.Kind,
-					"amount": it.Amount, "detail": it.Detail, "cycle": it.Cycle,
-					"paid":    paids[it.FeeKey],
-					"arrears": round2(it.Amount - paids[it.FeeKey]),
-				})
-			}
-			rows = append(rows, gin.H{"bill": bill, "items": itemRows})
+			rows = append(rows, gin.H{"bill": bill, "items": billItemRows(db, c, bill)})
 		}
 
 		// 抬头信息按**台账**取（管理员维护；台账无覆盖时回退系统级），整批共用
@@ -433,23 +452,6 @@ func handleBillDetail(db *gorm.DB) gin.HandlerFunc {
 		}
 		// 抬头信息按台账取（无覆盖时回退系统级），与该账单归属一致。
 		name, contact, note := receiptHeaderFor(db, bill.LedgerID)
-
-		items := make([]BillItem, 0)
-		// 明细与收款都挂在账单下，账单的台账校验已过；仍按可见台账收窄，
-		// 避免跨台账的孤儿明细/流水混进详情。
-		iq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
-		iq.Order("id ASC").Find(&items)
-		charges, paids := billItemChargesAndPaids(db, c, bill)
-		itemRows := make([]gin.H, 0, len(items))
-		for _, it := range items {
-			itemRows = append(itemRows, gin.H{
-				"key": it.FeeKey, "name": it.Name, "kind": it.Kind,
-				"amount": it.Amount, "detail": it.Detail, "cycle": it.Cycle,
-				"paid":    paids[it.FeeKey],
-				"arrears": round2(it.Amount - paids[it.FeeKey]),
-			})
-		}
-		_ = charges
 		payRows := make([]gin.H, 0)
 		payments := make([]Payment, 0)
 		pq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
@@ -462,7 +464,7 @@ func handleBillDetail(db *gorm.DB) gin.HandlerFunc {
 		}
 		response.Success(c, gin.H{
 			"bill":     bill,
-			"items":    itemRows,
+			"items":    billItemRows(db, c, bill),
 			"payments": payRows,
 			"property": gin.H{
 				"name":    name,
@@ -473,10 +475,109 @@ func handleBillDetail(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
+// billItemRows 账单明细行（含按项目已收与欠缴）。单据、账单详情与开票预览
+// 共用这一份出参口径，避免三处各拼一次、改一处漏两处。
+func billItemRows(db *gorm.DB, c *gin.Context, bill *Bill) []gin.H {
+	items := make([]BillItem, 0)
+	// 明细按账单溯源即可保证归属；再按可见台账收窄是为了不让
+	// 历史脏数据（跨台账孤儿明细）出现在单据里。
+	iq, _ := scopeLedger(db.Where("bill_id = ?", bill.ID), c)
+	iq.Order("id ASC").Find(&items)
+	_, paids := billItemChargesAndPaids(db, c, bill)
+	return billItemRowsFrom(items, paids, hiddenReceiptFeeKeys(db, bill.LedgerID))
+}
+
+// billDraftItemRows 预览用：尚未落库的账单明细转成与 billItemRows 相同的出参
+// 形状（已收/欠缴为 0），前端不必区分「已有账单」与「待生成账单」两条来源。
+func billDraftItemRows(db *gorm.DB, ledgerID uint, items []BillItem) []gin.H {
+	return billItemRowsFrom(items, map[string]float64{}, hiddenReceiptFeeKeys(db, ledgerID))
+}
+
+// billItemRowsFrom 由明细 + 按项目已收额拼出参行。
+//
+// receiptHidden 是「单据不单列」的项目 key 集合（台账级设置，见
+// hiddenReceiptFeeKeys）：行照常返回并带金额（账单详情、统计、收款分摊都要用），
+// 只多给一个 receipt_hidden 标记，由单据自己决定不显示——**展示口径不进数据库**，
+// 房东随时改设置，历史账单的单据口径跟着变，账单金额却一分不动。
+func billItemRowsFrom(items []BillItem, paids map[string]float64, receiptHidden []string) []gin.H {
+	hidden := excludedFeeSet(receiptHidden)
+	rows := make([]gin.H, 0, len(items))
+	for _, it := range items {
+		rows = append(rows, gin.H{
+			"key": it.FeeKey, "name": it.Name, "kind": it.Kind,
+			"amount": it.Amount, "detail": it.Detail, "cycle": it.Cycle,
+			"paid":    paids[it.FeeKey],
+			"arrears": round2(it.Amount - paids[it.FeeKey]),
+			// 单据不单列该项目（只在收费单据上生效）
+			"receipt_hidden": hidden[it.FeeKey],
+		})
+	}
+	return rows
+}
+
+// handleBillPreview 开票预览：给定房间与账期，返回**不写库**的账单与费用明细。
+//
+// 存在的意义（2026-10-17 粉丝反馈）：抄表开票弹窗此前只在本地拼租金/水电等
+// 内置项目，自定义收费项目（宽带费、停车费等）与首张账单押金、上期结转都不
+// 在弹窗里出现，界面「应付合计」比落库账单少一截，用户以为收费项目没生效。
+// 这里直接复用服务端建账的同一计算链（newBillFromRoom → 自定义项目 → recalc），
+// 周期锚点、租户排除项、押金与结转全部按真实口径算，预览与保存必然一致。
+//
+// 已有账单时原样返回该账单与明细（不去覆盖真实数据），供弹窗编辑读数时对照。
+func handleBillPreview(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roomID := uint(utils.Atoi(c.Query("room_id"), 0))
+		period := strings.TrimSpace(c.Query("period"))
+		if roomID == 0 {
+			response.ErrorBadRequest(c, "请选择房间")
+			return
+		}
+		if !isValidPeriod(period) {
+			response.ErrorBadRequest(c, "账期格式应为 YYYY-MM")
+			return
+		}
+		room, ok := loadRoom(db, c, roomID)
+		if !ok {
+			return
+		}
+
+		// 已有账单：按详情口径返回（含按项目已收与欠缴），不重新计算覆盖。
+		var existing Bill
+		eq := db.Where("room_id = ? AND period = ?", room.ID, period)
+		if ledgerColumnReady(db, "bills") {
+			eq = eq.Where("org_id = ?", room.LedgerID)
+		}
+		if err := eq.First(&existing).Error; err == nil {
+			response.Success(c, gin.H{
+				"exists": true,
+				"bill":   existing,
+				"items":  billItemRows(db, c, &existing),
+			})
+			return
+		}
+
+		// 待生成账单：与服务端建账完全同一计算链，读操作、不落库。
+		bill := newBillFromRoom(db, room, period)
+		customs := applyCustomFees(db, room, bill)
+		bill.recalc()
+		items := billBuiltInItems(*bill)
+		items = append(items, customs...)
+		response.Success(c, gin.H{
+			"exists": false,
+			"bill":   bill,
+			"items":  billDraftItemRows(db, room.LedgerID, items),
+		})
+	}
+}
+
 // handleBillCreate 为单个房间开票（同房同月唯一）。开票即预填：
 // 读数衔接、单价与费用默认值、租户名快照。抄表录入可直填本月读数：
 // 传了读数（指针区分"没传"与"传 0"）就以抄表值建账，费用按实际用量算。
 // water_mode 可把该账单切成包月口径（水费 = 每月固定金额，不看读数）。
+//
+// 抄录时可改金额与备注（issue #4 需求 3）：rent 覆盖 newBillFromRoom 按周期
+// 预填的固定费金额（比如本期只收半个月租），remark 是自由文本备注。
+// 两者都用指针区分"没传"与"传了"——没传就保持预填值/空备注。
 func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
@@ -491,6 +592,7 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 			ElecPrice  *float64 `json:"elec_price"`
 			GasPrice   *float64 `json:"gas_price"`
 			Rent       *float64 `json:"rent"`
+			Remark     *string  `json:"remark"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.ErrorBadRequest(c, "请选择房间与账期")
@@ -573,8 +675,16 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 		if req.GasPrice != nil {
 			bill.GasPrice = *req.GasPrice
 		}
+		// 抄录时可改租金：显式传入即覆盖 newBillFromRoom 按周期预填的值
+		// （如半年付预填 单价×6，房东可按实际只收一部分）；不传则保持预填。
 		if req.Rent != nil {
 			bill.Rent = *req.Rent
+		}
+		// 备注：自由文本，只 trim 首尾空白；没传或 trim 后为空视作"不写"。
+		if req.Remark != nil {
+			if remark := strings.TrimSpace(*req.Remark); remark != "" {
+				bill.Remark = remark
+			}
 		}
 		if strings.TrimSpace(req.TenantName) != "" {
 			bill.TenantName = strings.TrimSpace(req.TenantName)
@@ -643,8 +753,9 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 				skipped++
 				continue
 			}
-			// 季付房只在账单月出账（与最近一张账期整差 3 个月），
-			// 中间月份跳过；手动开票不受此限制，保留自由度。
+			// 账单每月出一张（onBillSchedule 恒 true）：年付房的每月水电
+			// 也要抄，固定费只在锚点月计入，中间月是只含水电等项目的"月账单"。
+			// 手动开票不受此限制，保留自由度。
 			if !onBillSchedule(db, &rooms[i], req.Period) {
 				skipped++
 				continue
@@ -826,9 +937,29 @@ func handleBillPay(db *gorm.DB) gin.HandlerFunc {
 			}
 		}
 
-		// 收款不能超过账单应付合计。
-		if round2(bill.PaidAmount+req.Amount) > bill.TotalAmount+feeTolerance {
-			response.ErrorBadRequest(c, "收款金额超过账单应付合计")
+		// 收款金额校验（issue #5 需求 7 调整）。
+		//
+		// 原来这里硬卡「收款不能超过账单应付合计」。但用户明确要的能力就是
+		// **多交一部分、顺延到下个月**，而他的示例里就有这一笔：
+		//
+		//	2月 应缴600 实缴700  → 多交 100 顺延
+		//
+		// 700 > 600，旧上限会直接把它挡掉——等于把用户要的功能堵死。
+		// 因此把「不得超过本期应缴」这条去掉：多交的部分会成为**下一期的
+		// 负结转**（carry_in 为负），在账面上自动抵扣，是有据可查的记账行为，
+		// 不是脏数据。
+		//
+		// 保留的约束：
+		//   - 金额必须为正（0 与负数没有意义，多半是误操作）；
+		//   - 上限放到一个明显不合理的量级（1 亿），只挡「多打了几个 0」这类
+		//     误输入，不再限制正常的补交与预交。
+		if req.Amount <= 0 {
+			response.ErrorBadRequest(c, "收款金额必须大于 0")
+			return
+		}
+		const maxSinglePayment = 100000000 // 1 亿元：仅挡明显误输入
+		if round2(bill.PaidAmount+req.Amount) > maxSinglePayment {
+			response.ErrorBadRequest(c, "收款金额过大，请核对后重试")
 			return
 		}
 
@@ -852,6 +983,21 @@ func handleBillPay(db *gorm.DB) gin.HandlerFunc {
 		if err != nil {
 			response.ErrorInternal(c, "登记收款失败")
 			return
+		}
+
+		// 收款自动传播结转（issue #5 需求 7）：本期的「结转 = 应缴 - 实缴」
+		// 正是下一期的 carry_in；钱一收，后面的账期就该跟着更正。
+		// 不然房东得记得手工点「重算」，忘一次后面每期金额都是错的。
+		//
+		// 只动后续账单的 carry_in/payable/status。失败不回滚本次收款——
+		// 钱已经收了、流水是事实，结转可事后用重算入口再修，
+		// 因此这里只记日志，不把错误抛给用户（避免"收款成功但报错"的困惑）。
+		var room Room
+		if err := db.Where("id = ? AND org_id = ?", bill.RoomID, bill.LedgerID).
+			First(&room).Error; err == nil {
+			if _, err := recalcCarryoverFrom(db, &room, bill.Period); err != nil {
+				logger.Error("收款后结转传播失败（账单 %d）: %v", bill.ID, err)
+			}
 		}
 		response.Success(c, bill)
 	}

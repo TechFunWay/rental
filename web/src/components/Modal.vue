@@ -4,7 +4,7 @@
       <div v-if="modelValue" class="modal-shell fixed inset-0 z-50 flex items-end sm:items-center justify-center" @click.self="handleClose">
         <div class="absolute inset-0 bg-black bg-opacity-50"></div>
         <!-- 手机端是贴底滑出的 bottom sheet（顶部圆角 + 安全区），桌面端保持居中卡片 -->
-        <div class="modal-panel relative bg-surface text-foreground rounded-t-2xl sm:rounded-2xl shadow-xl p-4 sm:p-6 w-full max-w-lg sm:mx-4 max-h-[88dvh] sm:max-h-[90vh] pb-[calc(1rem+env(safe-area-inset-bottom))] sm:pb-6 overflow-auto">
+        <div class="modal-panel relative bg-surface text-foreground rounded-t-2xl sm:rounded-2xl shadow-xl p-4 sm:p-6 w-full sm:mx-4 max-h-[88dvh] sm:max-h-[90vh] pb-[calc(1rem+env(safe-area-inset-bottom))] sm:pb-6 overflow-auto" :class="wide ? 'sm:max-w-4xl' : 'max-w-lg'">
           <div class="flex items-center justify-between gap-3 mb-4">
             <h3 class="text-lg font-bold text-foreground">{{ title }}</h3>
             <!-- closable=false 表示强制引导（如安全问题设置），不渲染叉叉避免"点了没反应"；
@@ -36,8 +36,17 @@ const props = withDefaults(
     modelValue: boolean
     title?: string
     closable?: boolean
+    /**
+     * 宽版弹窗：桌面端放宽到 max-w-4xl。
+     *
+     * 给「内容本身就宽」的弹窗用——收费单据是六列明细表，min-content 已超过
+     * 默认的 max-w-lg(512px)，塞进窄面板里最右侧的「金额 / 缴费状态」会被
+     * overflow-auto 直接裁掉（GitHub issue #3 现象①）。手机端不受影响：
+     * 窄屏本来就靠单据自己的卡片化明细渲染。
+     */
+    wide?: boolean
   }>(),
-  { title: '', closable: true },
+  { title: '', closable: true, wide: false },
 )
 
 const emit = defineEmits<{

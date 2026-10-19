@@ -32,6 +32,31 @@
           </div>
         </div>
 
+        <!-- 房东入驻资料（平台化）：已提交的显示摘要，没提交的可以在这里补交 -->
+        <div class="mt-3.5 sm:mt-5 w-full rounded-xl border border-border bg-muted/50 px-3 py-2.5 sm:px-3.5 sm:py-3 text-left space-y-1.5">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs sm:text-sm text-muted-foreground shrink-0">入驻申请</span>
+            <span
+              class="badge"
+              :class="apply ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'"
+            >{{ apply ? '已提交' : '未提交' }}</span>
+          </div>
+          <template v-if="apply">
+            <div class="text-[11px] text-muted-foreground tabular-nums">
+              {{ apply.name }} · {{ apply.phone }}
+              <template v-if="apply.region"> · {{ apply.region }}</template>
+              <template v-if="apply.room_scale"> · {{ apply.room_scale }}</template>
+            </div>
+            <div v-if="apply.intro" class="text-[11px] text-muted-foreground">说明：{{ apply.intro }}</div>
+          </template>
+          <div v-else class="space-y-2">
+            <p class="text-[11px] text-muted-foreground leading-5">
+              还没有你的入驻资料。平台需要核实房东身份，补齐后才会通过审核。
+            </p>
+            <button class="btn-brand !py-1.5 !px-3 text-xs" @click="openApply">填写入驻资料</button>
+          </div>
+        </div>
+
         <div class="mt-3.5 sm:mt-5 flex flex-col gap-2 sm:gap-2.5">
           <button class="btn-brand min-h-11 sm:min-h-12 w-full" :disabled="checking" @click="recheck">
             <svg v-if="checking" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -67,6 +92,23 @@
           <button class="btn-ghost min-h-11 sm:min-h-12 w-full" @click="handleLogout">退出登录</button>
         </div>
       </template>
+
+      <!-- 补交/修改入驻资料 -->
+      <Modal v-model="showApply" title="房东入驻资料">
+        <div class="space-y-3">
+          <p class="text-xs text-muted-foreground leading-5">
+            平台需要核实房东身份。资料提交后由平台管理员审核，通过即可管理自己的房源与租户。
+          </p>
+          <LandlordApplyFields v-model="applyForm" />
+          <p v-if="applyError" class="text-sm text-destructive">{{ applyError }}</p>
+          <div class="flex gap-3 pt-1">
+            <button class="btn-ghost flex-1" :disabled="saving" @click="showApply = false">取消</button>
+            <button class="btn-brand flex-1" :disabled="saving" @click="submitApply">
+              {{ saving ? '提交中…' : '提交' }}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   </div>
 </template>
@@ -76,7 +118,10 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useLedgerStore } from '../stores/ledger'
+import Modal from '../components/Modal.vue'
+import LandlordApplyFields from '../components/LandlordApplyFields.vue'
 import { getMyApproval } from '../api/ledger'
+import { getMyLandlordApply, submitLandlordApply, type LandlordApplyInput, type LandlordApplication } from '../api/rental'
 import { toast } from '../utils/toast'
 
 // 待审核（status === 2）用户的落地页。
@@ -96,7 +141,71 @@ const serverPending = ref<boolean | null>(null)
 
 const pending = computed(() => serverPending.value ?? authStore.isPendingUser)
 
+// 入驻申请：等待审核期间显示已提交的资料，没提交的可以就地补交
+const apply = ref<LandlordApplication | null>(null)
+const showApply = ref(false)
+const saving = ref(false)
+const applyError = ref('')
+const applyForm = ref<LandlordApplyInput>({ name: '', phone: '', wechat: '', region: '', room_scale: '', intro: '' })
+
+async function loadApply() {
+  try {
+    const res = await getMyLandlordApply()
+    apply.value = res.data?.code === 0 ? (res.data.data ?? null) : null
+  } catch {
+    apply.value = null
+  }
+}
+
+function openApply() {
+  applyError.value = ''
+  applyForm.value = {
+    name: applyForm.value.name || authStore.user?.username || '',
+    phone: applyForm.value.phone || authStore.user?.phone || '',
+    wechat: applyForm.value.wechat || '',
+    region: applyForm.value.region || '',
+    room_scale: applyForm.value.room_scale || '',
+    intro: applyForm.value.intro || '',
+  }
+  showApply.value = true
+}
+
+async function submitApply() {
+  if (!applyForm.value.name.trim()) {
+    applyError.value = '请填写姓名或称谓'
+    return
+  }
+  if (!/^[0-9+\- ]{5,20}$/.test(applyForm.value.phone || '')) {
+    applyError.value = '请填写正确的联系电话'
+    return
+  }
+  saving.value = true
+  applyError.value = ''
+  try {
+    const res = await submitLandlordApply({
+      name: applyForm.value.name.trim(),
+      phone: applyForm.value.phone.trim(),
+      wechat: (applyForm.value.wechat || '').trim(),
+      region: (applyForm.value.region || '').trim(),
+      room_scale: applyForm.value.room_scale || '',
+      intro: (applyForm.value.intro || '').trim(),
+    })
+    if (res.data?.code === 0) {
+      toast('入驻资料已提交，等待平台审核')
+      showApply.value = false
+      await loadApply()
+    } else {
+      applyError.value = res.data?.message || '提交失败'
+    }
+  } catch (err: any) {
+    applyError.value = err.response?.data?.message || '提交失败，请重试'
+  } finally {
+    saving.value = false
+  }
+}
+
 onMounted(() => {
+  void loadApply()
   void refresh()
 })
 

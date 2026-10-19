@@ -63,8 +63,22 @@
           </tbody>
           <tfoot>
             <tr class="border-t-2 border-border font-bold text-foreground">
-              <td class="receipt-td" colspan="5">应付合计（含租金与其他费用）</td>
+              <td class="receipt-td" colspan="5">本期费用合计（含租金与其他费用）</td>
               <td class="receipt-td text-right tabular-nums">￥{{ fmtMoney(bill.total_amount) }}</td>
+            </tr>
+            <!-- 结转只在台账开启且确有上期差额时出现；没有这一行时单据与改造前一致，
+                 避免给未使用结转的房东平白多出一行「上期结转 ￥0.00」。 -->
+            <tr v-if="carryInOf(bill)" class="text-foreground">
+              <td class="receipt-td" colspan="5">
+                {{ carryInOf(bill) > 0 ? '加：上期少交结转' : '减：上期多交结转' }}
+              </td>
+              <td class="receipt-td text-right tabular-nums">
+                {{ carryInOf(bill) > 0 ? '+' : '-' }}￥{{ fmtMoney(Math.abs(carryInOf(bill))) }}
+              </td>
+            </tr>
+            <tr class="border-t border-border font-bold text-foreground">
+              <td class="receipt-td" colspan="5">本期应缴</td>
+              <td class="receipt-td text-right tabular-nums">￥{{ fmtMoney(payableOf(bill)) }}</td>
             </tr>
             <tr class="text-foreground">
               <td class="receipt-td" colspan="5">已收金额{{ bill.paid_at ? `（${fmtDate(bill.paid_at)}）` : '' }}</td>
@@ -93,8 +107,16 @@
           </div>
           <div class="border-t-2 border-border px-3 py-2 space-y-1 text-sm bg-muted/40">
             <div class="flex justify-between gap-3 font-bold text-foreground">
-              <span>应付合计（含租金与其他费用）</span>
+              <span>本期费用合计（含租金与其他费用）</span>
               <span class="tabular-nums">￥{{ fmtMoney(bill.total_amount) }}</span>
+            </div>
+            <div v-if="carryInOf(bill)" class="flex justify-between gap-3 text-foreground">
+              <span>{{ carryInOf(bill) > 0 ? '加：上期少交结转' : '减：上期多交结转' }}</span>
+              <span class="tabular-nums">{{ carryInOf(bill) > 0 ? '+' : '-' }}￥{{ fmtMoney(Math.abs(carryInOf(bill))) }}</span>
+            </div>
+            <div class="flex justify-between gap-3 font-bold text-foreground border-t border-border pt-1">
+              <span>本期应缴</span>
+              <span class="tabular-nums">￥{{ fmtMoney(payableOf(bill)) }}</span>
             </div>
             <div class="flex justify-between gap-3 text-foreground">
               <span>已收金额{{ bill.paid_at ? `（${fmtDate(bill.paid_at)}）` : '' }}</span>
@@ -123,7 +145,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { arrearsOf, fmtMoney, isArrears, type Bill, type PropertyMeta } from '../api/rental'
+import { arrearsOf, carryInOf, fmtMoney, isArrears, payableOf, type Bill, type PropertyMeta } from '../api/rental'
 import { coveredPeriodText, cycleLabel, cycleMonths } from '../utils/cycle'
 import { appendPrintPage } from '../utils/print-root'
 
@@ -131,7 +153,11 @@ const props = defineProps<{
   bill: Bill
   property: PropertyMeta
   /** 后端费用明细（含自定义收费项目）；没有时回退由 bills 固定列生成 */
-  items?: { key: string; name: string; kind: string; amount: number; detail: string }[]
+  items?: {
+    key: string; name: string; kind: string; amount: number; detail: string
+    /** 单据不单列该项目（台账级「单据显示」设置） */
+    receipt_hidden?: boolean
+  }[]
 }>()
 
 // 打印暂存：挂载即把自身克隆进 body 直属的打印根（#print-root，屏幕上不可见），
@@ -205,14 +231,42 @@ const receiptRows = computed<ReceiptRow[]>(() => {
 
   // 优先用后端 bill_items（含押金与自定义收费项目），保证与合计同源。
   if (props.items && props.items.length) {
-    return props.items.map((it) => {
-      if (it.key === 'water') {
-        return reading('water', it.name, b.water_last, b.water_now, b.water_price, it.amount, b.water_mode === 'monthly')
+    const rows: ReceiptRow[] = []
+    // 被设为「单据不单列」的项目：不单独出现，但金额不能凭空丢掉——
+    // 否则单据明细加起来会比合计少一截（正是这次粉丝反馈的问题形态）。
+    // 统一合并成一行「其他费用」，合计仍然对得上。
+    const hidden: { name: string; amount: number }[] = []
+    let hiddenTotal = 0
+    for (const it of props.items) {
+      if (it.receipt_hidden) {
+        if (it.amount > 0) {
+          hidden.push({ name: it.name, amount: it.amount })
+          hiddenTotal += it.amount
+        }
+        continue
       }
-      if (it.key === 'elec') return reading('elec', it.name, b.elec_last, b.elec_now, b.elec_price, it.amount, false)
-      if (it.key === 'gas') return reading('gas', it.name, b.gas_last, b.gas_now, b.gas_price, it.amount, false)
-      return { key: it.key, name: it.name, detail: it.detail, amount: it.amount, isReading: false }
-    })
+      if (it.key === 'water') {
+        rows.push(reading('water', it.name, b.water_last, b.water_now, b.water_price, it.amount, b.water_mode === 'monthly'))
+      } else if (it.key === 'elec') {
+        rows.push(reading('elec', it.name, b.elec_last, b.elec_now, b.elec_price, it.amount, false))
+      } else if (it.key === 'gas') {
+        rows.push(reading('gas', it.name, b.gas_last, b.gas_now, b.gas_price, it.amount, false))
+      } else {
+        rows.push({ key: it.key, name: it.name, detail: it.detail, amount: it.amount, isReading: false })
+      }
+    }
+    if (hiddenTotal > 0) {
+      // 逐项名称刻意不写进明细说明：房东选择「单据不显示」往往就是不想让租户
+      // 看到具体名目（例如平台服务费），列出来等于没隐藏。
+      rows.push({
+        key: 'receipt_hidden_merged',
+        name: '其他费用',
+        detail: hidden.length > 1 ? '合计' : '',
+        amount: Math.round(hiddenTotal * 100) / 100,
+        isReading: false,
+      })
+    }
+    return rows
   }
 
   // 回退：后端没给明细时由 bills 固定列生成（老数据兼容），含押金与自定义合计。

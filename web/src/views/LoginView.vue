@@ -119,6 +119,14 @@ async function handleLogin() {
 async function enterAfterAuth(token?: string, user?: any) {
   if (token) authStore.setToken(token)
   if (user) authStore.setUser(user)
+  // 租户**先判**、且不拉台账列表：租户不是任何台账的成员，/rental/ledgers/mine
+  // 对租户账密登录一律 403（denyTenantRole 默认拒绝），拉了只会在租客浏览器控制台
+  // 留一条红色请求。直接按「已关联 / 待关联」去门户，与注册页 enterAfterAuth、
+  // 路由守卫里的「租户不拉」同一口径（2026-10-13 端到端冒烟实测到这条 403）。
+  if (authStore.isTenant) {
+    router.push({ name: authStore.isPendingUser ? 'PortalPending' : 'PortalHome' })
+    return
+  }
   const ledgerStore = useLedgerStore()
   await ledgerStore.load(true)
   if (authStore.isPendingUser) {

@@ -92,7 +92,7 @@
             <div class="min-w-0 flex-1">
               <div class="text-sm font-semibold text-foreground truncate">{{ authStore.user?.username }}</div>
               <div class="text-xs text-muted-foreground truncate">
-                {{ authStore.isAdmin ? '管理员' : `普通用户 · ${ledgerStore.levelLabel}` }}
+                {{ authStore.isAdmin ? '系统管理员' : `房东 · ${ledgerStore.levelLabel}` }}
                 <template v-if="ledgerStore.current">
                   · {{ ledgerStore.current.kind === 'personal' ? '我的台账' : ledgerStore.current.name }}
                 </template>
@@ -409,7 +409,14 @@ watch(() => route.path, () => refreshPaymentBadge())
 // 同时按新台账重新判一次当前页面的模块门禁（口径与路由守卫一致）：切到
 // 「没有这个模块权限」的台账时，页面不能继续停在那儿——否则菜单已经不亮了、
 // 页面却还在，请求还会 403。没有可进页面就回落个人资料页。
+//
+// **登出时必须直接返回**：退出登录的 ledgerStore.reset() 同样会改 selection，
+// 那次 replace 会取消紧随其后的「回登录页」导航（vue-router 里后发起的导航
+// 让先发起的作废），把人留在业务页里——用户看到的就是「点了退出没退出去，
+// 用户名没了、页面和菜单还在」。登出后页面去哪儿交给路由守卫，这里不插手
+// （2026-10-14 定位，详见 stores/auth.endSession 的注释）。
 watch(() => ledgerStore.selection, () => {
+  if (!authStore.isAuthenticated) return
   refreshPaymentBadge()
   const mod = route.meta.module as ModuleKey | undefined
   if (route.meta.requiresAccess && mod && !ledgerStore.canView(mod)) {
@@ -493,8 +500,10 @@ function isActive(to: string) {
 
 function handleLogout() {
   menuOpen.value = false
-  // endSession 先落服务端「主动登出」抑制标记再清本地（网关域上只清本地
-  // 会被网关注入身份重新认回）；本地清理是同步完成的，随后即可跳登录页。
+  // endSession 先**同步**清本地登录态（清完即视为已登出），再补服务端那条
+  // 「别再自动认人」的抑制标记（网关域上只清本地会被网关注入身份认回来）。
+  // 清本地是同步的，所以下面的跳转发起时守卫一定按未登录判定；台账 reset
+  // 触发的 selection watcher 也会因为已登出而跳过回落 replace（见上方注释）。
   void authStore.endSession()
   // 台账选择也要清：不清的话下一个账号会继承上一个账号的台账选择
   // （虽然守卫会按新账号的台账列表纠正，但不该让上一任的 id 留在本地）。
