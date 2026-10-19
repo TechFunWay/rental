@@ -25,10 +25,10 @@
         <p
           v-if="supportStore.applyMessage"
           class="text-xs leading-5"
-          :class="/已更新|重启完成/.test(supportStore.applyMessage)
-            ? 'text-emerald-600 dark:text-emerald-400'
-            : /失败|超时/.test(supportStore.applyMessage)
-              ? 'text-destructive'
+          :class="supportStore.applyFailed
+            ? 'text-destructive'
+            : /已更新|重启完成/.test(supportStore.applyMessage)
+              ? 'text-emerald-600 dark:text-emerald-400'
               : 'text-muted-foreground'"
         >
           {{ supportStore.applyMessage }}
@@ -43,7 +43,37 @@
           >
             {{ supportStore.applyButtonText }}
           </button>
-          <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+          <!-- 按部署形态说明点下去会发生什么：飞牛安装形态装 .fpk（含网关基址前端），
+               Docker/直连形态装发行包 .tar.gz。 -->
+          <p v-if="authStore.isAdmin && supportStore.updateInfo?.fpk_assets?.length" class="text-xs leading-5 text-muted-foreground">
+            {{ applyPlanHint }}
+          </p>
+
+          <!-- 失败引导：后端 message 说明原因（包与形态不匹配 / 下载失败 / 目录无写权限…），
+               这里必须同时给出手动下载入口，不能只留一句报错。 -->
+          <div v-if="supportStore.applyFailed" class="rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 py-3 space-y-2 text-xs leading-5">
+            <p class="font-medium text-destructive">一键更新没有完成（失败原因见上方），当前服务仍可正常使用。</p>
+            <p class="text-muted-foreground">
+              可以手动升级：飞牛安装形态下载 .fpk 后到飞牛应用中心安装，Docker/直连形态从发行版页面下载发行包。入口都在下面：
+            </p>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <a
+                v-for="fpk in supportStore.updateInfo?.fpk_assets ?? []"
+                :key="fpk.url"
+                :href="fpk.url"
+                target="_blank"
+                rel="noopener"
+                class="font-medium text-brand-600 dark:text-brand-300 hover:underline"
+              >手动下载 {{ fpkArch(fpk.name) }} 飞牛安装包</a>
+              <a v-if="supportStore.updateInfo?.gitee_url" :href="supportStore.updateInfo.gitee_url" target="_blank" rel="noopener" class="font-medium text-brand-600 dark:text-brand-300 hover:underline">Gitee 发行版</a>
+              <a v-if="supportStore.updateInfo?.github_url" :href="supportStore.updateInfo.github_url" target="_blank" rel="noopener" class="font-medium text-brand-600 dark:text-brand-300 hover:underline">GitHub 发行版</a>
+            </div>
+            <p v-if="!supportStore.updateInfo?.fpk_assets?.length" class="text-muted-foreground">
+              该版本发行页里没有 .fpk 安装包附件，请到 Gitee / GitHub 发行版页面手动下载对应产物。
+            </p>
+          </div>
+
+          <div v-else class="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
             <a
               v-for="fpk in supportStore.updateInfo?.fpk_assets ?? []"
               :key="fpk.url"
@@ -51,7 +81,7 @@
               target="_blank"
               rel="noopener"
               class="font-medium text-brand-600 dark:text-brand-300 hover:underline"
-            >{{ /arm|aarch/i.test(fpk.name) ? 'ARM' : 'x86' }} 安装包直链</a>
+            >{{ fpkArch(fpk.name) }} 飞牛安装包直链</a>
             <a v-if="supportStore.updateInfo?.gitee_url" :href="supportStore.updateInfo.gitee_url" target="_blank" rel="noopener" class="font-medium text-brand-600 dark:text-brand-300 hover:underline">Gitee 发行版</a>
             <a v-if="supportStore.updateInfo?.github_url" :href="supportStore.updateInfo.github_url" target="_blank" rel="noopener" class="font-medium text-brand-600 dark:text-brand-300 hover:underline">GitHub 发行版</a>
           </div>
@@ -76,8 +106,7 @@
       </div>
 
       <p class="text-[11px] leading-5 text-muted-foreground">
-        一键更新（管理员）会依次下载发行包、校验、原子替换程序与前端并原地重启，数据目录不受影响；
-        飞牛应用中心安装的版本也可以点上面的直链下载安装包手动升级。
+        {{ deployNote }}
       </p>
     </div>
   </Modal>
@@ -102,4 +131,19 @@ function withV(v?: string): string {
 }
 const currentVersion = computed(() => withV(supportStore.updateInfo?.current || supportStore.appVersion))
 const latestVersion = computed(() => withV(supportStore.updateInfo?.latest))
+
+/** 安装包架构标签：附件名里带 arm/aarch 即 ARM，其余按 x86。 */
+function fpkArch(name: string): string {
+  return /arm|aarch/i.test(name) ? 'ARM' : 'x86'
+}
+
+/** 点「一键更新」时按部署形态说明要装什么包（文案与后端真实行为保持一致）。 */
+const applyPlanHint = computed(() => supportStore.isFnosInstall
+  ? `点「一键更新」会下载${supportStore.applyArtifactLabel}，用包内程序与带网关基址的前端替换当前文件并自动重启，数据目录不受影响；替换前会校验待装前端基址与当前部署形态一致，不一致会中止并保留原前端。`
+  : `点「一键更新」会下载${supportStore.applyArtifactLabel}，校验后替换程序与前端并自动重启，数据目录不受影响。`)
+
+/** 弹窗底部常驻说明：同样按部署形态区分，避免出现笼统的过期口径。 */
+const deployNote = computed(() => supportStore.isFnosInstall
+  ? '一键更新仅管理员可用：当前为飞牛安装形态，更新装的是飞牛安装包（.fpk，含网关基址前端），替换程序与前端并原地重启，数据目录不受影响。手动升级可下载飞牛安装包（.fpk）后到飞牛应用中心安装，或从 Gitee / GitHub 发行版页面获取。'
+  : '一键更新仅管理员可用：当前为 Docker/直连形态，更新装的是发行包（.tar.gz），替换程序与前端并原地重启，数据目录不受影响。手动升级请从 Gitee / GitHub 发行版页面下载发行包。')
 </script>

@@ -19,6 +19,8 @@ export interface UpdateInfo {
   github_url?: string
   /** 飞牛安装包（.fpk）附件直链，x86/arm64 各一个 */
   fpk_assets?: FpkAsset[]
+  /** 当前是不是飞牛安装形态（-fnos-app）：为真时一键更新装的是 .fpk */
+  fnos_install?: boolean
 }
 
 export function checkUpdate() {
@@ -37,7 +39,7 @@ export interface UpdateApplyStatus {
   version: string
 }
 
-/** 启动一键更新：下载发行包 → 校验 → 替换自身 → 原地重启 */
+/** 启动一键更新：按部署形态下载安装包（飞牛 .fpk / 发行包 .tar.gz）→ 校验 → 替换自身 → 原地重启 */
 export function applyUpdate() {
   return request.post<{ code: number; message: string; data: UpdateApplyStatus }>('/api/update/apply')
 }

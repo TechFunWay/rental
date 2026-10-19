@@ -23,6 +23,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"smallgo/server/config"
 	"smallgo/server/response"
 	"smallgo/server/version"
 )
@@ -95,6 +96,10 @@ type Info struct {
 	GiteeURL    string     `json:"gitee_url"`  // 两平台发行版列表页（恒给，前端双入口）
 	GitHubURL   string     `json:"github_url"`
 	FpkAssets   []FpkAsset `json:"fpk_assets"` // 命中源里的 .fpk 附件直链
+	// FnOSInstall 表示当前进程跑在飞牛安装形态（-fnos-app）：一键更新装的是
+	// .fpk（含网关基址前端），否则装发行包（根基址 www）。前端据此说明「点更新
+	// 会装什么」，与后端 pickUpdateAsset 的判断同源，不靠前端自己猜。
+	FnOSInstall bool `json:"fnos_install"`
 	// assets 命中源的全部附件（含 .tar.gz 更新包），仅供同包的一键更新选包，
 	// 不下发给前端（前端只需要 fpk_assets 与页面链接）。
 	assets []releaseAsset `json:"-"`
@@ -107,6 +112,7 @@ func Check(current string) Info {
 	if cache != nil && time.Since(cache.checkedAt) < cacheTTL {
 		info := cache.info
 		info.Current = current
+		info.FnOSInstall = config.C.FnOSApp
 		info.HasUpdate = IsNewer(info.Latest, current)
 		return info
 	}
@@ -129,11 +135,12 @@ func Check(current string) Info {
 		info.GiteeURL = giteePageURL
 		info.GitHubURL = githubPageURL
 		info.Current = current
+		info.FnOSInstall = config.C.FnOSApp
 		info.HasUpdate = IsNewer(info.Latest, current)
 		cache = &cacheEntry{info: info, checkedAt: time.Now()}
 		return info
 	}
-	return Info{Current: current}
+	return Info{Current: current, FnOSInstall: config.C.FnOSApp}
 }
 
 // fetchRelease 拉取并解析单个源的 latest 发行版；任何失败返回 ok=false。
