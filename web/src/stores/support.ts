@@ -5,6 +5,7 @@ import {
   applyUpdate as applyUpdateApi, checkUpdate, donateSupport, getUpdateApplyStatus,
   type UpdateApplyStage, type UpdateInfo,
 } from '../api/system'
+import { onFnOSGatewayOrigin } from '../utils/gateway'
 
 // 赞赏支持与新版本提示的全局状态。
 //
@@ -84,7 +85,25 @@ export const useSupportStore = defineStore('support', () => {
   const checkingUpdate = ref(false)
   const checkError = ref('')
 
-  // ---- 一键自更新（管理员）：下载 → 替换 → 原地重启 ----
+  // ---- 一键自更新（管理员）：按部署形态下载安装包 → 校验 → 替换 → 原地重启 ----
+  //
+  // 两种部署形态的前端构建基址不同，一键更新装的包也不同（后端按 -fnos-app 区分）：
+  //   - 飞牛安装形态（fpk，前端基址 /app/techfunway-rental/）：装飞牛安装包 .fpk，
+  //     解出程序与带网关基址的 ui/；替换前会校验待装前端基址与形态一致，不一致
+  //     就失败并保留原前端（避免网关形态装了根基址发行包导致资源 404 白屏）；
+  //   - Docker/直连形态（前端基址 /）：装发行包 .tar.gz，内含程序 + 根基址 www/。
+  // 前端判定形态优先用后端 /api/version/check 的 fnos_install（与后端选包逻辑
+  // 同源，后端按 -fnos-app 判定）；老版本后端没有该字段时退回两个现成信号：
+  // 页面是否由飞牛网关 socket 提供，以及构建基址是否非根（fpk 前端基址非根，
+  // 发行包 www 基址是 /）。
+  const isFnosInstall = computed(() =>
+    updateInfo.value?.fnos_install
+    ?? (onFnOSGatewayOrigin() || import.meta.env.BASE_URL !== '/'))
+
+  /** 一键更新要下载的产物名称（说明文案用，避免笼统的「替换程序与前端」）。 */
+  const applyArtifactLabel = computed(() =>
+    isFnosInstall.value ? '飞牛安装包（.fpk）' : '发行包（.tar.gz）')
+
   const applyStage = ref<UpdateApplyStage>('idle')
   const applyMessage = ref('')
   let applyPollTimer: ReturnType<typeof setInterval> | null = null
@@ -92,6 +111,10 @@ export const useSupportStore = defineStore('support', () => {
 
   const applying = computed(() =>
     ['resolving', 'downloading', 'verifying', 'replacing', 'restarting'].includes(applyStage.value))
+
+  /** 一键更新失败（成功态复用 failed 视觉 + 「已更新/重启完成」文案，排除掉）。 */
+  const applyFailed = computed(() =>
+    applyStage.value === 'failed' && !/已更新|重启完成/.test(applyMessage.value))
 
   const applyButtonText = computed(() => {
     switch (applyStage.value) {
@@ -170,7 +193,8 @@ export const useSupportStore = defineStore('support', () => {
     }, 1000)
   }
 
-  /** 一键更新入口：失败无损（服务端各阶段都先落暂存再替换）。 */
+  /** 一键更新入口：按部署形态下载对应安装包（飞牛 .fpk / 发行包 .tar.gz）；
+   *  失败无损（服务端各阶段都先落暂存再替换，失败保留原程序与原前端）。 */
   async function applyNewVersion() {
     if (applying.value) return
     applyStage.value = 'resolving'
@@ -183,11 +207,11 @@ export const useSupportStore = defineStore('support', () => {
         pollApplyStatus()
       } else {
         applyStage.value = 'failed'
-        applyMessage.value = res.data?.message || '启动更新失败'
+        applyMessage.value = res.data?.message || '启动更新失败，可从下方链接手动下载安装包升级'
       }
     } catch {
       applyStage.value = 'failed'
-      applyMessage.value = '启动更新失败，请稍后再试'
+      applyMessage.value = '启动更新失败，请稍后重试；也可以从下方链接手动下载安装包升级'
     }
   }
 
@@ -357,8 +381,11 @@ export const useSupportStore = defineStore('support', () => {
     checkError,
     applyStage,
     applyMessage,
+    applyFailed,
     applying,
     applyButtonText,
+    isFnosInstall,
+    applyArtifactLabel,
     applyNewVersion,
     checkUpdateNow,
     openUpdateDialog,
