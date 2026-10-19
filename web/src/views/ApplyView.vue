@@ -37,10 +37,12 @@
             </label>
             <div v-if="photoUrl" class="flex items-center gap-2 mt-2">
               <button type="button" class="btn-ghost !py-1.5 !px-3 text-xs flex-1" @click="clearPhoto">重选照片</button>
-              <button type="button" class="btn-brand !py-1.5 !px-3 text-xs flex-1" :disabled="ocrLoading" @click="runOCR">
+              <!-- 房东没配 AI 识别 Key 时不显示识别按钮：点了必然失败，只会误导租客 -->
+              <button v-if="aiOcr" type="button" class="btn-brand !py-1.5 !px-3 text-xs flex-1" :disabled="ocrLoading" @click="runOCR">
                 {{ ocrLoading ? '识别中…' : '✨ AI 自动识别' }}
               </button>
             </div>
+            <p v-if="photoUrl && !aiOcr" class="text-[11px] text-muted-foreground mt-1.5">房东未开启 AI 识别，手动填写下面几项即可</p>
             <p v-if="ocrHint" class="text-[11px] mt-1.5" :class="ocrOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'">{{ ocrHint }}</p>
           </div>
 
@@ -88,12 +90,17 @@
         </div>
       </template>
 
-      <!-- 提交成功 -->
+      <!-- 提交成功 / 已提交过（同一手机号重复提交） -->
       <div v-else class="surface rounded-2xl p-8 text-center">
-        <div class="text-4xl mb-3">✅</div>
-        <p class="font-semibold text-foreground">已提交，请等待房东确认</p>
+        <div class="text-4xl mb-3">{{ duplicated ? '📮' : '✅' }}</div>
+        <p class="font-semibold text-foreground">{{ duplicated ? '你已经提交过了' : '已提交，请等待房东确认' }}</p>
         <p class="text-sm text-muted-foreground mt-2 leading-relaxed">
-          房东核对后会联系你办理入住。<br />保持手机畅通即可，无需重复提交。
+          <template v-if="duplicated">
+            这个手机号已经提交过申请，房东还没处理，无需重复提交。<br />如需修改资料，请直接联系房东。
+          </template>
+          <template v-else>
+            房东核对后会联系你办理入住。<br />保持手机畅通即可，无需重复提交。
+          </template>
         </p>
       </div>
     </div>
@@ -107,14 +114,20 @@
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { getApplyInfo, ocrIdCard, submitApply } from '../api/rental'
+import { serverErrorCode, serverErrorMessage } from '../utils/apiError'
 
 const route = useRoute()
 const token = String(route.params.token || '')
 
 const roomTitle = ref('入住信息登记')
 const submitted = ref(false)
+// duplicated：同一手机号已经提交过（服务端业务码 2001 拒绝重复提交）。页面此时
+// 渲染成「你已经提交过了」，而不是把明确的拒绝原因吞成「网络异常」。
+const duplicated = ref(false)
 const submitting = ref(false)
 const error = ref('')
+// 房东有没有配 AI 识别（识别是加分项，没配就不显示按钮）
+const aiOcr = ref(false)
 
 const photoFile = ref<File | null>(null)
 const photoUrl = ref('')
@@ -135,14 +148,19 @@ getApplyInfo(token).then((res) => {
     const d = res.data.data
     const parts = [d.community, d.building, d.unit, d.floor ? d.floor + '层' : '', d.room_no]
     roomTitle.value = parts.filter(Boolean).join(' ') || '入住信息登记'
+    aiOcr.value = d.ai_ocr === true
   } else {
     linkInvalid.value = true
     linkError.value = res.data?.message || '登记链接无效'
     roomTitle.value = '登记链接无效'
   }
-}).catch(() => {
+}).catch((e) => {
+  // 链接失效是 404 业务码，服务端文案比笼统的「无效」更准确（如「已被重置」）。
+  const code = serverErrorCode(e)
   linkInvalid.value = true
-  linkError.value = '登记链接无效或已失效，请联系房东重新分享'
+  linkError.value = code === 404
+    ? serverErrorMessage(e, '登记链接无效或已失效，请联系房东重新分享')
+    : '网络异常，请检查网络后重试；如果一直打不开，请联系房东重新分享链接'
   roomTitle.value = '登记链接无效'
 })
 
@@ -205,9 +223,10 @@ async function runOCR() {
       ocrOk.value = false
       ocrHint.value = res.data?.message || '识别失败，请手动填写'
     }
-  } catch {
+  } catch (e) {
+    // 未配置识别服务、识别服务连不上等都由服务端给了明确原因，照原话显示。
     ocrOk.value = false
-    ocrHint.value = '识别服务连接失败，请手动填写'
+    ocrHint.value = serverErrorMessage(e, '网络异常，请检查网络后重试；也可以直接手动填写')
   } finally {
     ocrLoading.value = false
   }
@@ -231,8 +250,15 @@ async function submit() {
     } else {
       error.value = res.data?.message || '提交失败，请稍后再试'
     }
-  } catch {
-    error.value = '网络异常，请稍后再试'
+  } catch (e) {
+    // 业务码 2001 = 同房源同手机号已有待审核申请：对租客来说「已经提交过了」，
+    // 直接给结论，别让他对着红字反复重试（服务端不允许覆盖，防冒充改资料）。
+    if (serverErrorCode(e) === 2001) {
+      duplicated.value = true
+      submitted.value = true
+    } else {
+      error.value = serverErrorMessage(e, '网络异常，请检查网络后重试')
+    }
   } finally {
     submitting.value = false
   }

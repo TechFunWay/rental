@@ -6,7 +6,16 @@
           入住申请
           <span v-if="pendingCount" class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">{{ pendingCount > 9 ? '9+' : pendingCount }}</span>
         </button>
+        <!-- 租户提交的资料变更申请（v0.6.10）：待审时带红点，点开逐项对照后通过/驳回 -->
+        <button class="btn-ghost relative" @click="showChangeReview = true">
+          资料变更申请
+          <span v-if="changePendingCount" class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">{{ changePendingCount > 9 ? '9+' : changePendingCount }}</span>
+        </button>
+        <!-- 导出：派出所场景按当前筛选条件导出租户 CSV（只读操作，查看档即可见） -->
+        <button v-if="ledgerStore.canView('tenants')" class="btn-ghost" @click="exportList">导出</button>
         <button v-if="ledgerStore.canFull('tenants')" class="btn-ghost" @click="showImport = true">导入</button>
+        <!-- 粘贴识别：外网不通、登记链接打不开时，租客把资料微信发过来，在这里粘贴识别入库 -->
+        <button v-if="ledgerStore.canFull('tenants')" class="btn-ghost" @click="showPaste = true">粘贴识别</button>
         <button v-if="ledgerStore.canEdit('tenants')" class="btn-brand" @click="openCreate">＋ 登记租户</button>
       </template>
     </PageHeader>
@@ -80,7 +89,15 @@
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="py-3 px-4 text-muted-foreground tabular-nums">{{ t.move_out_date || '—' }}</td>
-              <td class="py-3 px-4 text-right tabular-nums" :class="t.deposit ? 'text-foreground' : 'text-muted-foreground'">{{ t.deposit ? fmtDeposit(t.deposit) : '—' }}</td>
+              <td class="py-3 px-4 text-right tabular-nums" :class="t.deposit ? 'text-foreground' : 'text-muted-foreground'">
+                <div>{{ t.deposit ? fmtDeposit(t.deposit) : '—' }}</div>
+                <!-- 押金单照片：押金是实物凭证，单独入口查看/补拍（2026-10-17 粉丝反馈） -->
+                <button
+                  v-if="t.deposit || t.deposit_photos_count"
+                  class="mt-0.5 text-[11px] font-normal text-brand-600 dark:text-brand-300 hover:underline"
+                  @click="openDepositPhotos(t)"
+                >押金单{{ t.deposit_photos_count ? ` ${t.deposit_photos_count}` : ' +' }}</button>
+              </td>
               <td class="py-3 px-4">
                 <span v-if="t.active" class="badge bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">在租</span>
                 <span v-else class="badge bg-muted text-muted-foreground">已退租</span>
@@ -93,7 +110,14 @@
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openAttachments(t)">
                   附件<span v-if="t.attachments_count" class="ml-0.5 tabular-nums">{{ t.attachments_count }}</span>
                 </button>
+                <!-- 住户成员：只登记身份、不参与计费；0 人时也留入口（随时补录） -->
+                <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openMembers(t)">
+                  {{ t.members_count ? `成员 ${t.members_count}` : '＋成员' }}
+                </button>
                 <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300 hover:underline mr-3" @click="checkout(t)">退租</button>
+                <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openAccount(t)">
+                  账号<span v-if="t.account_user_id" class="ml-0.5 text-emerald-600 dark:text-emerald-400" title="已关联登录账号">✓</span>
+                </button>
                 <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openEdit(t)">编辑</button>
                 <button v-if="ledgerStore.canFull('tenants')" class="text-destructive hover:underline" @click="remove(t)">删除</button>
               </td>
@@ -118,7 +142,14 @@
           </div>
 
           <div class="text-[11px] leading-5 text-muted-foreground">
-            <div>房源 <span class="text-foreground">{{ t.room_label || t.room_no || '—' }}</span><template v-if="t.deposit"> · 押金 <span class="text-foreground tabular-nums">{{ fmtDeposit(t.deposit) }} 元</span></template></div>
+            <div>
+              房源 <span class="text-foreground">{{ t.room_label || t.room_no || '—' }}</span><template v-if="t.deposit"> · 押金 <span class="text-foreground tabular-nums">{{ fmtDeposit(t.deposit) }} 元</span></template>
+              <button
+                v-if="t.deposit || t.deposit_photos_count"
+                class="ml-1 text-brand-600 dark:text-brand-300"
+                @click="openDepositPhotos(t)"
+              >押金单{{ t.deposit_photos_count ? ` ${t.deposit_photos_count}` : ' +' }}</button>
+            </div>
             <div>计费 {{ tenantBillingSummary(t, billingDefaults) }}<span v-if="tenantExcludedText(t)">{{ tenantExcludedText(t) }}</span></div>
             <div class="tabular-nums">入住 {{ t.move_in_date || '—' }} · 到期 {{ t.lease_end_date || '—' }}<template v-if="t.move_out_date"> · 退租 {{ t.move_out_date }}</template>
               <span v-if="leaseStatus(t)" class="ml-1 font-medium" :class="leaseStatus(t)!.cls">{{ leaseStatus(t)!.text }}</span>
@@ -133,7 +164,13 @@
             <button class="text-brand-600 dark:text-brand-300" @click="openAttachments(t)">
               附件<span v-if="t.attachments_count" class="ml-0.5 tabular-nums">{{ t.attachments_count }}</span>
             </button>
+            <button class="text-brand-600 dark:text-brand-300" @click="openMembers(t)">
+              {{ t.members_count ? `成员 ${t.members_count}` : '成员' }}
+            </button>
             <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300" @click="checkout(t)">退租</button>
+            <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300" @click="openAccount(t)">
+              账号<span v-if="t.account_user_id" class="ml-0.5 text-emerald-600 dark:text-emerald-400">✓</span>
+            </button>
             <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300" @click="openEdit(t)">编辑</button>
             <button v-if="ledgerStore.canFull('tenants')" class="text-destructive ml-auto" @click="remove(t)">删除</button>
           </div>
@@ -160,6 +197,23 @@
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">身份证号</label>
           <input v-model="form.id_card" class="input-field" placeholder="选填" />
+        </div>
+        <!-- 身份证住址：v0.6.10 起落到租户档案上（此前只在登记申请里，转入登记后就丢了），
+             租客也能在门户里提交申请修改、由房东在这里审阅后生效。 -->
+        <div>
+          <label class="text-xs font-semibold text-muted-foreground block mb-1.5">身份证住址</label>
+          <input v-model="form.address" class="input-field" placeholder="选填" />
+        </div>
+        <!-- 紧急联系人：租客可在门户申请修改 -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">紧急联系人</label>
+            <input v-model="form.emergency_contact" class="input-field" placeholder="选填" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">紧急联系电话</label>
+            <input v-model="form.emergency_phone" class="input-field" placeholder="选填" />
+          </div>
         </div>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">标签</label>
@@ -233,8 +287,9 @@
               <label class="text-xs text-muted-foreground block mb-1.5">缴费周期</label>
               <select v-model="form.pay_cycle" class="input-field !py-2">
                 <option value="">跟随全局</option>
-                <option value="monthly">月付</option>
-                <option value="quarterly">季付</option>
+                <!-- 周期选项集中在 utils/cycle.ts（月付/季付/半年付/年付），
+                     新增周期只改那一处，页面不再写字面量 -->
+                <option v-for="o in payCycleOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
               </select>
             </div>
             <div>
@@ -259,7 +314,7 @@
               : (formWaterMode === 'monthly'
                 ? '水费按每月固定金额计，不抄表；金额留空或 0 = 跟随全局默认'
                 : '水费按用量 × 单价计；单价留空或 0 = 跟随全局默认') }}
-            缴费周期决定多久出一张账单（季付租金等费用按 3 个月计）；缴费日留空或 0 表示不提醒，1-28 号按日提醒。
+            缴费周期决定固定费（租金/卫生费/管理费）多久收一次；水/电/燃气仍按月抄表出账。缴费日留空或 0 表示不提醒，1-28 号按日提醒。
           </p>
         </div>
         <!-- 手机端两列换行排布，桌面端一行三列 -->
@@ -276,6 +331,60 @@
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">押金（元）</label>
             <input v-model.number="form.deposit" type="number" step="0.01" min="0" class="input-field" placeholder="0" />
           </div>
+        </div>
+        <!-- 押金单照片（选填）：押金不能只录一个数字，实物单子拍照留档，
+             换房东/退租结算/对账时都能拿出来对。新租户保存后自动上传。 -->
+        <div class="rounded-xl border border-border p-3">
+          <TenantDepositPhotos
+            :tenant-id="editing?.id ?? 0"
+            :can-edit="ledgerStore.canEdit('tenants')"
+            v-model:pending="depositFiles"
+          />
+        </div>
+        <!-- 入住成员：登记租户时就一起录，与租户同一事务保存。
+             只登记身份、不参与计费（费用仍只按租户算）；「＋」加一行、行内可改可删，
+             保存时以这份列表为准（删掉的行保存后即从档案里移除）。 -->
+        <div class="rounded-xl border border-border p-3 space-y-2">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <span class="text-xs font-semibold text-muted-foreground">入住成员（选填）</span>
+              <p class="text-[11px] text-muted-foreground mt-0.5">
+                同住的家属或合住人在这里登记，<span class="text-foreground">费用仍只按租户算</span>。
+              </p>
+            </div>
+            <button type="button" class="btn-brand !py-1.5 !px-3 text-xs shrink-0" @click="addMemberRow">＋ 添加成员</button>
+          </div>
+
+          <p v-if="formMembers.length === 0" class="text-[11px] text-muted-foreground py-0.5">
+            只住租户本人时不填即可；有同住人时点右上角「＋ 添加成员」。
+          </p>
+
+          <div v-for="(m, i) in formMembers" :key="m.uid" class="rounded-lg bg-muted/60 p-2.5 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-[11px] font-medium text-muted-foreground">成员 {{ i + 1 }}</span>
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  class="text-[11px] px-2 py-0.5 rounded-md border transition-colors"
+                  :class="m.active !== false
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-300'
+                    : 'bg-muted border-border text-muted-foreground'"
+                  @click="m.active = m.active === false"
+                >{{ m.active !== false ? '在住' : '已搬离' }}</button>
+                <button type="button" class="text-[11px] text-destructive" @click="removeMemberRow(i)">删除</button>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <input v-model="m.name" class="input-field !py-2" placeholder="姓名 *" />
+              <input v-model="m.relation" class="input-field !py-2" list="member-relations" placeholder="与租户关系" />
+              <input v-model="m.phone" class="input-field !py-2" inputmode="tel" placeholder="手机号（选填）" />
+              <input v-model="m.id_card" class="input-field !py-2 tabular-nums" placeholder="身份证号（选填）" />
+            </div>
+            <p v-if="idCardHint(m.id_card || '')" class="text-[11px] text-muted-foreground">{{ idCardHint(m.id_card || '') }}</p>
+          </div>
+          <datalist id="member-relations">
+            <option v-for="r in MEMBER_RELATIONS" :key="r" :value="r" />
+          </datalist>
         </div>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">备注</label>
@@ -341,7 +450,7 @@
       <div class="space-y-4">
         <div class="rounded-xl bg-muted/60 px-3 py-2.5 text-xs text-muted-foreground leading-relaxed">
           <span class="font-semibold text-foreground">{{ attachmentTenantLabel }}</span> ·
-          存放租房协议、汽车车牌、租客本人照片、身份证等留档材料，支持拍照、图片与 PDF。
+          存放租房协议、汽车车牌、租客本人照片、身份证、押金单等留档材料，支持拍照、图片与 PDF。
           单个 ≤20MB，每租户最多 40 个；删租户时一并清理。
         </div>
 
@@ -414,6 +523,26 @@
 
         <div class="flex gap-3 pt-1">
           <button class="btn-ghost flex-1" @click="closeAttachments">关闭</button>
+        </div>
+      </div>
+    </Modal>
+
+    <!-- 押金单照片弹窗：押金不能只录一个数字，实物单子单独留档入口 -->
+    <Modal v-model="showDepositPhotos" title="押金单照片">
+      <div v-if="depositTenant" class="space-y-3">
+        <div class="rounded-xl bg-muted/60 px-3 py-2.5 text-xs text-muted-foreground leading-relaxed">
+          <span class="font-semibold text-foreground">{{ depositTenant.name }}</span>
+          · {{ depositTenant.room_label || depositTenant.room_no || '—' }}
+          · 押金 <span class="font-semibold text-foreground tabular-nums">{{ fmtDeposit(depositTenant.deposit) }} 元</span>
+          <p class="mt-1">拍下押金单实物留档，退租结算、换房东、对账时都有据可查；照片按租户保存，换租客不会丢。</p>
+        </div>
+        <TenantDepositPhotos
+          :tenant-id="depositTenant.id"
+          :can-edit="ledgerStore.canEdit('tenants')"
+          @changed="onDepositPhotosChanged"
+        />
+        <div class="flex gap-3 pt-1">
+          <button class="btn-ghost flex-1" @click="showDepositPhotos = false">关闭</button>
         </div>
       </div>
     </Modal>
@@ -512,6 +641,24 @@
       </div>
     </Modal>
 
+    <!-- 租户资料粘贴识别：租客微信发资料 → 粘贴解析成草稿 → 核对后批量入库 -->
+    <TenantPasteModal v-model="showPaste" :communities="communityOptions" @imported="load(1)" />
+
+    <!-- 关联登录账号：租客自己注册后，房东在这里把它绑到该租户档案上 -->
+    <TenantAccountModal
+      ref="accountModalRef"
+      v-model="showAccount"
+      :tenant="accountTenant"
+      @changed="onAccountChanged"
+      @request-unbind="askAccountUnbind"
+    />
+
+    <!-- 租户提交的资料变更申请：逐项对照后通过（覆盖正式资料）或驳回 -->
+    <TenantChangeReviewModal v-model="showChangeReview" @changed="onChangeReviewed" />
+
+    <!-- 住户成员：挂在租户名下的同住人，只登记身份、不参与计费（docs/08） -->
+    <TenantMembersModal v-model="showMembers" :tenant="membersTenant" @changed="load(page)" />
+
     <ConfirmDialog
       v-model="confirmState.show"
       :title="confirmState.title"
@@ -525,6 +672,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLedgerStore } from '../stores/ledger'
+import { ID_CARD_PATTERN, idCardHint } from '../utils/id-card'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DateField from '../components/DateField.vue'
 import FilePick from '../components/FilePick.vue'
@@ -533,19 +681,26 @@ import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import TagInput from '../components/TagInput.vue'
+import TenantAccountModal from '../components/TenantAccountModal.vue'
+import TenantChangeReviewModal from '../components/TenantChangeReviewModal.vue'
+import TenantDepositPhotos from '../components/TenantDepositPhotos.vue'
+import TenantMembersModal from '../components/TenantMembersModal.vue'
+import TenantPasteModal from '../components/TenantPasteModal.vue'
+import { getChangeRequestPendingCount } from '../api/tenant'
 import { toast } from '../utils/toast'
 import {
   checkoutTenant, createTenant, deleteAttachment, deleteContract, deleteTenant, downloadAttachment,
-  downloadContract, downloadTenantTemplate, fetchAttachmentBlob, fetchContractBlob, getAttachments,
-  getContracts, getFeeItems, getAllRooms, getAllTenants, getTenants, getTenantApplications, fetchApplicationPhoto,
+  downloadContract, downloadTenantTemplate, exportTenants, fetchAttachmentBlob, fetchContractBlob, getAttachments,
+  getContracts, getFeeItems, getAllRooms, getAllTenants, getTenants, getTenantApplications, getTenantMembers, fetchApplicationPhoto,
   rejectTenantApplication, importTenants, updateTenant, uploadAttachments, uploadContracts,
-  type Contract, type FeeItem, type ImportResult, type RoomView, type Tenant, type TenantApplication, type TenantAttachment,
+  type Contract, type FeeItem, type ImportResult, type RoomView, type Tenant, type TenantApplication,
+  type TenantAttachment, type TenantMember, type TenantMemberPayload,
 } from '../api/rental'
 import {
   defaultBilling, fetchBillingDefaults, globalBillingText, payDayText,
   tenantBillingSummary, waterModeLabel, type BillingDefaults, type WaterMode,
 } from '../utils/billing'
-import { cycleLabel } from '../utils/cycle'
+import { cycleLabel, payCycleOptions } from '../utils/cycle'
 
 const ledgerStore = useLedgerStore()
 
@@ -580,6 +735,19 @@ function applyFilters() {
   filterRef.value?.collapse()
 }
 
+// 导出租户 CSV（派出所场景）：筛选参数与 load() 用的**逐个相同**，做到
+// 「列表看到什么，导出就是什么」；导出的是全部匹配行（不受分页限制）。
+// 后端列 = 租客模板 15 列 + 末尾只读 4 列（房号/在租状态/出生日期/性别）。
+function exportList() {
+  exportTenants({
+    keyword: keyword.value,
+    active: active.value,
+    room_id: roomId.value || undefined,
+    community: community.value || undefined,
+    tag: filterTag.value || undefined,
+  })
+}
+
 // 全局计费与缴费默认（偏好设置 → 租房设置）：租户表单的预填值与"跟随全局"提示
 const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
 
@@ -588,6 +756,8 @@ const editing = ref<Tenant | null>(null)
 const saving = ref(false)
 const formError = ref('')
 const form = ref<Partial<Tenant>>({})
+// 新租户表单里暂存的押金单照片：保存成功拿到租户 ID 后再上传（编辑态组件自己即时上传）
+const depositFiles = ref<File[]>([])
 
 // ---------- 批量导入 ----------
 
@@ -597,6 +767,10 @@ const importError = ref('')
 const importResult = ref<ImportResult | null>(null)
 const importFile = ref<File | null>(null)
 const importFileName = computed(() => importFile.value?.name || '')
+
+// ---------- 粘贴识别（租客微信发资料 → 解析草稿 → 核对后入库） ----------
+
+const showPaste = ref(false)
 
 function onPickImportFile(files: File[]) {
   importFile.value = files[0] ?? null
@@ -717,8 +891,10 @@ function onWaterModeChange() {
 function openCreate() {
   editing.value = null
   convertingId.value = 0
+  depositFiles.value = []
   form.value = {
     name: '', phone: '', id_card: '', room_id: allRooms.value[0]?.id,
+    address: '', emergency_contact: '', emergency_phone: '',
     move_in_date: '', lease_end_date: '', deposit: 0,
     // 空串/-1 = 跟随全局默认；金额按全局默认预填，切到显式方式时直接可用
     water_mode: '', water_price: billingDefaults.value.waterMeterPrice,
@@ -729,8 +905,49 @@ function openCreate() {
   }
   // 新租户默认全部收费项目参与
   excludedInput.value = []
+  formMembers.value = []
   formError.value = ''
   showModal.value = true
+}
+
+// ---------- 表单里的「入住成员」 ----------
+// 与租户一起保存：带 id 的改、不带 id 的新增、删掉的行保存后即移除。
+// uid 只用于 v-for 的 key（新行还没有 id），提交前会剥掉。
+type MemberRow = TenantMemberPayload & { uid: number }
+const MEMBER_RELATIONS = ['配偶', '子女', '父母', '兄弟姐妹', '亲属', '同事', '朋友', '其他']
+const formMembers = ref<MemberRow[]>([])
+let memberUID = 0
+
+function addMemberRow() {
+  formMembers.value.push({
+    uid: ++memberUID,
+    name: '', relation: '', phone: '', id_card: '',
+    move_in_date: '', move_out_date: '', active: true, notes: '',
+  })
+}
+
+function removeMemberRow(index: number) {
+  formMembers.value.splice(index, 1)
+}
+
+// 加载已有成员（编辑态）：把库里的行映射成表单行，保留 id 以便原地更新
+async function loadFormMembers(tenantId: number) {
+  formMembers.value = []
+  try {
+    const res = await getTenantMembers({ tenant_id: tenantId })
+    if (res.data?.code !== 0) return
+    formMembers.value = (res.data.data ?? []).map((m: TenantMember) => ({
+      uid: ++memberUID,
+      id: m.id,
+      name: m.name, relation: m.relation, phone: m.phone, id_card: m.id_card,
+      move_in_date: m.move_in_date, move_out_date: m.move_out_date,
+      active: m.active, notes: m.notes,
+    }))
+  } catch {
+    // 拉不到就按「本次不动成员」处理（保存时 members 字段仍会带上空数组，
+    // 但下面 save 会带上已加载的部分；失败时提示用户重开弹窗）
+    formError.value = '入住成员加载失败，请关闭弹窗重试'
+  }
 }
 
 // 表单标签的 v-model 桥：form.tags 在 Partial<Tenant> 里可缺省，TagInput 需要确定的数组
@@ -764,6 +981,57 @@ async function loadPendingCount() {
   } catch {
     /* 角标失败不影响页面 */
   }
+}
+
+// ---------- 租户登录账号关联（v0.6.10） ----------
+
+const showAccount = ref(false)
+const accountTenant = ref<Tenant | null>(null)
+const accountModalRef = ref<InstanceType<typeof TenantAccountModal> | null>(null)
+
+function openAccount(t: Tenant) {
+  accountTenant.value = t
+  showAccount.value = true
+}
+
+function onAccountChanged() {
+  // 关联状态会显示在租户列表的「账号✓」上，刷新列表即可。
+  void load(page.value)
+}
+
+// 解绑确认交给页面的 ConfirmDialog（子组件不内嵌确认，避免叠两层弹窗）。
+function askAccountUnbind() {
+  const t = accountTenant.value
+  if (!t) return
+  showAccount.value = false
+  askConfirm(
+    '解除账号关联',
+    `确定解除「${t.name}」的登录账号关联？该账号会回到「等待房东关联」状态（账号不删除），可再关联到别的租户。`,
+    async () => {
+      await accountModalRef.value?.doUnbind()
+      showAccount.value = true
+    },
+  )
+}
+
+// ---------- 资料变更申请（v0.6.10） ----------
+
+const showChangeReview = ref(false)
+const changePendingCount = ref(0)
+
+async function loadChangePendingCount() {
+  try {
+    const res = await getChangeRequestPendingCount()
+    if (res.data?.code === 0) {
+      changePendingCount.value = Number(res.data.data?.count || 0)
+    }
+  } catch {
+    /* 角标失败不影响页面 */
+  }
+}
+
+function onChangeReviewed() {
+  void loadChangePendingCount()
 }
 // 正在转入登记的申请 id：保存租户时带给服务端（标记已入库 + 照片转附件）
 const convertingId = ref(0)
@@ -812,6 +1080,8 @@ function convertToTenant(a: TenantApplication) {
   convertingId.value = a.id
   form.value = {
     name: a.name, phone: a.phone, id_card: a.id_card,
+    // 身份证住址原先只存在申请里、转入登记后就丢了（v0.6.10 补上正式档案字段）。
+    address: a.address || '', emergency_contact: '', emergency_phone: '',
     room_id: a.room_id || allRooms.value[0]?.id,
     move_in_date: '', lease_end_date: '', deposit: 0,
     water_mode: '', water_price: billingDefaults.value.waterMeterPrice,
@@ -852,10 +1122,13 @@ function leaseStatus(t: Tenant): { text: string; cls: string } | null {
 
 function openEdit(t: Tenant) {
   editing.value = t
+  depositFiles.value = []
   form.value = { ...t }
   excludedInput.value = [...(t.excluded_fees || [])]
+  formMembers.value = []
   formError.value = ''
   showModal.value = true
+  void loadFormMembers(t.id)
 }
 
 async function loadRooms() {
@@ -907,6 +1180,19 @@ async function save() {
     formError.value = '请填写姓名并选择房源'
     return
   }
+  // 入住成员的行内校验：逐行报第几位，避免只丢一句「参数错误」
+  for (let i = 0; i < formMembers.value.length; i++) {
+    const m = formMembers.value[i]
+    if (!m.name?.trim()) {
+      formError.value = `入住成员第 ${i + 1} 位还没填姓名`
+      return
+    }
+    const idCard = (m.id_card || '').trim().toUpperCase()
+    if (idCard && !ID_CARD_PATTERN.test(idCard)) {
+      formError.value = `入住成员第 ${i + 1} 位的身份证号应为 18 位（末位可为 X）或 15 位`
+      return
+    }
+  }
   saving.value = true
   formError.value = ''
   try {
@@ -915,7 +1201,7 @@ async function save() {
     const mode = form.value.water_mode
     // 未勾选的收费项目（排除项）落库；存量排除里已停用/已删除的项目一并清掉。
     const excluded = billableFeeItems.value.filter((f) => !feeChecked(f.key)).map((f) => f.key)
-    const payload: Partial<Tenant> & { application_id?: number } = {
+    const payload: Partial<Tenant> & { application_id?: number; members?: TenantMemberPayload[] } = {
       ...form.value,
       water_price: mode === 'meter' ? Number(form.value.water_price) || 0 : 0,
       water_monthly_fee: mode === 'monthly' ? Number(form.value.water_monthly_fee) || 0 : 0,
@@ -924,15 +1210,42 @@ async function save() {
       excluded_fees: excluded,
       // 租客自助登记转入：带上申请 id，服务端标记已入库并把身份证照片转进附件
       application_id: editing.value ? undefined : convertingId.value || undefined,
+      // 入住成员与租户一起保存：uid 只是界面 key，提交给服务端前剥掉；
+      // 各行的搬离日期填了就按已搬离存，免得出现「已搬离却还在住」的矛盾记录。
+      members: formMembers.value.map(({ uid: _uid, ...row }) => ({
+        ...row,
+        name: (row.name || '').trim(),
+        relation: (row.relation || '').trim(),
+        phone: (row.phone || '').trim(),
+        id_card: (row.id_card || '').trim().toUpperCase(),
+        active: row.move_out_date ? false : row.active !== false,
+      })),
     }
     const res = editing.value
       ? await updateTenant(editing.value.id, payload)
       : await createTenant(payload)
     if (res.data?.code === 0) {
+      // 新租户表单里暂存的押金单照片：拿到新建租户 ID 后补传（编辑态组件已即时上传）。
+      const createdId = Number((res.data as { data?: { id?: number } })?.data?.id || 0)
+      const pendingDeposit = depositFiles.value
+      depositFiles.value = []
       showModal.value = false
       await load(1)
       // 标签候选取自租户列表，打完新标签要重取，筛选下拉才能立刻选到
       loadTagOptions()
+      if (!editing.value && createdId > 0 && pendingDeposit.length > 0) {
+        try {
+          const up = await uploadAttachments(createdId, pendingDeposit, '押金单')
+          if (up.data?.code === 0) {
+            toast(`已上传 ${pendingDeposit.length} 张押金单照片`)
+            await load(1)
+          } else {
+            toast(up.data?.message || '押金单照片上传失败，可在租户列表点「押金单」补传', 'error')
+          }
+        } catch {
+          toast('租户已登记，但押金单照片上传失败，可在租户列表点「押金单」补传', 'error')
+        }
+      }
       // 转入登记完成：刷新申请队列（徽标数同步减少）
       if (convertingId.value) {
         convertingId.value = 0
@@ -1089,6 +1402,32 @@ function removeContract(ct: Contract) {
   })
 }
 
+// ---------- 住户成员 ----------
+// 与费用无关的同住人：只登记身份信息（见 docs/08-租户与住户成员设计.md）。
+const showMembers = ref(false)
+const membersTenant = ref<Tenant | null>(null)
+
+function openMembers(t: Tenant) {
+  membersTenant.value = t
+  showMembers.value = true
+}
+
+// ---------- 押金单照片 ----------
+// 押金不能只录一个数字：实物押金单拍照留档（复用附件能力，标签=押金单），
+// 列表的押金列与编辑表单里都有入口。
+const showDepositPhotos = ref(false)
+const depositTenant = ref<Tenant | null>(null)
+
+function openDepositPhotos(t: Tenant) {
+  depositTenant.value = t
+  showDepositPhotos.value = true
+}
+
+function onDepositPhotosChanged() {
+  // 张数变了，刷新列表上的「押金单 n」
+  void load(page.value)
+}
+
 // ---------- 租户资料附件 ----------
 // 与合同存档分开的另一套留档：租房协议、汽车车牌、租客本人照片、身份证等。
 const showAttachments = ref(false)
@@ -1102,7 +1441,8 @@ const attachmentPreviewing = ref<TenantAttachment | null>(null)
 const attachmentPreviewUrl = ref('')
 
 // 常见用途，点选比手打快；也允许不选（留空）。
-const ATTACHMENT_LABELS = ['身份证', '汽车车牌', '租房协议', '租客照片', '其他']
+// 「押金单」同时是押金单照片专用入口的过滤标签（见 TenantDepositPhotos）。
+const ATTACHMENT_LABELS = ['身份证', '汽车车牌', '租房协议', '租客照片', '押金单', '其他']
 
 const attachmentTenantLabel = computed(() => {
   const t = attachmentTenant.value
@@ -1223,6 +1563,7 @@ onMounted(async () => {
   await Promise.all([loadRooms(), loadFeeItems()])
   loadTagOptions()
   void loadPendingCount()
+  void loadChangePendingCount()
   await load(1)
 })
 </script>

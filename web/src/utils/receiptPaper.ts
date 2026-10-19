@@ -63,11 +63,27 @@ export function isValidCustomPaper(p: unknown): p is CustomPaper {
   return ok(o.width) && ok(o.height) && typeof o.landscape === 'boolean'
 }
 
+// 卷纸尺寸为什么必须写死高度（2026-10-12 修，GitHub issue #3 现象③）：
+//
+// 原来这里写的是 `58mm auto` / `80mm auto`，但 **@page size 不接受 auto 作为
+// 尺寸值**（CSS 分页媒体只允许 auto 与具名纸张 A4/A5 组合，`<length> auto`
+// 是非法写法）。Chrome 遇到非法值会**整条丢弃 size 声明**，于是只剩组件里
+// 兜底的 `@page { size: A5 portrait }` —— 用户选「58mm 卷纸」实际按 A5 出纸，
+// 只换了字号，看起来"卷纸设置没生效"。实测（本机 Chrome headless printToPDF）：
+//   size:58mm auto    → MediaBox 216×279mm（A4/Letter 兜底，非 58mm）
+//   size:58mm 297mm   → MediaBox 58×297mm ✔
+//   size:58mm         → MediaBox 58×58mm（单值=正方形，截断）
+//
+// 卷纸是连续纸、长度不定，但 CSS 没有"高度自适应"的写法，只能给一个足够高的
+// 固定页高（取 A4 的 297mm：一张单据基本都能排在一页内），多余部分由打印机
+// 走纸切掉。这也是各类小票打印的通行做法。
+const ROLL_PAGE_HEIGHT = '297mm'
+
 const PAGE_RULES: Record<Exclude<ReceiptPaper, 'custom'>, { size: string; margin: string }> = {
   a5: { size: 'A5 portrait', margin: '12mm' },
   a4: { size: 'A4 portrait', margin: '12mm' },
-  roll80: { size: '80mm auto', margin: '4mm 3mm' },
-  roll58: { size: '58mm auto', margin: '3mm 2mm' },
+  roll80: { size: `80mm ${ROLL_PAGE_HEIGHT}`, margin: '4mm 3mm' },
+  roll58: { size: `58mm ${ROLL_PAGE_HEIGHT}`, margin: '3mm 2mm' },
 }
 
 // 自定义尺寸按"能塞多少内容"给页边距：纸张窄（≤100mm，卷纸量级）时收紧，
@@ -104,7 +120,11 @@ export function applyReceiptPaper(p: ReceiptPaper, custom?: CustomPaper) {
   .receipt { width: 100% !important; font-size: 12px !important; }
   .receipt-title { font-size: 14px !important; }
   .receipt-table, .receipt-table th, .receipt-table td { white-space: normal !important; padding: 2px 3px !important; }
-  .receipt-grid { column-gap: 0.5rem !important; }`
+  .receipt-grid { column-gap: 0.5rem !important; }
+  /* 基本信息里的值默认是 truncate（单行省略号），卷纸只有 58mm，
+     "季付（2026-07 ~ 2026-09，共 3 个月）" 会被截成"季付（202,"。
+     窄纸一律放开截断改为换行，宁可多占一行也不能让对账关键信息少字。 */
+  .receipt-value, .receipt-label { white-space: normal !important; overflow: visible !important; text-overflow: clip !important; }`
   }
   css += ' }'
 

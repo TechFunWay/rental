@@ -17,8 +17,9 @@
         <DateField v-model="periodTo" type="month" class="!py-2 !w-[140px]" placeholder="账期结束" @change="load(1)" />
         <select v-model="billType" class="input-field !py-2 !w-auto" @change="load(1)">
           <option value="">全部类型</option>
-          <option value="monthly">月账单</option>
-          <option value="quarterly">季度账单</option>
+          <!-- 账单类型 = 开票时快照的缴费周期（后端 bill_type 筛选接受四个周期值）；
+               选项与文案都从 utils/cycle.ts 取，避免再写死「月账单/季度账单」两项 -->
+          <option v-for="o in payCycleOptions" :key="o.value" :value="o.value">{{ billTypeLabel(o.value) }}</option>
         </select>
         <select v-model="status" class="input-field !py-2 !w-auto" @change="load(1)">
           <option value="">全部状态</option>
@@ -84,7 +85,7 @@
             <tr v-for="b in bills" :key="b.id" class="hover:bg-muted/30 transition-colors" :class="isArrears(b) ? 'bg-rose-500/[0.03]' : ''">
               <td class="py-2.5 px-3 text-muted-foreground tabular-nums whitespace-nowrap">
                 <span :title="coveredPeriodText(b.period, b.pay_cycle)">{{ b.period }}</span>
-                <span v-if="b.pay_cycle === 'quarterly'" class="badge ml-1 !px-1.5 !py-0.5 text-[11px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" :title="coveredPeriodText(b.period, b.pay_cycle)">季付</span>
+                <span v-if="cycleMonths(b.pay_cycle) > 1" class="badge shrink-0 ml-1 !px-1.5 !py-0.5 text-[11px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" :title="cycleBadgeTitle(b.pay_cycle, b.period)">{{ cycleLabel(b.pay_cycle) }}</span>
               </td>
               <td class="py-2.5 px-3 font-semibold text-foreground whitespace-nowrap">{{ b.room_no }}</td>
               <td class="py-2.5 px-3 text-foreground whitespace-nowrap max-w-[120px] truncate" :title="b.tenant_name">{{ b.tenant_name || '—' }}</td>
@@ -101,7 +102,15 @@
                 <span v-if="b.deposit_fee" class="text-amber-600 dark:text-amber-300 font-semibold">{{ fmtMoney(b.deposit_fee) }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
-              <td class="py-2.5 px-3 text-right tabular-nums font-bold text-foreground">{{ fmtMoney(b.total_amount) }}</td>
+              <!-- 应缴 = 本期费用 + 上期结转。开了结转的台账里房东关心的是
+                   「这户该交多少」，所以这一列显示 payable；有结转时把差额标出来，
+                   否则用户会觉得「本期各项加起来怎么对不上这个数」。 -->
+              <td class="py-2.5 px-3 text-right tabular-nums font-bold text-foreground">
+                {{ fmtMoney(payableOf(b)) }}
+                <div v-if="carryInOf(b)" class="text-[10px] font-normal text-amber-600 dark:text-amber-300 whitespace-nowrap">
+                  含上期结转 {{ carryInOf(b) > 0 ? '+' : '' }}{{ fmtMoney(carryInOf(b)) }}
+                </div>
+              </td>
               <td class="py-2.5 px-3 text-right tabular-nums text-emerald-600 dark:text-emerald-400">{{ fmtMoney(b.paid_amount) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums" :class="isArrears(b) ? 'text-rose-500 font-semibold' : ''">{{ fmtMoney(arrearsOf(b)) }}</td>
               <td class="py-2.5 px-3">
@@ -128,7 +137,7 @@
               <div class="flex items-center gap-1.5">
                 <span class="text-sm font-semibold text-foreground">{{ b.room_no }}</span>
                 <span class="text-[11px] text-muted-foreground tabular-nums">{{ coveredPeriodText(b.period, b.pay_cycle) }}</span>
-                <span v-if="b.pay_cycle === 'quarterly'" class="badge !px-1.5 !py-0.5 text-[11px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-300">季付</span>
+                <span v-if="cycleMonths(b.pay_cycle) > 1" class="badge shrink-0 !px-1.5 !py-0.5 text-[11px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" :title="cycleBadgeTitle(b.pay_cycle, b.period)">{{ cycleLabel(b.pay_cycle) }}</span>
                 <span class="text-[11px] text-muted-foreground truncate">{{ b.tenant_name || '—' }}</span>
               </div>
             </div>
@@ -144,7 +153,10 @@
 
           <div class="flex items-end justify-between gap-2">
             <div class="text-[11px] text-muted-foreground">
-              应付合计 <span class="text-sm font-bold text-foreground tabular-nums">{{ fmtMoney(b.total_amount) }}</span> 元
+              应付合计 <span class="text-sm font-bold text-foreground tabular-nums">{{ fmtMoney(payableOf(b)) }}</span> 元
+              <div v-if="carryInOf(b)" class="text-[10px] text-amber-600 dark:text-amber-300 tabular-nums">
+                含上期结转 {{ carryInOf(b) > 0 ? '+' : '' }}{{ fmtMoney(carryInOf(b)) }} 元
+              </div>
             </div>
             <div class="text-[11px] text-right space-y-0">
               <div class="text-emerald-600 dark:text-emerald-400 tabular-nums">已收 {{ fmtMoney(b.paid_amount) }} 元</div>
@@ -174,8 +186,12 @@
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">账期</label>
             <div class="flex items-center gap-2">
               <input v-model="editForm.period" class="input-field tabular-nums flex-1 min-w-0" placeholder="2026-09" />
-              <span v-if="editForm.pay_cycle === 'quarterly'" class="badge shrink-0 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300" title="季付账单覆盖 3 个月，租金与包月费用按 3 个月计">
-                季付 · {{ coveredPeriodText(editForm.period, editForm.pay_cycle) }}
+              <span
+                v-if="cycleMonths(editForm.pay_cycle) > 1"
+                class="badge shrink-0 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300"
+                :title="`${cycleLabel(editForm.pay_cycle)}账单覆盖 ${cycleMonths(editForm.pay_cycle)} 个月，租金与包月费用按 ${cycleMonths(editForm.pay_cycle)} 个月计`"
+              >
+                {{ cycleLabel(editForm.pay_cycle) }} · {{ coveredPeriodText(editForm.period, editForm.pay_cycle) }}
               </span>
             </div>
           </div>
@@ -186,6 +202,9 @@
         </div>
         <p v-if="editExcludedNames" class="text-[11px] text-muted-foreground bg-muted/60 rounded-lg px-2.5 py-2">
           本租户不参与：{{ editExcludedNames }}。这些项目按 0 结算，相关输入已停用；如需调整请到「租户管理」修改收费项目勾选（历史账单不受影响）。
+          <template v-if="editDisabledNames">
+            <br />台账已停用：{{ editDisabledNames }}（在「账单 → 收费项目」里可重新启用）。
+          </template>
         </p>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">租金（元）</label>
@@ -207,7 +226,9 @@
                 费用预估 <strong class="text-foreground">{{ fmtMoney(feeExcluded('water') ? 0 : waterPreview(editForm)) }}</strong> 元
               </span>
             </div>
-            <p v-if="feeExcluded('water')" class="text-[11px] text-muted-foreground">本租户不参与水费收费，出账费用为 0（读数仍会记录）。</p>
+            <p v-if="feeExcluded('water')" class="text-[11px] text-muted-foreground">
+              {{ feeDisabledByLedger('water') ? '「水费」已在收费项目里停用' : '本租户不参与水费收费' }}，出账费用为 0（读数仍会记录）。
+            </p>
             <template v-else>
             <p v-if="editRoomBilling" class="text-[11px] text-muted-foreground mb-1.5">
               该房按租户设置：{{ editRoomBilling }}（切换计费方式会按对应口径的配置金额填入，仍可手改）
@@ -239,7 +260,9 @@
                 费用预估 <strong class="text-foreground">{{ fmtMoney(feeExcluded(m.feeKey) ? 0 : previewFee(editForm[m.lastKey], editForm[m.nowKey], editForm[m.priceKey])) }}</strong> 元
               </span>
             </div>
-            <p v-if="feeExcluded(m.feeKey)" class="text-[11px] text-muted-foreground">本租户不参与{{ m.label }}收费，出账费用为 0（读数仍会记录）。</p>
+            <p v-if="feeExcluded(m.feeKey)" class="text-[11px] text-muted-foreground">
+              {{ feeDisabledByLedger(m.feeKey) ? `「${m.label}」已在收费项目里停用` : `本租户不参与${m.label}收费` }}，出账费用为 0（读数仍会记录）。
+            </p>
             <div v-else class="grid grid-cols-2 sm:grid-cols-3 gap-2">
               <label class="block">
                 <span class="text-[11px] text-muted-foreground">上月读数（{{ m.unit }}）</span>
@@ -388,8 +411,9 @@
       </div>
     </Modal>
 
-    <!-- 单据 -->
-    <Modal v-model="showReceipt" title="收费单据">
+    <!-- 单据：wide —— 单据是六列明细表，默认 512px 的弹窗会把最右侧的
+         「金额 / 缴费状态」裁掉（issue #3 现象①），这里放宽到 4xl。 -->
+    <Modal v-model="showReceipt" title="收费单据" wide>
       <div v-if="receiptBill">
         <RentalReceipt :bill="receiptBill" :property="receiptProperty" :items="receiptItems" />
         <div class="flex flex-wrap items-center justify-end gap-3 mt-4 print:hidden">
@@ -494,10 +518,11 @@ import {
 import {
   defaultBilling, fetchBillingDefaults, meterUnit, roomBillingSummary, type BillingDefaults,
 } from '../utils/billing'
-import { coveredPeriodText, cycleMonths } from '../utils/cycle'
+import { billTypeLabel, coveredPeriodText, cycleLabel, cycleMonths, payCycleOptions, type PayCycle } from '../utils/cycle'
 import {
-  arrearsOf, createBill, currentPeriod, deleteBill, downloadTemplate, exportBills, fmtMoney,
-  getAllRooms, getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears, payBill, updateBill,
+  arrearsOf, carryInOf, createBill, currentPeriod, deleteBill, downloadTemplate, exportBills, fmtMoney,
+  getAllRooms, getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears,
+  payableOf, payBill, updateBill,
   type Bill, type BillItemDetail, type FeeItem, type ImportResult, type PropertyMeta, type ReceiptEntry, type RoomView,
 } from '../api/rental'
 
@@ -513,7 +538,7 @@ const pageSize = 20
 const loading = ref(false)
 const periodFrom = ref('')
 const periodTo = ref('')
-const billType = ref<'' | 'monthly' | 'quarterly'>('')
+const billType = ref<'' | PayCycle>('')
 const status = ref('')
 // 小区/村组 + 房源下拉：房源选项随所选小区收窄（小区条件由服务端按房源反查）
 const filterCommunity = ref('')
@@ -575,7 +600,10 @@ const pageSum = computed(() => {
   let t = 0
   let a = 0
   for (const b of bills.value) {
-    t += b.total_amount
+    // 应收与欠缴必须用**同一口径**（都含上期结转），否则会算出
+    // 「欠缴 4900 > 应收 3600」这种不可能的显示——欠的钱不可能比应收还多。
+    // 原先这里 t 用 total_amount、a 用 arrearsOf（基于 payable），两者基准不同。
+    t += payableOf(b)
     a += arrearsOf(b)
   }
   return { total: t, arrears: a }
@@ -583,10 +611,15 @@ const pageSum = computed(() => {
 
 // 手机端筛选摘要行：当前月份 · 状态 · 关键词，以及非默认条件数（徽标）
 const billsStatusText: Record<string, string> = { arrears: '欠缴（含部分）', unpaid: '未缴纳', partial: '部分已缴', paid: '已缴清' }
+// 筛选摘要里的账单类型名：直接复用 cycle.ts 的 billTypeLabel（月/季/半年/年账单），
+// 与筛选下拉、后端 bill_type 取值同源，新增周期时不会再出现摘要与下拉对不上。
+const billsTypeText = computed<Record<string, string>>(() =>
+  Object.fromEntries(payCycleOptions.map((o) => [o.value, billTypeLabel(o.value)])),
+)
 const billsFilterSummary = computed(() =>
   [
     periodFrom.value && periodTo.value ? `${periodFrom.value} ~ ${periodTo.value}` : periodFrom.value || periodTo.value || '全部月份',
-    billsTypeText[billType.value] || null,
+    billsTypeText.value[billType.value] || null,
     billsStatusText[status.value] || '全部状态',
     filterCommunity.value || null,
     filterRoomId.value ? (allRooms.value.find((r) => r.id === filterRoomId.value)?.room_no || '指定房源') : null,
@@ -599,9 +632,16 @@ const billsFilterCount = computed(() =>
   (periodFrom.value || periodTo.value ? 1 : 0) +
   (billType.value ? 1 : 0) + (status.value ? 1 : 0) + (keyword.value ? 1 : 0) +
   (filterCommunity.value ? 1 : 0) + (filterRoomId.value ? 1 : 0))
-const billsTypeText: Record<string, string> = { monthly: '月账单', quarterly: '季度账单' }
 
 const filterRef = ref<InstanceType<typeof FilterPanel> | null>(null)
+
+// 周期角标的 title：显示文字只放周期名（季付/半年付/年付），所以 title 必须补上
+// 「周期只管固定费、本单水电仍按月」这层说明——否则年付房在非到期月出的水电
+// 账单带着「年付」角标，容易被误读成"这月收了 12 个月租金"。
+function cycleBadgeTitle(cycle: string | undefined | null, period: string): string {
+  const months = cycleMonths(cycle)
+  return `${cycleLabel(cycle)}：固定费每 ${months} 个月收一次，本单水电按月 · 覆盖 ${coveredPeriodText(period, cycle)}`
+}
 
 function applyFilters() {
   load(1)
@@ -622,8 +662,14 @@ function previewFee(last: number, now: number, price: number): number {
 
 // ---------- 租户收费项目排除（账单快照 excluded_fees） ----------
 
+// 台账停用的项目（disabled_fees 快照）：与租户排除项同口径——本期不计费。
+// 停用只影响新账单；老账单快照里没有这一项，自然照旧计费。
+function feeDisabledByLedger(key: string): boolean {
+  return (editForm.value?.disabled_fees ?? []).includes(key)
+}
+
 function feeExcluded(key: string): boolean {
-  return (editForm.value?.excluded_fees ?? []).includes(key)
+  return (editForm.value?.excluded_fees ?? []).includes(key) || feeDisabledByLedger(key)
 }
 
 // 排除项目的名称列表（编辑表单顶部提示用）
@@ -632,8 +678,16 @@ const editExcludedNames = computed(() => {
   return keys.map((k) => feeItems.value.find((f) => f.key === k)?.name ?? k).join('、')
 })
 
+// 台账停用项目的名称列表（与上面的租户排除项分开提示：一个是「这户不收」，
+// 一个是「整个台账不收」，房东看到的处理方式不同）
+const editDisabledNames = computed(() => {
+  const keys = editForm.value?.disabled_fees ?? []
+  return keys.map((k) => feeItems.value.find((f) => f.key === k)?.name ?? k).join('、')
+})
+
 // waterPreview 水费预估：包月取每月固定金额（water_price 存的就是元/月）×
-// 账单覆盖月数（季付 ×3），按吨按用量 × 单价——与服务端 Bill.waterFee 同一口径。
+// 账单覆盖月数（季付 ×3 / 半年付 ×6 / 年付 ×12），按吨按用量 × 单价
+// ——与服务端 Bill.waterFee 同一口径。
 function waterPreview(f: Pick<Bill, 'water_mode' | 'water_last' | 'water_now' | 'water_price' | 'pay_cycle'> | null): number {
   if (!f) return 0
   if (f.water_mode === 'monthly') {
@@ -872,6 +926,9 @@ async function openReceipt(b: Bill) {
     receiptItems.value = res.data.data.items || []
     receiptProperty.value = res.data.data.property
     showReceipt.value = true
+    // 打开弹窗就落一次 @page，这样用浏览器菜单「打印 / 另存 PDF」（Ctrl+P）
+    // 走的是同一张纸；此前只在点应用按钮时写入，直接 Ctrl+P 会退回兜底的 A5。
+    applyReceiptPaper(receiptPaper.value, customPaper.value)
   }
 }
 

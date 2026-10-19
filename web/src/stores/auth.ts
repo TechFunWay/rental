@@ -17,6 +17,12 @@ export const useAuthStore = defineStore('auth', () => {
   // required 控制是否必填。默认都开（管理员要能看出谁是谁）。
   const registerPhoneEnabled = ref(true)
   const registerPhoneRequired = ref(true)
+  /**
+   * 是否开放租客登录（v0.6.10，系统配置 rental_tenant_portal_enabled）。
+   * 关闭后注册页不显示「我是租客」，租户注册也会被服务端拒绝。
+   * 默认 true：与后端 ConfigDef 的默认值保持一致，避免首屏闪一下选项再消失。
+   */
+  const tenantPortalEnabled = ref(true)
   const setupRequired = ref(false)
   // 站名兜底值：服务端 /api/configs/public 返回前的首屏用它，必须是本应用的中文名，
   // 否则侧栏与浏览器标题会先闪出框架默认的英文名。
@@ -52,6 +58,20 @@ export const useAuthStore = defineStore('auth', () => {
   // 等价于原来的 !!token && !!user。
   const isAuthenticated = computed(() => !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
+  /**
+   * 租户（v0.6.10）：只读门户角色，不是任何台账的成员。
+   * 路由守卫据此把租户与出租人分流到两套完全不同的界面：
+   *   - 租户 → /portal/**
+   *   - 其余 → /admin/**
+   * 与服务端 role 取值同一套词（见后端 user.RoleTenant）。
+   */
+  const isTenant = computed(() => user.value?.role === 'tenant')
+  /**
+   * 出租人：能进业务区的账号。用「不是租户」判定而不是「role === 'user'」——
+   * 管理员也走业务区（业务数据上无特权，但界面是同一套），写死 user 会把管理员
+   * 错误地排除在业务界面之外。
+   */
+  const isLandlord = computed(() => !!user.value && !isTenant.value)
 
   function clearSession() {
     token.value = ''
@@ -74,6 +94,9 @@ export const useAuthStore = defineStore('auth', () => {
           const phoneEnabled = configsRes.data.data?.register_phone_enabled !== 'false'
           registerPhoneEnabled.value = phoneEnabled
           registerPhoneRequired.value = phoneEnabled && configsRes.data.data?.register_phone_required !== 'false'
+          // 租客门户开关（默认开）。注意不能写成 `=== 'true'`：服务端只在
+          // 显式配置过时才回这个键，缺省时 undefined，那样会把默认打开算成关闭。
+          tenantPortalEnabled.value = configsRes.data.data?.rental_tenant_portal_enabled !== 'false'
           if (configsRes.data.data?.site_title) {
             siteTitle.value = configsRes.data.data.site_title
           }
@@ -142,7 +165,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   // restorePendingSession 在 checkAuth 未认下会话时，用待审核白名单接口
   // 判断「是不是一个仍然有效的待审核会话」。返回 true 表示已恢复登录态
-  // （user 里带 status === 2，路由守卫据此把人送到 /pending）。
+  // （user 里带 status === 2，路由守卫据此把人送到 /pending 或 /portal/pending）。
   //
   // 网关域上不带应用令牌时不该走这条路（那里的身份由服务端从网关注入头解析），
   // 所以只在确实有本地令牌时尝试。
@@ -163,7 +186,13 @@ export const useAuthStore = defineStore('auth', () => {
           username = String(meRes.data.data?.username || '')
         }
       } catch {}
-      user.value = { id, username, role: 'user', status: d.status }
+      // **角色必须取服务端的值，不能写死 'user'**：待关联的租户同样是
+      // status === 2，若这里恢复成 user，路由守卫会把他送去房东的「等待
+      // 管理员审核」页（/pending）而不是租户的「等待房东关联」页
+      // （/portal/pending），且他之后进门户会被 requiresLandlord 挡下
+      // ——2026-10-13 实现时定位到的坑，所以 /users/me/approval 也补了 role。
+      const role = String(d.role || 'user')
+      user.value = { id, username, role, status: d.status }
       sessionSource.value = 'app'
       return true
     } catch {
@@ -185,16 +214,25 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = newUser
   }
 
-  // 退出登录（用户点击）。必须先让服务端记下「这位用户主动登出了」，再清本地：
-  // 网关域上服务端每个请求都能从 X-Trim-Userid 认出应用账号，只清前端的话
-  // 下一个请求就把登录态认回来了，用户看到的正是「退不出去」。请求失败也要
-  // 继续本地登出——宁可本地先退出、下次刷新由服务端再纠正，也不能把用户卡在
-  // 已登录界面里。
+  // 退出登录（用户点击）。
+  //
+  // **顺序是关键：先同步清本地，再请求服务端落抑制标记。**
+  // 反过来（先等服务端响应再清本地）会留出一个中间态：本地 user 还在，路由守卫
+  // 仍按「已登录」判定，各页面里监听登录态的副作用（如 MainLayout 的台账回落
+  // replace）会抢先导航，把紧随其后的「回登录页」跳转取消掉——网络慢一点
+  // （飞牛网关域尤其明显）就会卡在业务页里、只看到用户名变空、菜单还在，也就是
+  // 用户报的「点退出没退出去，再点一次才回登录页」（2026-10-14 定位）。
+  // 清本地是同步的，跳转发起时 isAuthenticated 必为 false，判定不再依赖时序。
+  //
+  // 服务端那一步仍然要做：网关域上它才是「别再自动认人」的持久标记；直连端口
+  // 上它换来一条审计记录。令牌在清本地前抓下来显式传给接口，失败也不回滚本地
+  // 登出——宁可本地先退出、下次刷新由服务端再纠正，也不能把用户卡在已登录界面。
   async function endSession() {
-    try {
-      await apiLogout()
-    } catch {}
+    const bearer = onFnOSGatewayOrigin() ? '' : token.value
     logout()
+    try {
+      await apiLogout(bearer)
+    } catch {}
   }
 
   // 只清本地登录态（401 拦截器等同步路径用）。用户主动点退出请用 endSession()：
@@ -237,5 +275,5 @@ export const useAuthStore = defineStore('auth', () => {
       .catch(() => {})
   }
 
-  return { token, user, requireLogin, allowRegister, registerPhoneEnabled, registerPhoneRequired, setupRequired, siteTitle, hasSecurityQuestions, securityPromptDismissed, sessionSource, isAuthenticated, isAdmin, isPendingUser, init, resetInit, setToken, setUser, endSession, logout, checkSetupRequired, dismissSecurityPrompt, refreshSecurityQuestions }
+  return { token, user, requireLogin, allowRegister, registerPhoneEnabled, registerPhoneRequired, tenantPortalEnabled, setupRequired, siteTitle, hasSecurityQuestions, securityPromptDismissed, sessionSource, isAuthenticated, isAdmin, isTenant, isLandlord, isPendingUser, init, resetInit, setToken, setUser, endSession, logout, checkSetupRequired, dismissSecurityPrompt, refreshSecurityQuestions }
 })

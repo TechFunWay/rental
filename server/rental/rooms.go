@@ -27,6 +27,8 @@ type roomView struct {
 	HasBills       bool          `json:"has_bills"`
 	LastBillPeriod string        `json:"last_bill_period"`
 	Billing        billingView   `json:"billing"`
+	// PhotoCount 房源照片张数（列表页显示入口，详情弹窗里再按房间取全量）。
+	PhotoCount int64 `gorm:"-" json:"photo_count"`
 }
 
 // billingView 是房间生效计费设置的出参形态。两个"该方式下的金额"都给出，
@@ -60,6 +62,12 @@ type roomRequest struct {
 	InitialGas           float64  `json:"initial_gas"`
 	Tags                 []string `json:"tags"`
 	Notes                string   `json:"notes"`
+	// 房东姓名与联系电话（选填）
+	LandlordName  string `json:"landlord_name"`
+	LandlordPhone string `json:"landlord_phone"`
+	// 介绍费（见 referral.go）：由 normalizeReferral 按平台策略归一化后落库
+	ReferralMode  string  `json:"referral_mode"`
+	ReferralValue float64 `json:"referral_value"`
 }
 
 func setupRoomRoutes(api *gin.RouterGroup, db *gorm.DB) {
@@ -140,7 +148,36 @@ func handleRoomList(db *gorm.DB) gin.HandlerFunc {
 		for _, r := range rooms {
 			items = append(items, buildRoomView(db, r))
 		}
+		fillRoomPhotoCounts(db, c, items)
 		response.SuccessPage(c, items, total, page, pageSize)
+	}
+}
+
+// fillRoomPhotoCounts 一次分组查询补上本页每间房的照片张数。
+// 放在列表层而不是 buildRoomView 里：后者是逐房间调用（还要查租户/账单/计费），
+// 再按房间 count 一次就是典型的 N+1；列表页只需要「有没有照片」这个提示。
+func fillRoomPhotoCounts(db *gorm.DB, c *gin.Context, items []roomView) {
+	if len(items) == 0 {
+		return
+	}
+	roomIDs := make([]uint, 0, len(items))
+	for i := range items {
+		roomIDs = append(roomIDs, items[i].ID)
+	}
+	type photoCount struct {
+		RoomID uint
+		N      int64
+	}
+	counts := make([]photoCount, 0)
+	pq, _ := scopeLedger(db.Model(&RoomPhoto{}), c)
+	pq.Select("room_id, count(*) AS n").Where("room_id IN ?", roomIDs).
+		Group("room_id").Scan(&counts)
+	byRoom := map[uint]int64{}
+	for _, pc := range counts {
+		byRoom[pc.RoomID] = pc.N
+	}
+	for i := range items {
+		items[i].PhotoCount = byRoom[items[i].ID]
 	}
 }
 
@@ -186,6 +223,11 @@ func handleRoomCreate(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorBadRequest(c, msg)
 			return
 		}
+		referralMode, referralValue, refMsg := normalizeReferral(db, req.ReferralMode, req.ReferralValue, req.DefaultRent)
+		if refMsg != "" {
+			response.ErrorBadRequest(c, refMsg)
+			return
+		}
 		req.RoomNo = strings.TrimSpace(req.RoomNo)
 
 		// 写入目标台账：由 resolveLedger 依 ?ledger_id 解析（未解析到则写路由的
@@ -208,6 +250,8 @@ func handleRoomCreate(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		// UserID 是「录入人」戳（谁创建的房源），只作溯源；数据归属看 LedgerID。
+		// 介绍费按平台策略归一化（off 时忽略、min 时校验下限），再统一落库
+		req.ReferralMode, req.ReferralValue = referralMode, referralValue
 		room := Room{
 			UserID: currentUserID(c), LedgerID: writeLedger,
 			Community: strings.TrimSpace(req.Community), RoomNo: req.RoomNo,
@@ -252,6 +296,12 @@ func handleRoomUpdate(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorBadRequest(c, msg)
 			return
 		}
+		referralMode, referralValue, refMsg := normalizeReferral(db, req.ReferralMode, req.ReferralValue, req.DefaultRent)
+		if refMsg != "" {
+			response.ErrorBadRequest(c, refMsg)
+			return
+		}
+		req.ReferralMode, req.ReferralValue = referralMode, referralValue
 		req.RoomNo = strings.TrimSpace(req.RoomNo)
 
 		room.Community = strings.TrimSpace(req.Community)
@@ -303,6 +353,11 @@ func handleRoomDelete(db *gorm.DB) gin.HandlerFunc {
 			response.ErrorInternal(c, "删除房源失败")
 			return
 		}
+		// 房源删除时顺带清理其抄表照片：照片按「房间 + 账期」归属，房间没了就
+		// 再也看不到、也删不掉，只留在盘上就是孤儿文件。
+		deleteRoomMeterPhotos(db, room.ID, room.LedgerID)
+		// 房源照片同理（按房间归属）。
+		deleteRoomPhotos(db, room.ID, room.LedgerID)
 		// 房源删除时顺带清理其历史租户登记（账单不存在才会走到这里）；
 		// 同样限定为本房源的所属台账。
 		del := db.Where("room_id = ?", room.ID)
@@ -321,6 +376,7 @@ func handleRoomDelete(db *gorm.DB) gin.HandlerFunc {
 		for _, tid := range histTenantIDs {
 			deleteTenantContracts(db, tid, room.LedgerID)
 			deleteTenantAttachments(db, tid, room.LedgerID)
+			deleteTenantMembers(db, tid, room.LedgerID)
 		}
 		del.Delete(&Tenant{})
 		response.Success(c, nil)
@@ -340,10 +396,22 @@ func validateRoomRequest(req *roomRequest) string {
 	if req.InitialWater < 0 || req.InitialElec < 0 || req.InitialGas < 0 {
 		return "抄表底数不能为负数"
 	}
+	// 房东姓名与电话都是选填，但填了就要像样：姓名不超 30 字、电话走与登记链接
+	// 同一套宽松规则（允许座机与分隔符），避免存进打不通的号码。
+	if len([]rune(strings.TrimSpace(req.LandlordName))) > 30 {
+		return "房东姓名不能超过 30 个字"
+	}
+	if phone := strings.TrimSpace(req.LandlordPhone); phone != "" && !applyPhoneRe.MatchString(phone) {
+		return "房东联系电话格式不正确"
+	}
 	return ""
 }
 
 func applyRoomRequest(room *Room, req *roomRequest) {
+	// 介绍费由调用方 normalizeReferral 归一化后塞进 req（见 handleRoomCreate/Update），
+	// 所以这里直接落库；未归一化时 req 里是原值，由调用方保证。
+	room.ReferralMode = req.ReferralMode
+	room.ReferralValue = req.ReferralValue
 	room.Building = req.Building
 	room.Unit = req.Unit
 	room.Floor = req.Floor
@@ -356,6 +424,8 @@ func applyRoomRequest(room *Room, req *roomRequest) {
 	room.InitialElec = req.InitialElec
 	room.InitialGas = req.InitialGas
 	room.Tags = normalizeTags(req.Tags)
+	room.LandlordName = strings.TrimSpace(req.LandlordName)
+	room.LandlordPhone = strings.TrimSpace(req.LandlordPhone)
 	room.Notes = req.Notes
 	// 房源上的水费/缴费字段是 0.2.2 及以前的遗留列，此处刻意不动：
 	// 编辑房源不会覆盖或清掉老数据，迁移已把有效值搬到租户上。

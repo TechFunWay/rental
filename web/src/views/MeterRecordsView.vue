@@ -1,6 +1,6 @@
 <template>
   <div class="page-container animate-fade-in">
-    <PageHeader title="抄表记录" description="每月水/电/燃气表读数台账，独立于账单：空置房、季付房的中间月份也能记">
+    <PageHeader title="抄表记录" description="每月水/电/燃气表读数台账，独立于账单：空置房、非到期月的中间月份也能记；已开票的行会带出本期账单金额">
       <template #actions>
         <!-- 录入读数按「抄表」模块的操作档开放；抄表开票生成账单，要账单操作档 -->
         <template v-if="ledgerStore.canEdit('meters')">
@@ -45,6 +45,8 @@
                 <th class="py-3 px-4 font-medium">水表（读数 · 用量，吨）</th>
                 <th class="py-3 px-4 font-medium">电表（读数 · 用量，度）</th>
                 <th class="py-3 px-4 font-medium">燃气表（读数 · 用量，方）</th>
+                <th class="py-3 px-4 font-medium">本期账单</th>
+                <th class="py-3 px-4 font-medium">表盘照片</th>
                 <th class="py-3 px-4 font-medium">备注</th>
                 <th class="py-3 px-4 font-medium text-right">操作</th>
               </tr>
@@ -61,6 +63,28 @@
                 </td>
                 <td class="py-2.5 px-4 tabular-nums whitespace-nowrap">
                   {{ fmtRead(r.gas) }} 方 <span class="text-xs" :class="usageClass(r, r.gas, r.prev_gas)">· 用 {{ fmtRead(r.usage_gas) }} 方</span>
+                </td>
+                <!-- 本期账单：开票后带出应收金额，自定义收费项目单列小字，
+                     让新增的自定义项目在抄表记录里也看得见（2026-10-17 粉丝反馈） -->
+                <td class="py-2.5 px-4 tabular-nums whitespace-nowrap">
+                  <template v-if="r.bill_id">
+                    <div class="text-foreground">￥{{ fmtRead(r.bill_total) }}</div>
+                    <div v-if="r.bill_extra > 0" class="text-[11px] text-brand-600 dark:text-brand-300">含其他 ￥{{ fmtRead(r.bill_extra) }}</div>
+                  </template>
+                  <span v-else class="text-xs text-muted-foreground">未开票</span>
+                </td>
+                <td class="py-2.5 px-4 whitespace-nowrap">
+                  <button
+                    v-if="r.photo_count"
+                    class="text-brand-600 dark:text-brand-300 hover:underline"
+                    @click="openPhotos(r)"
+                  >📷 {{ r.photo_count }}</button>
+                  <button
+                    v-else-if="canEditMeters"
+                    class="text-muted-foreground hover:text-foreground hover:underline"
+                    @click="openPhotos(r)"
+                  >+ 照片</button>
+                  <span v-else class="text-muted-foreground">—</span>
                 </td>
                 <td class="py-2.5 px-4 text-muted-foreground max-w-[200px] truncate" :title="r.note">{{ r.note || '—' }}</td>
                 <td class="py-2.5 px-4 text-right whitespace-nowrap">
@@ -89,8 +113,22 @@
               <div>水 {{ fmtRead(r.water) }} 吨 <span :class="usageClass(r, r.water, r.prev_water)">· 用 {{ fmtRead(r.usage_water) }} 吨</span></div>
               <div>电 {{ fmtRead(r.elec) }} 度 <span :class="usageClass(r, r.elec, r.prev_elec)">· 用 {{ fmtRead(r.usage_elec) }} 度</span></div>
               <div>燃气 {{ fmtRead(r.gas) }} 方 <span :class="usageClass(r, r.gas, r.prev_gas)">· 用 {{ fmtRead(r.usage_gas) }} 方</span></div>
+              <div v-if="r.bill_id" class="text-brand-600 dark:text-brand-300">
+                账单 ￥{{ fmtRead(r.bill_total) }}<span v-if="r.bill_extra > 0"> · 含其他 ￥{{ fmtRead(r.bill_extra) }}</span>
+              </div>
+              <div v-else class="text-muted-foreground">未开票</div>
               <div v-if="r.note" class="truncate" :title="r.note">备注 {{ r.note }}</div>
             </div>
+            <button
+              v-if="r.photo_count"
+              class="text-[11px] text-brand-600 dark:text-brand-300"
+              @click="openPhotos(r)"
+            >📷 表盘照片 {{ r.photo_count }} 张</button>
+            <button
+              v-else-if="canEditMeters"
+              class="text-[11px] text-muted-foreground"
+              @click="openPhotos(r)"
+            >＋ 添加表盘照片</button>
           </div>
         </div>
       </template>
@@ -122,6 +160,22 @@
         <p v-if="readingBackwards" class="text-xs text-amber-600 dark:text-amber-300">
           有读数小于上期，如为换表请忽略；用量将按 0 计。
         </p>
+        <!-- 表盘照片（选填）：现场拍照留档，日后和读数互相印证 -->
+        <div class="space-y-2 rounded-xl border border-border p-2.5 sm:p-3">
+          <div>
+            <span class="text-xs font-semibold text-muted-foreground">表盘照片（选填）</span>
+            <p class="text-[11px] text-muted-foreground mt-0.5">拍下表盘读数留档，核对时有据可依；单张 ≤20MB，每张表最多 6 张。</p>
+          </div>
+          <MeterPhotoPicker
+            v-for="m in photoMeters"
+            :key="`${form.room_id}-${form.period}-${m.meter}`"
+            :room-id="form.room_id"
+            :period="form.period"
+            :meter="m.meter"
+            :label="m.label"
+            :can-edit="canEditMeters"
+          />
+        </div>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">备注</label>
           <input v-model="form.note" class="input-field" placeholder="选填，如换表/上门抄表" />
@@ -138,6 +192,28 @@
     <!-- 抄表开票：录本月读数并建账/开票（与账单列表共用弹窗）；「录入读数」只记台账不建账 -->
     <MeterReadingModal v-model="showMetering" @saved="load(page)" />
 
+    <!-- 表盘照片：按房 + 账期查看/补拍，列表里的「照片 n」入口打开它 -->
+    <Modal v-model="showPhotos" :title="photoTitle">
+      <div class="space-y-3">
+        <p class="text-xs text-muted-foreground">
+          表盘现场照片按「房间 + 账期」留档，与账单是否已开无关；点缩略图可看大图。
+        </p>
+        <MeterPhotoPicker
+          v-for="m in photoMeters"
+          :key="`${photoRoom.room_id}-${photoRoom.period}-${m.meter}`"
+          :room-id="photoRoom.room_id"
+          :period="photoRoom.period"
+          :meter="m.meter"
+          :label="m.label"
+          :can-edit="canEditMeters"
+          @changed="load(page)"
+        />
+        <div class="flex pt-1">
+          <button class="btn-ghost flex-1" @click="showPhotos = false">关闭</button>
+        </div>
+      </div>
+    </Modal>
+
     <ConfirmDialog
       v-model="confirmState.show"
       title="删除抄表记录"
@@ -153,6 +229,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import DateField from '../components/DateField.vue'
 import FilterPanel from '../components/FilterPanel.vue'
+import MeterPhotoPicker from '../components/MeterPhotoPicker.vue'
 import MeterReadingModal from '../components/MeterReadingModal.vue'
 import Modal from '../components/Modal.vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -165,6 +242,28 @@ import {
 } from '../api/rental'
 
 const ledgerStore = useLedgerStore()
+
+// 抄表照片归「抄表」模块：操作档能拍能删，查看档只能看（组件内部区分）。
+const canEditMeters = computed(() => ledgerStore.canEdit('meters'))
+
+// 照片按表种分别留档，三张表各有入口；label 用于文案（「水表照片」）。
+const photoMeters = [
+  { meter: 'water', label: '水表' },
+  { meter: 'elec', label: '电表' },
+  { meter: 'gas', label: '燃气表' },
+] as const
+
+// 列表里的「照片 n」入口：记住当前查看的房间与账期，交给弹窗里的选择器加载
+const showPhotos = ref(false)
+const photoRoom = reactive({ room_id: 0, room_no: '', period: '' })
+const photoTitle = computed(() => `表盘照片 · ${photoRoom.room_no} ${photoRoom.period}`)
+
+function openPhotos(r: MeterRecord) {
+  photoRoom.room_id = r.room_id
+  photoRoom.room_no = r.room_no
+  photoRoom.period = r.period
+  showPhotos.value = true
+}
 
 const records = ref<MeterRecord[]>([])
 const allRooms = ref<RoomView[]>([])

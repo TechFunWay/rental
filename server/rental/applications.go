@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,7 +30,9 @@ import (
 	"strings"
 	"time"
 
+	"smallgo/server/config"
 	"smallgo/server/database"
+	"smallgo/server/middleware"
 	"smallgo/server/response"
 	"smallgo/server/sysconfig"
 
@@ -63,12 +67,140 @@ func init() {
 // applyPhotoDir 登记照片暂存目录（相对 attachmentsDir），入库/拒绝后即挪走或删除。
 const applyPhotoDir = "apply-tmp"
 
+// applyBaseConfigKey 「租客登记链接基址」系统配置键（留空 = 自动推导）。
+const applyBaseConfigKey = "rental_apply_base"
+
+// aiEnabledConfigKey 「启用 AI 识别」系统配置键（后台开关）。
+const aiEnabledConfigKey = "rental_ai_enabled"
+
 var applyPhoneRe = regexp.MustCompile(`^[0-9+\- ]{5,20}$`)
 
 // ------- 房东侧：登记链接 -------
 
+// applyLinkBase 计算租客登记链接的基址（末尾不带 /）。
+//
+// 为什么不能直接用房东当前页面地址：飞牛统一网关路径（/app/techfunway-rental/）
+// 上，飞牛接入层会在转发到应用**之前**校验 NAS 会话，租客没有 NAS 账号，打开
+// 只会拿到纯文本 "invalid token"（网关 nginx 直出，请求根本到不了应用）。
+// 所以网关域上必须换成应用自己的直连地址（http://<Host>:<端口><前缀>）——
+// 直连监听器只认应用自己的账号，公开的登记页才能被外人打开。
+// 直连端口上房东就在用可访问的地址，直接用当前来源即可。
+//
+// 主机名沿用房东的请求 Host：是 IP 照用，是域名（DDNS / fn Connect 域名）也照用
+// ——域名本身就是公网可达的入口。租客不在同一网络时，用「租客登记链接基址」
+// 配置覆盖成公网地址（优先级最高）。
+//
+// 返回：基址、这次请求是否走网关域、基址是否来自管理员配置。
+func applyLinkBase(c *gin.Context, db *gorm.DB) (base string, viaGateway, configured bool) {
+	viaGateway = middleware.OnFnOSGateway(c.Request.Context())
+	if v, err := sysconfig.GetConfig(db, applyBaseConfigKey, 0); err == nil {
+		if trimmed := strings.TrimRight(strings.TrimSpace(v), "/"); trimmed != "" {
+			// 只填了域名/端口（没有路径）时补上网关前缀：飞牛模式下应用的路由
+			// 全在 /app/<包名> 下，少了这一段直连地址会 404。
+			if config.C.FnOSApp && urlPathEmpty(trimmed) {
+				trimmed += "/" + strings.Trim(config.C.GatewayPrefix, "/")
+			}
+			return trimmed, viaGateway, true
+		}
+	}
+
+	// 应用在飞牛模式下的所有路由都挂在网关前缀下（直连端口同样如此，
+	// 见 server.newDirectHandler），所以直连地址也要带前缀。
+	prefix := ""
+	if config.C.FnOSApp {
+		prefix = "/" + strings.Trim(config.C.GatewayPrefix, "/")
+	}
+	if viaGateway {
+		port := config.C.Port
+		if port <= 0 {
+			port = 8910
+		}
+		if host := gatewayDirectHost(c); host != "" {
+			return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + prefix, true, false
+		}
+	}
+	return strings.TrimRight(requestOrigin(c)+prefix, "/"), viaGateway, false
+}
+
+// gatewayDirectHost 在网关域上挑一个「应用直连地址」的主机名。
+//
+// 房东多半是拿 NAS 的 IP/域名访问飞牛桌面的，请求 Host 就是那个地址，把它配上
+// 应用端口即可。**Host 是域名时直接用域名**（DDNS、fn Connect 域名本身就是
+// 公网可达的入口，丢掉它反而让租客打不开），Host 是 IP 时照用；两者都拿不到
+// 时才退化为本机局域网 IPv4（只作候选，租客打不开就由管理员填配置覆盖）。
+//
+// 历史：早先实现把域名一律退化成本机内网 IP，理由是「域名可能是内网域名」。
+// 结果是房东用 DDNS 域名访问时，登记链接自动变成 172.18.x.x，外网租客必打不开
+// ——而浏览器里就带着可用的公网域名。真内网域名（localhost/.local）另行排除。
+func gatewayDirectHost(c *gin.Context) string {
+	host := c.Request.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return ""
+	}
+	// 域名：直接用（localhost/.local 这类本机域名除外，它们对租客无意义）。
+	if net.ParseIP(host) == nil {
+		if isLocalOnlyHost(host) {
+			return ""
+		}
+		return host
+	}
+	return host
+}
+
+// isLocalOnlyHost 判断主机名是否只在本机/本网段有意义（对租客无价值）。
+func isLocalOnlyHost(host string) bool {
+	lower := strings.ToLower(host)
+	return lower == "localhost" || strings.HasSuffix(lower, ".localhost") || strings.HasSuffix(lower, ".local")
+}
+
+// requestOrigin 当前请求的来源（scheme://host），尊重反代传来的 X-Forwarded-Proto。
+func requestOrigin(c *gin.Context) string {
+	scheme := "http"
+	if c.Request.TLS != nil {
+		scheme = "https"
+	}
+	if p := c.Request.Header.Get("X-Forwarded-Proto"); p != "" {
+		scheme = strings.TrimSpace(strings.Split(p, ",")[0])
+	}
+	return scheme + "://" + c.Request.Host
+}
+
+// urlPathEmpty 判断基址里有没有路径部分（"http://host:8910" 没有，"/app/x" 有）。
+func urlPathEmpty(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return strings.Trim(u.Path, "/") == ""
+}
+
+// ensureApplyToken 确保房源有登记 token，没有就新建并落库。
+//
+// 抽成函数是因为「生成登记链接」与「下载登记二维码」两条路径都要用：
+// 两处各写一遍的话，改 token 长度/落库方式时极易漏改一处，导致弹窗里的链接
+// 与打印出来的二维码内容不一致。
+// regenerate=true 时**无条件换新 token**（旧链接与旧二维码一起失效）。
+// 这一点极易写漏：只判「token 为空才生成」会让 regenerate 形同虚设，
+// 房东以为换掉了、其实旧链接还能用——那是个安全问题，不只是功能问题。
+func ensureApplyToken(db *gorm.DB, room *Room, regenerate bool) error {
+	if room.ApplyToken != "" && !regenerate {
+		return nil
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return err
+	}
+	room.ApplyToken = hex.EncodeToString(buf)
+	return db.Save(room).Error
+}
+
 // handleRoomApplyLink 生成/返回房源的登记 token（?regenerate=1 强制换新，
-// 旧链接随即失效）。链接本身由前端拼：<origin>/apply/<token>。
+// 旧链接随即失效），并返回服务端拼好的完整链接：网关域上换成直连地址，
+// 其余情况用当前访问地址（基址可由 rental_apply_base 覆盖）。
 func handleRoomApplyLink(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		room, ok := findUserRoom(db, c)
@@ -79,18 +211,21 @@ func handleRoomApplyLink(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		if c.Query("regenerate") == "1" || room.ApplyToken == "" {
-			buf := make([]byte, 16)
-			if _, err := rand.Read(buf); err != nil {
-				response.ErrorInternal(c, "生成登记链接失败")
-				return
-			}
-			room.ApplyToken = hex.EncodeToString(buf)
-			if err := db.Save(room).Error; err != nil {
+			if err := ensureApplyToken(db, room, c.Query("regenerate") == "1"); err != nil {
 				response.ErrorInternal(c, "生成登记链接失败")
 				return
 			}
 		}
-		response.Success(c, gin.H{"token": room.ApplyToken})
+		base, viaGateway, configured := applyLinkBase(c, db)
+		response.Success(c, gin.H{
+			"token":       room.ApplyToken,
+			"base":        base,
+			"link":        base + "/apply/" + room.ApplyToken,
+			"via_gateway": viaGateway,
+			"configured":  configured,
+			// 房东侧弹窗的说明据此调整：没开 AI 时不说「AI 自动识别」。
+			"ai_ocr": aiOCREnabled(db),
+		})
 	}
 }
 
@@ -109,6 +244,9 @@ func setupApplicationRoutes(api *gin.RouterGroup, db *gorm.DB) {
 	api.GET("/rental/tenant-applications/:id/photo", view, handleApplicationPhoto(db))
 	api.POST("/rental/tenant-applications/:id/reject", edit, handleApplicationReject(db))
 	api.POST("/rental/rooms/:id/apply-link", roomEdit, handleRoomApplyLink(db))
+	// 登记链接的二维码（issue #5 需求 2）：与上面的链接接口挨着注册，
+	// 两者共用 token 与基址推导，改一处不会漏改另一处。
+	api.GET("/rental/rooms/:id/apply-qrcode", requireModule(db, ModuleRooms, PermView), handleRoomApplyQRCode(db))
 }
 
 // applicationRow 列表出参：附房源位置与照片预览地址（登录接口取流）。
@@ -311,7 +449,9 @@ func applyRoomByToken(db *gorm.DB, c *gin.Context) (*Room, bool) {
 	return &room, true
 }
 
-// handleApplyInfo 公开页加载：只回最小必要的位置信息。
+// handleApplyInfo 公开页加载：只回最小必要的位置信息，外加「房东有没有开
+// AI 识别」——前端据此决定显不显示识别按钮（没配 Key 时点了必然失败，
+// 2026-10-13 粉丝反馈：没配 Key 却显示按钮，点完只看到「网络异常」）。
 func handleApplyInfo(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		room, ok := applyRoomByToken(db, c)
@@ -324,15 +464,42 @@ func handleApplyInfo(db *gorm.DB) gin.HandlerFunc {
 			"building":  room.Building,
 			"unit":      room.Unit,
 			"floor":     room.Floor,
+			"ai_ocr":    aiOCREnabled(db),
 		})
 	}
 }
+
+// aiOCREnabled 租客登记页能不能用 AI 识别：后台开关打开 **且** 配了模型 Key。
+//
+// 两个条件缺一不可：只开开关没配 Key，点了必然失败；只配 Key 关了开关，是房东
+// 明确不想用。默认开关打开（2026-10-13 用户要求「做个后台控制，是否启用 AI 功能，
+// 避免没有配置又不能用」），保持「配了 Key 就能用」的既有行为。
+func aiOCREnabled(db *gorm.DB) bool {
+	if db == nil {
+		return false
+	}
+	if v, err := sysconfig.GetConfig(db, aiEnabledConfigKey, 0); err == nil && v == "false" {
+		return false
+	}
+	return strings.TrimSpace(mustConfig(db, "rental_ai_api_key", "")) != ""
+}
+
+// CodeApplyDuplicate 登记申请的业务码：同一房源、同一手机号已有待审核申请。
+// HTTP 仍是 400，前端据此把「重复提交」渲染成「已提交过，无需重复」，而不是
+// 笼统的「网络异常」（2026-10-13 粉丝反馈：第二次提交只看到网络异常）。
+const CodeApplyDuplicate = 2001
 
 // handleApplyOCR 身份证照片识别：把照片交给配置的视觉模型，返回结构化字段。
 // 照片本身不落盘（提交时才随表单上传一次）。
 func handleApplyOCR(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, ok := applyRoomByToken(db, c); !ok {
+			return
+		}
+		// 后台开关关掉、或没配 Key 时都不做识别：直接拦在这里，别让请求白白
+		// 走一趟上游再报错。
+		if !aiOCREnabled(db) {
+			response.ErrorBadRequest(c, "房东未开启 AI 识别，请手动填写")
 			return
 		}
 		file, err := c.FormFile("photo")
@@ -430,7 +597,8 @@ func handleApplySubmit(db *gorm.DB) gin.HandlerFunc {
 			if app.IdPhoto != "" {
 				_ = os.Remove(attachmentAbsPath(app.IdPhoto))
 			}
-			response.ErrorBadRequest(c, "该手机号已经提交过申请，请等房东联系；如需修改资料请联系房东")
+			response.Error(c, http.StatusBadRequest, CodeApplyDuplicate,
+				"这个手机号已经提交过申请，无需重复提交；房东核对后会联系你，如需修改资料请联系房东")
 			return
 		}
 		if err := db.Create(&app).Error; err != nil {

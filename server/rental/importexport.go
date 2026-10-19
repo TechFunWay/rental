@@ -1,6 +1,6 @@
 // importexport.go — CSV 模板下载、账单/房源导出与模板导入。
 //
-// CSV 统一 UTF-8 BOM（utils.WriteCSV 已处理），Excel/WPS 打开中文不乱码；
+// CSV 统一 UTF-8 BOM（writeCSV 已处理），Excel/WPS 打开中文不乱码；
 // 导出列顺序与模板一致，导出文件可直接修改后回导。
 package rental
 
@@ -50,6 +50,7 @@ func setupDataRoutes(api *gin.RouterGroup, db *gorm.DB) {
 	api.POST("/rental/rooms/import", requireLedgerModule(db, ModuleRooms, PermFull), handleRoomsImport(db))
 	// 租客导入会批量登记/更新租户，归租户模块档。
 	api.GET("/rental/tenants/template", requireModule(db, ModuleTenants, PermView), handleTenantTemplate(db))
+	api.GET("/rental/tenants/export", requireModule(db, ModuleTenants, PermView), handleTenantsExport(db))
 	api.POST("/rental/tenants/import", requireLedgerModule(db, ModuleTenants, PermFull), handleTenantsImport(db))
 }
 
@@ -71,7 +72,7 @@ func handleTemplate(db *gorm.DB) gin.HandlerFunc {
 				waterModeLabel(waterMode), cycleLabel(payCycleMonthly)},
 			[]string{"102", "李四", "", "1200", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""},
 		)
-		utils.WriteCSV(c, utils.ExportFilename("rental_import_template", "csv"), rows)
+		writeCSV(c, utils.ExportFilename("rental_import_template", "csv"), rows)
 	}
 }
 
@@ -90,7 +91,7 @@ func handleBillsExport(db *gorm.DB) gin.HandlerFunc {
 		query, empty := scopeLedger(db.Model(&Bill{}), c)
 		rows := [][]string{billColumns}
 		if empty {
-			utils.WriteCSV(c, utils.ExportFilename("rental_bills", "csv"), rows)
+			writeCSV(c, utils.ExportFilename("rental_bills", "csv"), rows)
 			return
 		}
 		if period != "" {
@@ -122,7 +123,7 @@ func handleBillsExport(db *gorm.DB) gin.HandlerFunc {
 				waterModeLabel(b.WaterMode), cycleLabel(b.PayCycle),
 			})
 		}
-		utils.WriteCSV(c, utils.ExportFilename("rental_bills", "csv"), rows)
+		writeCSV(c, utils.ExportFilename("rental_bills", "csv"), rows)
 	}
 }
 
@@ -147,7 +148,7 @@ func handleRoomsExport(db *gorm.DB) gin.HandlerFunc {
 		query, empty := scopeLedger(db.Model(&Room{}), c)
 		rows := [][]string{roomExportColumns[:]}
 		if empty {
-			utils.WriteCSV(c, utils.ExportFilename("rental_rooms", "csv"), rows)
+			writeCSV(c, utils.ExportFilename("rental_rooms", "csv"), rows)
 			return
 		}
 		rooms := make([]Room, 0)
@@ -180,7 +181,7 @@ func handleRoomsExport(db *gorm.DB) gin.HandlerFunc {
 				cycleLabel(cfg.PayCycle), payDay, strconv.Itoa(cfg.RemindDays),
 			})
 		}
-		utils.WriteCSV(c, utils.ExportFilename("rental_rooms", "csv"), rows)
+		writeCSV(c, utils.ExportFilename("rental_rooms", "csv"), rows)
 	}
 }
 
@@ -370,7 +371,8 @@ func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defE
 	// 水费模式（第 18 列，可空）："包月"/"按吨" 与 monthly/meter 等价，
 	// 留空表示未指定：新账单跟房源/全局默认，老账单沿用原快照。
 	csvWaterMode := parseWaterMode(get(17))
-	// 缴费周期（第 19 列，可空）："月付"/"季付" 与 monthly/quarterly 等价，
+	// 缴费周期（第 19 列，可空）："月付"/"季付"/"半年付"/"年付" 与
+	// monthly/quarterly/semiannual/annual 等价，
 	// 留空表示未指定：新账单跟房源设置，老账单沿用原快照。
 	csvPayCycle := parsePayCycle(get(18))
 
@@ -461,6 +463,8 @@ func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defE
 	bill.ManagementFee = num(14)
 	bill.PaidAmount = round2(num(15))
 	bill.Remark = get(16)
+	// 刻意**不写 DisabledFees**：CSV 导入是用户手里的明确账目（19 列里就有燃气费），
+	// 以文件为准。台账停用只作用于系统自动出账，不该把用户导入的历史数悄悄清零。
 	bill.recalc()
 
 	if bill.PaidAmount > feeTolerance && bill.PaidAt == nil {
@@ -473,10 +477,16 @@ func importRow(db *gorm.DB, c *gin.Context, rec []string, thisMonth string, defE
 			return false, "创建账单失败"
 		}
 		db.Model(&bill).UpdateColumn("receipt_no", receiptNo(bill.Period, bill.RoomNo, bill.ID))
+		// 新账单也落一份费用明细，单据/详情与合计同源（此前导入的新账单没有
+		// bill_items，单据只能走「固定列汇总」回退分支）。
+		syncBillItems(db, &bill, nil)
 	} else {
 		if err := db.Save(&bill).Error; err != nil {
 			return false, "更新账单失败"
 		}
+		// 覆盖已有账单后必须重建明细：否则单据里还是上次导入/开票的旧金额，
+		// 合计却已按新金额重算，出现「明细加起来对不上合计」（2026-10-17 审计修复）。
+		syncBillItemsOnUpdate(db, &bill)
 	}
 
 	// 导入带租户名且房内无同名在租租户时，补登一名在租租户，便于后续开票。
@@ -595,7 +605,7 @@ func handleRoomTemplate(db *gorm.DB) gin.HandlerFunc {
 			[]string{"101", "阳光小区", "1栋", "1单元", "3", "1500", "10", "30", "1.2", "3.5", "100", "800", "50", "示例行，可删除"},
 			[]string{"102", "", "", "", "", "1200", "", "", "", "", "", "", "", ""},
 		)
-		utils.WriteCSV(c, utils.ExportFilename("rental_rooms_import_template", "csv"), rows)
+		writeCSV(c, utils.ExportFilename("rental_rooms_import_template", "csv"), rows)
 	}
 }
 
@@ -846,7 +856,7 @@ func handleTenantTemplate(db *gorm.DB) gin.HandlerFunc {
 				"按吨", "5", "", "月付", "5", "3", "示例行，可删除"},
 			[]string{"", "102", "李四", "", "", "", "", "", "", "", "", "", "", "", ""},
 		)
-		utils.WriteCSV(c, utils.ExportFilename("rental_tenants_import_template", "csv"), rows)
+		writeCSV(c, utils.ExportFilename("rental_tenants_import_template", "csv"), rows)
 	}
 }
 
@@ -1004,7 +1014,7 @@ func importTenantRow(db *gorm.DB, c *gin.Context, rec []string, seen map[string]
 		return false, "水费模式应为 按吨 或 包月：" + v
 	}
 	if v := get(11); v != "" && parsePayCycle(v) == "" {
-		return false, "缴费周期应为 月付 或 季付：" + v
+		return false, "缴费周期应为 月付 或 季付 或 半年付 或 年付：" + v
 	}
 
 	// 缴费日 0-28（0=不提醒）、提前提醒天数 0-30；留空 = -1（跟随全局，

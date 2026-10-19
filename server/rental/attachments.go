@@ -36,6 +36,11 @@ const (
 	attachmentMaxFileSize = 20 << 20
 	attachmentMaxFiles    = 40
 	attachmentBatchLimit  = 10
+
+	// attachmentLabelDeposit 押金单照片的用途标签。押金单是实物凭证，房东在
+	// 「租户资料附件」里打上这个标签留档；租户列表/编辑表单据此单独入口展示
+	//（2026-10-17 粉丝反馈：押金不能只录一个数字，得有实物照片）。
+	attachmentLabelDeposit = "押金单"
 )
 
 // attachmentAllowedTypes 内容嗅探白名单 → 标准扩展名。与合同一致（图片 + PDF）。
@@ -48,6 +53,18 @@ var attachmentAllowedTypes = map[string]string{
 	"image/heic":      ".heic",
 	"image/heif":      ".heif",
 	"application/pdf": ".pdf",
+}
+
+// imageAllowedTypes 只收图片的子集：抄表照片（meter_photos.go）与房源照片
+// （room_photos.go）共用。这两处是「现场拍照」，PDF 没有意义，所以不放开。
+var imageAllowedTypes = map[string]string{
+	"image/jpeg": ".jpg",
+	"image/png":  ".png",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+	"image/avif": ".avif",
+	"image/heic": ".heic",
+	"image/heif": ".heif",
 }
 
 // TenantAttachment 租户资料附件。FilePath 存相对 attachmentsDir 的路径
@@ -177,6 +194,11 @@ func handleAttachmentList(db *gorm.DB) gin.HandlerFunc {
 		}
 		items := make([]TenantAttachment, 0)
 		q, _ := scopeLedger(db.Where("tenant_id = ?", tenant.ID), c)
+		// 按用途标签过滤（选填）：押金单照片入口只取 label=押金单 的那几张，
+		// 不必把身份证、车牌等其它附件也拉回来再在前端筛。
+		if label := strings.TrimSpace(c.Query("label")); label != "" {
+			q = q.Where("label = ?", label)
+		}
 		if err := q.Order("created_at ASC, id ASC").Find(&items).Error; err != nil {
 			response.ErrorInternal(c, "查询附件失败")
 			return

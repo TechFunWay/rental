@@ -35,6 +35,70 @@ import (
 	"gorm.io/gorm"
 )
 
+// preUpgradeSnapshot 在结构迁移之前给数据库留一份快照。
+//
+// 返回值：快照文件名（空串=本次不需要快照）、判定原因、错误。
+// 调用点见 Start() 中 AutoMigrate 之前。
+//
+// 判定规则刻意不依赖 upgrade_records —— 那个表只记录**版本化升级**，
+// 而 AutoMigrate 补列、apps.Migrate 等结构变化都不写它；开发版二进制
+// （版本恒为 dev）更是永远不写，拿它当判据会导致每次重启都快照一份，
+// 把用户的保留空间吃光。改用「本机记一个快照标记」：
+//
+//   - 全新安装（库里还没有 users 表）→ 没有数据可丢，不快照（但仍写下标记，
+//     否则这个二进制之后每次重启都会被当成"版本变更"，白白吃用户的保留空间）；
+//   - 本二进制已经快照过（标记里的指纹相同）→ 结构这次没变，不快照；
+//   - 否则（换了新二进制 = 有升级）→ 先快照再迁移，并记下指纹。
+//
+// 指纹取版本 + 构建时间 + 提交号，正式发版三者随版本变；同一版本的反复
+// 重启不会重复快照，但只要换版本就会重新兜底一次。
+func preUpgradeSnapshot(db *gorm.DB, dataDir, appVersion string) (string, string, error) {
+	fingerprint := binaryFingerprint()
+
+	// 全新安装判定：连 users 表都没有，说明这是一次初始化，没有东西可丢。
+	var userTables int64
+	if err := db.Raw(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'",
+	).Scan(&userTables).Error; err != nil {
+		return "", "", err
+	}
+	if userTables == 0 {
+		writeSnapshotMarker(dataDir, fingerprint)
+		return "", "全新安装，无需快照", nil
+	}
+
+	marker := filepath.Join(dataDir, snapshotMarkerFile)
+	if raw, err := os.ReadFile(marker); err == nil {
+		if strings.TrimSpace(string(raw)) == fingerprint {
+			return "", "本版本已快照过，无需重复", nil
+		}
+	}
+
+	name, err := backup.Create(db, dataDir)
+	if err != nil {
+		return "", "", err
+	}
+	// 标记写失败不影响快照本身已生效，只影响下次可能多快照一份。
+	writeSnapshotMarker(dataDir, fingerprint)
+	return name, "检测到版本变更，先留一份升级前快照", nil
+}
+
+// writeSnapshotMarker 记下「这个二进制已经处理过了」。写失败只记日志：
+// 标记没了的后果至多是下次多快照一份，不会造成数据问题。
+func writeSnapshotMarker(dataDir, fingerprint string) {
+	if err := os.WriteFile(filepath.Join(dataDir, snapshotMarkerFile), []byte(fingerprint), 0o644); err != nil {
+		logger.Error("写入快照标记失败（下次启动会重复快照）: %v", err)
+	}
+}
+
+// snapshotMarkerFile 记录「哪个二进制已经快照过」的标记文件名。
+const snapshotMarkerFile = ".last_preupgrade_snapshot"
+
+// binaryFingerprint 当前二进制的身份指纹：版本 + 构建时间 + 提交号。
+func binaryFingerprint() string {
+	return strings.Join([]string{version.Version, version.BuildTime, version.GitCommit}, "|")
+}
+
 func Start() {
 	cfg := config.C
 
@@ -79,6 +143,28 @@ func Start() {
 		os.Exit(1)
 	}
 	defer database.CloseDB(db)
+
+	// 升级前自动快照（数据安全底线，2026-10-12 加）。
+	//
+	// 为什么必须放在 AutoMigrate/RunUpgrades **之前**：这两步会改表结构与数据，
+	// 一旦某次升级写错了，房东辛苦录入的房源、租户、账单就没有任何回退点——
+	// 每日 03:00 的自动备份最多也只能兜住 24 小时内的数据，而且它在
+	// backup_auto_enabled 被关掉时根本不跑。
+	//
+	// 判定「要不要快照」很关键，否则会在每次正常启动都塞一份没用的备份、
+	// 把用户的保留空间吃光：
+	//   - 全新安装（库里一张表都没有）→ 不快照，没有东西可丢；
+	//   - 库版本已等于当前二进制 → 结构不会变，不快照；
+	//   - 库版本低于当前二进制（有升级待执行）→ 先快照再迁移。
+	// 快照沿用 backup.Create 的命名规则，因此它会**直接出现在备份管理页的
+	// 列表里**，用户可以下载、也可以一键回滚。
+	if snapshot, reason, err := preUpgradeSnapshot(db, cfg.DataDir, version.Version); err != nil {
+		// 快照失败**不能**阻止启动：挡住启动只会让用户彻底用不了应用，
+		// 那比没有快照更糟。这里只记日志，让人知道没兜底。
+		logger.Error("升级前自动快照失败（将继续启动）: %v", err)
+	} else if snapshot != "" {
+		logger.Info("升级前自动快照 %s（%s）", snapshot, reason)
+	}
 
 	if err := database.AutoMigrate(db); err != nil {
 		fmt.Printf("Failed to migrate database: %v\n", err)

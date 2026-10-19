@@ -1,8 +1,8 @@
 // billing.go — 房间生效的计费与缴费设置。
 //
-// v0.2.3 起水费计费方式（按吨/包月）、水费金额、缴费周期（月付/季付）、
+// v0.2.3 起水费计费方式（按吨/包月）、水费金额、缴费周期（月付/季付/半年付/年付）、
 // 缴费日与提前提醒天数都在租户上配置：每个租户可以不一样。租户没设置的项
-// 回退到系统级全局默认（系统配置 → 租房设置，管理员维护、全员共享）。
+// 回退到系统级全局默认（系统配置 → 计费默认，管理员维护、全员共享）。
 //
 // 账单仍然按房开（(room, period) 唯一），因此房间的生效设置取该房
 // 在租租户的设置：同一房间有多名在租租户（宿舍场景）时，逐项取"第一个
@@ -25,7 +25,7 @@ import (
 type billingConfig struct {
 	WaterMode   string  // meter 按吨 / monthly 包月
 	WaterAmount float64 // 按吨=元/吨；包月=元/月
-	PayCycle    string  // monthly 月付 / quarterly 季付
+	PayCycle    string  // monthly 月付 / quarterly 季付 / semiannual 半年付 / annual 年付
 	PayDay      int     // 1-28；0=不提醒
 	RemindDays  int     // 0-30
 }
@@ -418,7 +418,7 @@ func validateTenantBilling(waterMode string, waterPrice, waterMonthlyFee float64
 		return "水费金额不能为负数"
 	}
 	if payCycle != "" && parsePayCycle(payCycle) == "" {
-		return "缴费周期无效，应为月付（monthly）或季付（quarterly）"
+		return "缴费周期无效，应为月付（monthly）、季付（quarterly）、半年付（semiannual）或年付（annual）"
 	}
 	if payDay < tenantFollowGlobal || payDay > payDayMax {
 		return "缴费日应为 1-28 号，0 表示不提醒，-1 表示跟随全局默认"

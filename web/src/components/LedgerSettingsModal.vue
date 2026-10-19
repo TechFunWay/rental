@@ -92,6 +92,7 @@ import {
   type LedgerSettingsPayload, type LedgerView,
 } from '../api/ledger'
 import { toast } from '../utils/toast'
+import { cycleMonths, payCycleOptions } from '../utils/cycle'
 
 interface SettingOption { value: string; label: string }
 interface SettingDef {
@@ -129,14 +130,26 @@ const SETTING_GROUPS: SettingGroup[] = [
     items: [
       {
         key: 'rental_pay_cycle', label: '缴费周期', type: 'select',
-        hint: '月付每月一张账单、季付每 3 个月一张。',
-        options: [
-          { value: 'monthly', label: '月付（每月一张账单）' },
-          { value: 'quarterly', label: '季付（每 3 个月一张账单）' },
-        ],
+        hint: '月付每月一张账单；季付/半年付/年付每 3/6/12 个月收一次固定费，水电梯度仍按月抄。',
+        // 选项从 utils/cycle.ts 的 payCycleOptions 派生（与后端 ConfigDef.Options、
+        // cycleLabel 同一张词表），新增周期时只改那一处，系统配置与台账配置不会走偏。
+        options: payCycleOptions.map((o) => ({ value: o.value, label: `${o.label}（每 ${cycleMonths(o.value)} 个月一张账单）` })),
       },
       { key: 'rental_pay_day', label: '缴费日（每月几号）', type: 'int', hint: '每期收租日期，0 = 不提醒，最大 28。' },
       { key: 'rental_remind_days', label: '缴费提前提醒天数', type: 'int', hint: '缴费日前 N 天开始提醒，0 = 当天提醒。' },
+      {
+        // 用 select 而不是新增一个 bool 类型：本弹窗的渲染分支只有
+        // select / int / text 三种，加 bool 要动它的类型与模板；
+        // 而台账设置接口存的就是字符串，select 天然合适、也不引新分支。
+        key: 'rental_carryover_enabled', label: '少交多交结转次月', type: 'select',
+        // 默认关闭是刻意的（用户确认）：老用户账单金额一个子都不变，
+        // 要用的房东自己在这里开；开启后只影响**开启之后新生成**的账单。
+        hint: '开启后，上期少交的钱自动加进本期应缴、多交的自动抵扣本期应缴（例如 1 月欠 50，2 月应缴 = 费用 + 50）。默认关闭；开启只影响之后新生成的账单，历史账单不变。',
+        options: [
+          { value: 'false', label: '关闭（默认，账单金额不变）' },
+          { value: 'true', label: '开启（上期差额自动带入本期）' },
+        ],
+      },
     ],
   },
   {

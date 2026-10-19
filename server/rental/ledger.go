@@ -31,6 +31,7 @@ import (
 
 	"smallgo/server/database"
 	"smallgo/server/response"
+	"smallgo/server/user"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -74,11 +75,16 @@ type Ledger struct {
 	Kind string `gorm:"size:16;not null;default:shared;index" json:"kind"`
 	// OwnerUserID 是共同台账的管理者（个人台账即本人）；成员权限判定不看它，
 	// 但「谁能邀请/移除/改名」看它，冗余一份便于按 owner 查个人台账。
-	OwnerUserID uint      `gorm:"not null;default:0;index" json:"owner_user_id"`
-	Notes       string    `json:"notes"`
-	CreatedBy   uint      `json:"created_by"` // 创建者，仅溯源
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	OwnerUserID uint   `gorm:"not null;default:0;index" json:"owner_user_id"`
+	Notes       string `json:"notes"`
+	CreatedBy   uint   `json:"created_by"` // 创建者，仅溯源
+	// RoomApplyToken 是**台账级**的免登录房源登记链接令牌（村委/中介场景：村民扫码
+	// 自己登记房源，台账后台待审）。与房源级的 ApplyToken（租客登记）刻意分开：
+	// 房源登记时房子还不存在，没有房源行可以挂 token。
+	RoomApplyToken string `gorm:"size:64;index" json:"-"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // LedgerMember 是「用户 ↔ 台账」成员关系，也是**该用户在该台账的权限载体**。
@@ -115,7 +121,16 @@ func init() {
 	//
 	// 靠钩子而不是改框架 user 包：框架层不该知道 rental 的表；钩子在注册事务里
 	// 执行，失败即回滚，不会留下「注册成功却没有归属」的半残账号。
+	//
+	// v0.6.10：**租户不建个人台账**。个人台账的语义是「自己就是一个房东」（恒
+	// 全部模块完全权限），而租户是只读门户角色、不是任何台账的成员；给他建一张
+	// 全权限空台账等于把「租户也是房东」写进数据里，与需求冲突（见
+	// docs/07-租户登录与角色权限设计.md 取舍二）。角色在这里从 users 表回查，
+	// 因为框架钩子签名只有 (db, userID)，不该为业务角色扩容。
 	database.RegisterUserCreateHook(func(db *gorm.DB, userID uint) error {
+		if userRole(db, userID) == user.RoleTenant {
+			return nil
+		}
 		_, err := ensurePersonalLedger(db, userID)
 		return err
 	})

@@ -18,6 +18,27 @@ import (
 	"gorm.io/gorm"
 )
 
+// 账号角色（users.role，v0.6.10 起三种）。
+//
+//   - RoleAdmin  「超级管理员」：账号审核、系统配置、备份、日志；业务数据无特权；
+//   - RoleUser   「出租人」：房东/宿舍管理员，拥有个人台账与业务权限；
+//   - RoleTenant 「租户」：只读门户角色，不是任何台账的成员，只能看本人数据
+//     与提交资料变更申请（见 docs/07-租户登录与角色权限设计.md）。
+//
+// 刻意用常量而不是枚举表：只有三种角色、没有角色自定义需求，建表只会增加维护面。
+const (
+	RoleAdmin  = "admin"
+	RoleUser   = "user"
+	RoleTenant = "tenant"
+
+	// tenantPortalConfigKey 是租户门户总开关的系统配置键。
+	//
+	// 定义在 user 包（而不是 rental 包）：注册流程要对它做判定，而 user 是框架
+	// 实例化文件、不该反向 import 业务包。键名与 rental 侧注册的 ConfigDef
+	// 必须逐字一致，两边都拼这个常量，避免手写字符串写错一处。
+	tenantPortalConfigKey = "rental_tenant_portal_enabled"
+)
+
 // Sentinel errors — handlers map these to the documented API error codes
 // (1001 / 1003 in AGENTS.md). The error message IS the user-facing text.
 var (
@@ -27,6 +48,12 @@ var (
 	ErrPasswordTooLong  = errors.New("密码长度不能超过72字节")
 	ErrLastAdmin        = errors.New("不能降级、禁用或删除最后一个管理员")
 	ErrUserNotFound     = errors.New("用户不存在")
+	// ErrTenantPortalDisabled 是「租户门户已关闭」——管理员可通过系统配置
+	// rental_tenant_portal_enabled 关掉租客注册入口（关掉后已有租户账号不受影响）。
+	ErrTenantPortalDisabled = errors.New("本应用未开放租客登录")
+	// ErrUserBoundTenant 是「该账号已关联租户档案，不能改角色」——必须先由房东
+	// 解绑，否则改了角色会让「租户档案 ↔ 登录账号」的关联与角色自相矛盾。
+	ErrUserBoundTenant = errors.New("该账号已关联租户档案，请先在租户管理里解除关联")
 	// ErrUserDeleteBlocked is returned when a registered app guard wants to
 	// keep the user (its business data still references the account).
 	ErrUserDeleteBlocked = errors.New("该用户在应用中已有数据，不能删除；可改为禁用账号")
@@ -146,7 +173,32 @@ func validatePhone(phone string) error {
 	return nil
 }
 
+// Register 是历史入口（不指定角色），等价于 RegisterWithRole(..., "", ...)。
 func Register(db *gorm.DB, username string, password string, phone string, jwtSecret string) (map[string]interface{}, error) {
+	return RegisterWithRole(db, username, password, phone, "", jwtSecret)
+}
+
+// RegisterWithRole 注册账号并指定角色（v0.6.10 加，见 docs/07-租户登录与角色权限设计.md）。
+//
+// role 取值：
+//   - ""（或非法值）：沿用框架默认——首个账号是 admin，其余是 user（房东/出租人）；
+//   - "tenant"：租户。租户是**只读门户角色**，与房东是两套入口，因此：
+//     1) 状态恒为 2（待关联）——租户注册后必须由房东在租户管理里「关联登录账号」
+//     才生效，这一点**不受** register_need_approval 开关影响（那个开关管的是
+//     房东账号的注册审核）；
+//     2) 不开个人台账——个人台账等价于「自己就是房东」，与租户语义冲突
+//     （跳过逻辑在 rental/ledger.go 的注册钩子里按角色判断）；
+//     3) 受系统配置 rental_tenant_portal_enabled 控制，关闭时直接拒绝注册。
+//
+// 参数 role 之所以是自由字符串而不改成枚举：注册接口是公开的，传入值不可信，
+// 这里一律按白名单归一化，未识别的值退化成默认角色而不是报错（保持向后兼容，
+// 老前端不传该字段时行为与之前完全一致）。
+func RegisterWithRole(db *gorm.DB, username string, password string, phone string, role string, jwtSecret string) (map[string]interface{}, error) {
+	role = strings.TrimSpace(strings.ToLower(role))
+	if role != RoleTenant {
+		role = ""
+	}
+
 	var result map[string]interface{}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var userCount int64
@@ -193,9 +245,9 @@ func Register(db *gorm.DB, username string, password string, phone string, jwtSe
 			return err
 		}
 
-		role := "user"
+		assignedRole := "user"
 		if userCount == 0 {
-			role = "admin"
+			assignedRole = "admin"
 		}
 
 		// v0.6.0：注册审核。开启 register_need_approval 时，新注册账号为
@@ -208,12 +260,22 @@ func Register(db *gorm.DB, username string, password string, phone string, jwtSe
 				status = 2
 			}
 		}
+		if role == RoleTenant {
+			// 租户门户总开关：关闭时不许注册租户账号（但仍不动老账号）。
+			if enabled, err := sysconfig.GetConfig(tx, tenantPortalConfigKey, 0); err == nil && enabled == "false" {
+				return ErrTenantPortalDisabled
+			}
+			assignedRole = RoleTenant
+			// 租户恒为「待关联」（status=2）：与「注册需管理员审核」无关，
+			// 关联动作由房东在租户管理里完成并顺带把状态置 1。
+			status = 2
+		}
 
 		user := database.User{
 			Username:    username,
 			Password:    hashedPassword,
 			Phone:       phone,
-			Role:        role,
+			Role:        assignedRole,
 			Status:      status,
 			APIKey:      auth.GenerateAPIKey(),
 			AuthVersion: 1,
@@ -596,7 +658,7 @@ func GetAllUsers(db *gorm.DB, page int, pageSize int, search string) ([]UserResp
 func UpdateUser(db *gorm.DB, userID uint, role *string, status *int) error {
 	updates := map[string]interface{}{}
 	if role != nil {
-		if *role != "admin" && *role != "user" {
+		if *role != RoleAdmin && *role != RoleUser && *role != RoleTenant {
 			return fmt.Errorf("无效的角色")
 		}
 		updates["role"] = *role
@@ -620,6 +682,24 @@ func UpdateUser(db *gorm.DB, userID uint, role *string, status *int) error {
 		}
 		if err := ensureAdminRemains(tx, target, role, status); err != nil {
 			return err
+		}
+		// v0.6.10：租户账号若已关联租户档案，禁止改角色。
+		//
+		// 为什么拦而不是顺手解绑：改了角色后，「档案绑着这个账号」与「这个账号
+		// 不再是租户」自相矛盾——档案侧仍显示已关联，账号却进不了门户，房东与
+		// 租户都会困惑。要转角色必须先解绑，让状态转移显式发生。
+		//
+		// 用 Migrator().HasTable 探表：本函数所在的 user 包是**实例化文件**，
+		// 但「tenants 表」是 rental 业务表，非租房实例可能没有它；探不到就跳过
+		// 这条守卫（没有租户概念的应用不受影响）。
+		if role != nil && *role != RoleTenant && tx.Migrator().HasTable("tenants") {
+			var bound int64
+			if err := tx.Table("tenants").Where("account_user_id = ?", userID).Count(&bound).Error; err != nil {
+				return err
+			}
+			if bound > 0 {
+				return ErrUserBoundTenant
+			}
 		}
 		return tx.Model(&target).Updates(updates).Error
 	})

@@ -22,6 +22,39 @@
         <p class="text-white/80 leading-5">当前还没有任何用户。创建后该账号将自动成为管理员，并立即绑定当前飞牛 NAS 用户，之后可直接一键登录。</p>
       </div>
 
+      <!-- 身份选择（v0.6.10）：房东与租客是两套完全不同的入口，注册时就要定下来。
+           只在「正常注册」时出现——飞牛绑定流程是给已有账号做验证，不涉及选身份；
+           首个管理员的初始化也不能是租客。 -->
+      <div v-if="showRolePicker" class="space-y-1.5">
+        <div class="text-xs font-semibold text-white/70">我是</div>
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            v-for="opt in roleOptions"
+            :key="opt.value"
+            type="button"
+            class="rounded-xl border px-3 py-2.5 text-left transition-colors"
+            :class="role === opt.value
+              ? 'border-brand-400/60 bg-brand-400/15 text-white'
+              : 'border-white/10 bg-white/[0.03] text-white/60 hover:bg-white/[0.06]'"
+            @click="role = opt.value"
+          >
+            <div class="text-xs sm:text-sm font-semibold">{{ opt.label }}</div>
+            <div class="mt-0.5 text-[11px] leading-4 text-white/50">{{ opt.hint }}</div>
+          </button>
+        </div>
+        <p v-if="role === 'tenant'" class="text-[11px] leading-5 text-white/55">
+          注册后用这个账号登录，房东在「租户管理」里关联你之后，就能查看自己的登记信息、账单与合同。
+        </p>
+        <!-- 房东入驻资料（平台化，v0.6.10）：申请通过后才能管理房源与租户 -->
+        <div v-else class="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 space-y-2.5">
+          <div class="text-xs font-semibold text-white/70">入驻申请</div>
+          <p class="text-[11px] leading-5 text-white/50">
+            平台需要核实房东身份，填好资料后提交；通过前账号可以登录但看不到业务数据。
+          </p>
+          <LandlordApplyFields v-model="applyForm" />
+        </div>
+      </div>
+
       <AuthField v-model="username" label="用户名" autocomplete="username" required placeholder="请输入用户名" autofocus>
         <template #icon>
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
@@ -98,7 +131,9 @@ import { useAuthStore } from '../stores/auth'
 import { useLedgerStore } from '../stores/ledger'
 import AuthShell from '../components/auth/AuthShell.vue'
 import AuthField from '../components/auth/AuthField.vue'
+import LandlordApplyFields from '../components/LandlordApplyFields.vue'
 import { passwordValidationError } from '../utils/password'
+import { submitLandlordApply, type LandlordApplyInput } from '../api/rental'
 
 const router = useRouter()
 const route = useRoute()
@@ -113,6 +148,25 @@ const errorMsg = ref('')
 const successMsg = ref('')
 const disabled = ref(false)
 const fnosMode = ref<'register' | 'bind'>(route.query.fnos_mode === 'bind' ? 'bind' : 'register')
+// 注册身份（v0.6.10）：'' = 房东（出租人，默认）、'tenant' = 租客。
+// 默认房东：绝大多数注册者是房东，且默认值必须是「功能最全」的那个，
+// 免得老用户升级后随手注册却拿不到业务界面。
+const role = ref<'' | 'tenant'>(route.query.role === 'tenant' ? 'tenant' : '')
+// 房东入驻资料（平台化）：注册成功后立刻提交；失败时留在本页可重试
+const applyForm = ref<LandlordApplyInput>({ name: '', phone: '', wechat: '', region: '', room_scale: '', intro: '' })
+const applySaved = ref(false)
+// 账号已建好、但入驻资料没提交成功：显示「重试提交」按钮（不用重新注册）
+const applyRetry = ref(false)
+const roleOptions = [
+  // admin / user / tenant 三个角色：平台首个注册账号自动成为系统管理员，
+  // 之后的「房东」注册需要提交入驻资料并由平台审核（landlord_applications）
+  { value: '' as const, label: '房东', hint: '管理自己的房源、租户与账单' },
+  { value: 'tenant' as const, label: '租户', hint: '只看自己的资料与账单' },
+]
+// 身份选择只在普通注册、且不是「初始化首个管理员」时出现：
+// 首个账号必然是管理员（后端强制），让他选租客只会造成「选了没用」的困惑。
+const showRolePicker = computed(() =>
+  !isFnOSBinding.value && !authStore.setupRequired && authStore.tenantPortalEnabled)
 const isFnOSBinding = computed(() => import.meta.env.VITE_FNOS_APP === 'true' && route.query.fnos === 'bind')
 // 手机号字段只在「注册」流程里出现（绑定流程是在给已有账号做验证，不收集资料）。
 // 「初始化首个管理员」时也显示，但**不标必填**——服务端对首个账号豁免必填
@@ -142,6 +196,50 @@ onMounted(async () => {
     }
   } catch {}
 })
+
+// submitApply 把入驻资料交给平台（待审核账号的接口在白名单里）。返回是否成功。
+async function submitApply(): Promise<boolean> {
+  applyForm.value.phone = (applyForm.value.phone || phone.value || '').trim()
+  if (!applyForm.value.name.trim()) {
+    errorMsg.value = '请填写入驻申请的姓名或称谓'
+    return false
+  }
+  if (!/^[0-9+\- ]{5,20}$/.test(applyForm.value.phone)) {
+    errorMsg.value = '请填写正确的联系电话'
+    return false
+  }
+  try {
+    const res = await submitLandlordApply({
+      name: applyForm.value.name.trim(),
+      phone: applyForm.value.phone,
+      wechat: (applyForm.value.wechat || '').trim(),
+      region: (applyForm.value.region || '').trim(),
+      room_scale: applyForm.value.room_scale || '',
+      intro: (applyForm.value.intro || '').trim(),
+    })
+    if (res.data?.code === 0) {
+      applySaved.value = true
+      return true
+    }
+    errorMsg.value = res.data?.message || '入驻资料提交失败'
+    return false
+  } catch (err: any) {
+    errorMsg.value = err.response?.data?.message || '入驻资料提交失败，请重试'
+    return false
+  }
+}
+
+// retryApply 账号已建好、只是入驻资料没提交成功时的重试入口
+async function retryApply() {
+  loading.value = true
+  errorMsg.value = ''
+  const ok = await submitApply()
+  loading.value = false
+  if (ok) {
+    successMsg.value = '入驻资料已提交，等待平台审核'
+    void enterAfterAuth(authStore.token, authStore.user)
+  }
+}
 
 async function handleRegister() {
   if (!isFnOSBinding.value || fnosMode.value === 'register') {
@@ -181,16 +279,37 @@ async function handleRegister() {
       }
       return
     }
-    const res = await register(username.value, password.value, showPhoneField.value ? phone.value : '')
+    const res = await register(
+      username.value, password.value,
+      showPhoneField.value ? phone.value : '',
+      role.value,
+    )
     if (res.data?.code === 0) {
       // 注册即登录：后端直接签发 token，无需再跳登录页
       const token = res.data.data?.token
       const user = res.data.data?.user
+      // 房东路径：注册成功后立刻提交入驻资料（这一步失败不影响账号本身，
+      // 留在本页重试即可——账号已建好，token 也已生效）
+      if (token && user && user.role !== 'tenant') {
+        authStore.setToken(token)
+        authStore.setUser(user)
+        if (!(await submitApply())) {
+          applyRetry.value = true
+          loading.value = false
+          return
+        }
+      }
       if (token && user) {
-        // v0.6.0：新注册账号默认 status === 2（待审核），注册后直接落到
-        // 「等待审核」页，而不是进业务区再被 403 弹回来。
+        // v0.6.0 / v0.6.10：新注册账号可能是 status === 2，但**含义按角色不同**：
+        //   租客 → 等待房东在租户管理里关联；
+        //   房东 → 等待管理员审核。
+        // 注册后直接落到各自的等待页，而不是进业务区再被 403 弹回来。
         const pending = Number(user.status) === 2
-        successMsg.value = pending ? '注册成功，账号正在等待管理员审核' : '注册成功，正在进入控制台'
+        if (user.role === 'tenant') {
+          successMsg.value = pending ? '注册成功，等待房东关联你的账号' : '注册成功，正在进入租客服务'
+        } else {
+          successMsg.value = pending ? '注册成功，账号正在等待管理员审核' : '注册成功，正在进入控制台'
+        }
         setTimeout(() => { void enterAfterAuth(token, user) }, 800)
       } else {
         successMsg.value = ''
@@ -208,11 +327,19 @@ async function handleRegister() {
 }
 
 // enterAfterAuth 注册/绑定成功后的统一去向：先拉台账列表（ledger store 依赖
-// 登录态），再按账号状态分流；待审核（status === 2）用户去「等待审核」页。
+// 登录态），再按**角色 + 状态**分流。
+//
+// 顺序很重要：先判租户。租户与房东的 status === 2 语义不同（前者等房东关联、
+// 后者等管理员审核），混在一起会把租户送进房东的等待页。
 async function enterAfterAuth(token?: string, user?: any) {
   if (token) authStore.setToken(token)
   if (user) authStore.setUser(user)
   authStore.resetInit()
+  if (authStore.isTenant) {
+    // 租户没有台账，不必拉列表（后端也不会给他任何台账）。
+    router.push({ name: authStore.isPendingUser ? 'PortalPending' : 'PortalHome' })
+    return
+  }
   const ledgerStore = useLedgerStore()
   await ledgerStore.load(true)
   if (authStore.isPendingUser) {

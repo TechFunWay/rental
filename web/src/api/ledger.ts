@@ -64,6 +64,12 @@ export interface MyApproval {
   status: number
   pending: boolean
   message: string
+  /**
+   * 账号角色（v0.6.10）。待关联的租户同样是 status === 2，前端在
+   * /auth/check 认不下待审核会话时靠这个接口恢复登录态——**必须**用服务端
+   * 给的角色，否则租户会被恢复成 user、被送去房东的等待页。
+   */
+  role?: string
 }
 
 // ---------- 我的台账 ----------

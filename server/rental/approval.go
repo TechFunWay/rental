@@ -72,6 +72,11 @@ func pendingGateDenied(db *gorm.DB, userID uint, reqPath string) bool {
 func setupRoutesWithApprovalGate(api *gin.RouterGroup, db *gorm.DB) {
 	guarded := api.Group("", approvalGate(db))
 	setupRoutes(guarded, db)
+	// 租户门户（v0.6.10）：同样经过待审核门禁——未关联的租户（status=2）只有
+	// /rental/portal/status 在白名单里，其余门户接口一律 403，因此未关联时
+	// 拿不到任何业务数据。门户刻意不挂在 setupRoutes 里：那里被 denyTenantRole
+	// 包着，而门户正是要放行租户。
+	setupPortalRoutes(guarded, db)
 }
 
 // approvalGate 业务侧待审核门禁（与框架钩子同口径）。

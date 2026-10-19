@@ -3,7 +3,7 @@
 // 模型关系：
 //
 //	FeeItem  收费项目定义（内置租金/水/电/燃气/卫生/管理 + 用户自定义，如宽带费），
-//	         每个项目有自己的收费周期（fixed 类 monthly/quarterly；读数类恒月付）。
+//	         每个项目有自己的收费周期（fixed 类 monthly/quarterly/semiannual/annual；读数类恒月付）。
 //	BillItem 账单费用明细快照：出账时把账单各项（内置六项 + 启用的自定义项目）
 //	         落成明细行，带名称/金额/覆盖区间说明；账单编辑后重建。
 //	Payment  收款流水：每次收款一条，items JSON 按项目分摊（账单是账单、缴费是
@@ -15,6 +15,7 @@ package rental
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -57,11 +58,69 @@ type FeeItem struct {
 	Unit          string    `json:"unit"`                            // meter 类计量单位（吨/度/方），fixed 为空
 	Cycle         string    `gorm:"default:monthly" json:"cycle"`    // fixed 类收费周期；meter 类恒月付
 	DefaultAmount float64   `gorm:"default:0" json:"default_amount"` // fixed 类默认金额（元/期）
-	Enabled       bool      `gorm:"default:true" json:"enabled"`
+	// 生效月份窗口（1-12，0=不限）——「取暖费只在供暖季收」这类按季节出账的项目用它
+	// （GitHub issue #5 需求 6）。
+	//
+	// 语义：只在**账期的月份**落在 [SeasonFromMonth, SeasonToMonth] 内时才计入该费用。
+	//   - 两个都 0 → 全年都收，与改造前完全一致（存量项目零影响）；
+	//   - 只填 From → 该月及之后都收；只填 To → 该月及之前都收；
+	//   - **支持跨年**：From=11、To=3 表示 11/12/1/2/3 月都收（北方供暖季典型）；
+	//   - From == To → 只有那一个月收。
+	//
+	// 它与 Cycle 是**两条独立的规则**：窗口决定「这个月收不收」，
+	// Cycle 决定「收的时候是一个月还是 N 个月的钱」。例如
+	//   Cycle=月付 + 11~3 月 → 这几个月每月收一次；
+	//   Cycle=年付 + 11~3 月 → 窗口内按年付锚点收，不重复。
+	SeasonFromMonth int `gorm:"default:0" json:"season_from_month"`
+	SeasonToMonth   int `gorm:"default:0" json:"season_to_month"`
+	// Enabled 启用/停用。**停用对内置项目同样生效**（2026-10-19 粉丝反馈修复）：
+	// 停用后新生成/新编辑的账单不再收这一项（读数仍照常记录），单据上自然不再出现。
+	// 历史账单是按开票时的快照计费的，停用不会改写已开出的账单——要隐藏历史账单上
+	// 的那一行用 ReceiptHidden。
+	Enabled bool `gorm:"default:true" json:"enabled"`
+	// ReceiptHidden 单据不单列该项目（2026-10-19 粉丝反馈「单据能不能自定义显示项目」）。
+	//
+	// 语义：打印/预览收费单据时这一行不显示；若本期它仍有金额，则合并成一行
+	// 「其他费用」显示（不列具体名称），保证**单据明细之和仍等于合计**。
+	// 它只影响单据展示，账单详情、统计分析、收款分摊一律照常可见可算。
+	ReceiptHidden bool      `gorm:"default:false" json:"receipt_hidden"`
 	Sort          int       `json:"sort"`
 	BuiltIn       bool      `gorm:"default:false" json:"built_in"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// feeItemInSeason 判断收费项目在 period 这个账期是否处于生效月份内。
+//
+// 两个边界都是 0 表示不限 → 恒 true（存量项目与不开窗口的项目行为完全不变）。
+// 跨年写法（From > To，如 11 → 3）按「冬季环绕」处理。
+func feeItemInSeason(fi FeeItem, period string) bool {
+	from, to := fi.SeasonFromMonth, fi.SeasonToMonth
+	if from == 0 && to == 0 {
+		return true
+	}
+	// 解析失败时放行（按不限处理）：宁可照旧收，也不因脏账期静默漏收费用。
+	t, err := time.ParseInLocation("2006-01", strings.TrimSpace(period), time.Local)
+	if err != nil {
+		return true
+	}
+	month := int(t.Month())
+	switch {
+	case from == 0:
+		return month <= to // 只填结束月：该月及之前
+	case to == 0:
+		return month >= from // 只填起始月：该月及之后
+	case from <= to:
+		return month >= from && month <= to
+	default:
+		// 跨年：11 → 3 表示 11、12、1、2、3 月
+		return month >= from || month <= to
+	}
+}
+
+// validSeasonMonth 校验生效月份：只允许 0（不限）或 1-12。
+func validSeasonMonth(v int) bool {
+	return v == 0 || (v >= 1 && v <= 12)
 }
 
 // BillItem 账单费用明细快照。账单是账单、缴费是缴费：应付按行看，已收从
@@ -171,23 +230,75 @@ func enabledCustomFeeItems(db *gorm.DB, ledgerID uint) []FeeItem {
 	return items
 }
 
-// fixedItemDue 判断某个 fixed 类收费项目在 period 这个月是否到期应收。
-// 月付租户每月都是固定费账单月，恒到期；季付租户与最近一张"含固定费"的
-// 账期整差 3 个月及以上才到期（错过锚点也能补收），给更早月份补账时视为
-// 到期（尊重开票自由度）。
-func fixedItemDue(db *gorm.DB, room *Room, period string) bool {
-	// 月付：每张账单都应收固定费（此前漏了这一分支，导致月付租户连续
-	// 生成账单时第二个月起租金/卫生费/管理费被清零）。
-	if effectiveRoomBilling(db, room).PayCycle != payCycleQuarterly {
-		return true
+// disabledBuiltInFeeKeys 该台账里被**停用**的内置收费项目 key（新账单不再收这些项）。
+//
+// 为什么需要它（2026-10-19 粉丝反馈修复）：「停用」此前只对自定义项目生效——
+// enabledCustomFeeItems 只查 built_in = false 的自定义项，而内置六项由
+// billBuiltInItems 直接从 bills 固定列生成，**从不读 FeeItem.Enabled**。
+// 于是房东停用燃气费后，账单照旧收、单据照旧印，停用开关形同虚设。
+//
+// 口径：内置项目的启停是**台账级计费开关**，开票时快照进账单（Bill.DisabledFees），
+// 由 recalc 清零；历史账单按快照走，停用不会改写已开出的账单金额。
+func disabledBuiltInFeeKeys(db *gorm.DB, ledgerID uint) []string {
+	keys := make([]string, 0, 6)
+	if db == nil {
+		return keys
 	}
-	return quarterAnchorDue(db, room, period)
+	db.Model(&FeeItem{}).
+		Where("built_in = ? AND enabled = ? AND org_id = ?", true, false, ledgerID).
+		Order("sort ASC, id ASC").Pluck("key", &keys)
+	return keys
 }
 
-// quarterAnchorDue 季付锚点到期判断：与最近一张"含固定费"的账期整差
-// 3 个月及以上才算到期。季付自定义收费项目（无论房间缴费周期）共用此口径。
-// 锚点只在同台账内找：别台账的同房号账单不能当作本台账的收费锚点。
-func quarterAnchorDue(db *gorm.DB, room *Room, period string) bool {
+// hiddenReceiptFeeKeys 该台账里被设为「单据不显示」的收费项目 key。
+//
+// 只影响单据展示（打印/预览）：单据上不单列这些项目；若本期它们仍有金额，
+// 前端合并成一行「其他费用」，保证单据明细之和仍等于合计。
+// 账单详情、统计分析、收款分摊一律不受影响。
+func hiddenReceiptFeeKeys(db *gorm.DB, ledgerID uint) []string {
+	keys := make([]string, 0, 6)
+	if db == nil {
+		return keys
+	}
+	db.Model(&FeeItem{}).
+		Where("receipt_hidden = ? AND org_id = ?", true, ledgerID).
+		Order("sort ASC, id ASC").Pluck("key", &keys)
+	return keys
+}
+
+// fixedItemDue 判断固定费项目（租金/卫生费/管理费）在 period 这个月是否
+// 到期应收。口径统一按**该房生效缴费周期的月数**判锚点：
+//   - 月付：每个月都是锚点月，恒到期；
+//   - 季付/半年付/年付：与最近一张"含固定费"的账期整差 months（3/6/12）个月
+//     及以上才算到期（错过锚点也能补收），给更早月份补账时视为到期
+//     （尊重开票自由度）。
+//
+// 关键：判据来自 effectiveRoomBilling（该房在租租户 → 台账 → 全局默认），
+// 而不是写死的 quarterly —— 否则半年付/年付房会每月重复收 N 个月租金。
+func fixedItemDue(db *gorm.DB, room *Room, period string) bool {
+	months := cycleMonths(effectiveRoomBilling(db, room).PayCycle)
+	if months <= 1 {
+		// 月付：每月都应收固定费（此前漏了这一分支，导致月付租户连续
+		// 生成账单时第二个月起租金/卫生费/管理费被清零）。
+		return true
+	}
+	return cycleAnchorDue(db, room, period, months)
+}
+
+// cycleAnchorDue 锚点到期判断：与最近一张"含固定费"的账期整差 months 个月
+// 及以上才算到期。months 由调用方传入——房间固定费按该房生效的缴费周期取值
+// （见 fixedItemDue）。锚点只在同台账内找：别台账的同房号账单不能当作本台账的
+// 收费锚点。
+//
+// 边界语义：
+//   - 没有历史含固定费账单               → 首账月，到期；
+//   - diff <= 0（给更早/同期月份补账）   → 显式开票，固定费照收；
+//   - diff >= months                     → 已跨过一个完整周期，到期；
+//   - 0 < diff < months                  → 周期内，本期固定费为 0。
+func cycleAnchorDue(db *gorm.DB, room *Room, period string, months int) bool {
+	if months <= 1 {
+		return true // 月付：每月都是锚点
+	}
 	var last Bill
 	q := db.Where(
 		"room_id = ? AND (rent > ? OR sanitation_fee > ? OR management_fee > ? OR extra_amount > ?)",
@@ -200,11 +311,68 @@ func quarterAnchorDue(db *gorm.DB, room *Room, period string) bool {
 	if err != nil {
 		return true // 首账月
 	}
-	diff := monthsBetween(last.Period, period)
-	if diff <= 0 {
-		return true // 补历史账单：显式开票，固定费照收
+	return anchorIntervalDue(last.Period, period, months)
+}
+
+// customItemAnchorDue 自定义收费项目的到期判断：锚点必须落在**该项目自己**
+// 最近一次出现的账期上，不能借用"最近一张含固定费账单"。
+//
+// 为什么必须按项目单独找锚点（2026-10-12，issue #4 需求 2 实测）：月付房的
+// 租金账单每月都含固定费，若共用房间级锚点，上一次固定费账单永远只差 1 个月，
+// 半年付/年付的自定义项目（宽带费等）会**首月收过一次后再也不到期**。
+// 按项目 key 找"最近一次收过它的账期"，N 个月一到就重新到期，与项目自身
+// 周期严格对齐。
+//
+// 找不到历史（项目刚启用，或明细缺失）时按首账月到期处理，宁可先收一次，
+// 也不让房东漏收；diff <= 0（补历史账）同样视为到期。
+//
+// lastByKey 由 customItemLastPeriods 一次性取好（避免每个项目一次查询的 N+1）。
+func customItemAnchorDue(lastByKey map[string]string, feeKey, period string, months int) bool {
+	if months <= 1 {
+		return true // 月付项目每月到期
 	}
-	return diff >= 3
+	lastPeriod, ok := lastByKey[feeKey]
+	if !ok || strings.TrimSpace(lastPeriod) == "" {
+		return true // 该项目还没在账单里出现过：首账月到期
+	}
+	return anchorIntervalDue(lastPeriod, period, months)
+}
+
+// customItemLastPeriods 一次查出该房各收费项目**最近一次**出现在账单里的账期
+// （key → period）。给 customBillItems 判锚点用，避免逐项目查库的 N+1。
+// 明细随账单继承台账，再按账单台账收窄，杜绝跨台账孤儿明细充当锚点。
+func customItemLastPeriods(db *gorm.DB, room *Room) map[string]string {
+	type row struct {
+		FeeKey string
+		Period string
+	}
+	var rows []row
+	q := db.Table("bill_items").
+		Select("bill_items.fee_key AS fee_key, MAX(bills.period) AS period").
+		Joins("JOIN bills ON bills.id = bill_items.bill_id").
+		Where("bills.room_id = ?", room.ID).
+		Group("bill_items.fee_key")
+	if ledgerColumnReady(db, "bills") {
+		q = q.Where("bills.org_id = ?", room.LedgerID)
+	}
+	if err := q.Scan(&rows).Error; err != nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(rows))
+	for _, r := range rows {
+		out[r.FeeKey] = r.Period
+	}
+	return out
+}
+
+// anchorIntervalDue 锚点区间判断：给定"上一次收费账期"与本期账期，判断是否
+// 又跨过一个完整周期。diff <= 0（补历史账）一律到期，尊重开票自由度。
+func anchorIntervalDue(lastPeriod, period string, months int) bool {
+	diff := monthsBetween(lastPeriod, period)
+	if diff <= 0 {
+		return true
+	}
+	return diff >= months
 }
 
 // setupFeeRoutes 收费项目 / 收款流水 / 统计分析的接口。
@@ -252,7 +420,32 @@ type feeItemRequest struct {
 	Cycle         string  `json:"cycle"`
 	DefaultAmount float64 `json:"default_amount"`
 	Enabled       *bool   `json:"enabled"`
-	Sort          *int    `json:"sort"`
+	// ReceiptHidden 单据不单列该项目（只影响单据展示，不影响账单金额与账单详情）。
+	// 指针区分「不传」（编辑时不动）与「显式取消隐藏」。
+	ReceiptHidden *bool `json:"receipt_hidden"`
+	Sort          *int  `json:"sort"`
+	// 生效月份窗口（issue #5 需求 6）。用指针区分「不传」与「传 0」：
+	// 不传 = 保持原值（编辑时不动），传 0 = 显式改回不限。
+	SeasonFromMonth *int `json:"season_from_month"`
+	SeasonToMonth   *int `json:"season_to_month"`
+}
+
+// applySeason 把请求里的生效月份写进项目，并校验取值范围。
+// 返回错误文案（空串=通过）。两个边界都不传时保持原值不变。
+func applySeason(item *FeeItem, req *feeItemRequest) string {
+	if req.SeasonFromMonth != nil {
+		if !validSeasonMonth(*req.SeasonFromMonth) {
+			return "供暖季起始月份应为 1-12，0 表示不限"
+		}
+		item.SeasonFromMonth = *req.SeasonFromMonth
+	}
+	if req.SeasonToMonth != nil {
+		if !validSeasonMonth(*req.SeasonToMonth) {
+			return "供暖季结束月份应为 1-12，0 表示不限"
+		}
+		item.SeasonToMonth = *req.SeasonToMonth
+	}
+	return ""
 }
 
 func handleFeeItemCreate(db *gorm.DB) gin.HandlerFunc {
@@ -285,10 +478,15 @@ func handleFeeItemCreate(db *gorm.DB) gin.HandlerFunc {
 			Cycle:         cycle,
 			DefaultAmount: round2(req.DefaultAmount),
 			Enabled:       req.Enabled == nil || *req.Enabled,
+			ReceiptHidden: req.ReceiptHidden != nil && *req.ReceiptHidden,
 			Sort:          100,
 		}
 		if req.Sort != nil {
 			item.Sort = *req.Sort
+		}
+		if msg := applySeason(&item, &req); msg != "" {
+			response.ErrorBadRequest(c, msg)
+			return
 		}
 		if err := db.Create(&item).Error; err != nil {
 			response.ErrorInternal(c, "创建收费项目失败")
@@ -323,8 +521,15 @@ func handleFeeItemUpdate(db *gorm.DB) gin.HandlerFunc {
 		if req.Enabled != nil {
 			item.Enabled = *req.Enabled
 		}
+		if req.ReceiptHidden != nil {
+			item.ReceiptHidden = *req.ReceiptHidden
+		}
 		if req.Sort != nil {
 			item.Sort = *req.Sort
+		}
+		if msg := applySeason(&item, &req); msg != "" {
+			response.ErrorBadRequest(c, msg)
+			return
 		}
 		if err := db.Save(&item).Error; err != nil {
 			response.ErrorInternal(c, "保存收费项目失败")
@@ -433,7 +638,7 @@ func billBuiltInItems(b Bill) []BillItem {
 	return items
 }
 
-// coveredItemDetail 固定费项目的覆盖区间说明（月付=单月，季付=三个月区间）。
+// coveredItemDetail 固定费项目的覆盖区间说明（月付=单月，多月=覆盖月份区间）。
 func coveredItemDetail(covered string, months int, extra string) string {
 	if months > 1 {
 		if extra != "" {
@@ -452,40 +657,74 @@ func fmtAmount(v float64) string {
 	return strings.TrimRight(strings.TrimRight(s, "0"), ".")
 }
 
-// customBillItems 按启用的自定义 fixed 项目生成账单明细行（金额按项目周期与
-// 到期情况计：quarterly 项目到期时收 3 个月，monthly 每月收）。
+// customBillItems 按启用的自定义 fixed 项目生成账单明细行（金额按项目自身
+// 周期与到期情况计：周期覆盖 N 个月的项目到期时收 N 个月，月付每月收）。
 // 项目只在账单所属台账内取：别台账的自定义项目不能并入本台账的账单。
 // 租户勾选排除的项目（该房生效的"不参与计费项目"）不并入。
+//
+// 周期取值：项目自身 Cycle 经 normalizePayCycle 归一（写库时已 parse 过），
+// 四周期 monthly/quarterly/semiannual/annual 全部支持，未知值兜底为月付。
+// 锚点按**项目自己**的收费历史判断（customItemAnchorDue），不借用房间固定费
+// 的锚点：房间可能月付，而项目是半年付/年付。
 func customBillItems(db *gorm.DB, room *Room, period string) ([]BillItem, float64) {
 	items := make([]BillItem, 0)
 	excluded := excludedFeeSet(effectiveRoomExcludedFees(db, room))
+	// 各项目最近一次收费账期一次取好（判锚点用，避免 N+1）；全是月付项目时
+	// 用不上，仍查一次也无妨（单房多条明细，代价可控）。
+	lastByKey := customItemLastPeriods(db, room)
 	var extra float64
 	for _, fi := range enabledCustomFeeItems(db, room.LedgerID) {
 		if excluded[fi.Key] {
 			continue // 租户不参与该项目，本期不收
 		}
-		months := 1
-		if fi.Cycle == payCycleQuarterly {
-			// 季付自定义项目按自身周期锚点判断到期（月付房里不会因
-			// 每月都有租金账单而每月重复收 3 个月）。
-			if !quarterAnchorDue(db, room, period) {
-				continue // 未到期，本期不收
-			}
-			months = 3
+		// 生效月份窗口（issue #5 需求 6）：窗口外本期不收，例如取暖费只在供暖季出账。
+		//
+		// **必须在判周期锚点之前跳过**：窗口外的月份不算"这个月收过该项目"，
+		// 否则锚点会被这些月份推进，窗口一开反而要多等一个周期才收得上来。
+		if !feeItemInSeason(fi, period) {
+			continue
+		}
+		months := cycleMonths(fi.Cycle) // 月付 1、季付 3、半年付 6、年付 12
+		if months > 1 && !customItemAnchorDue(lastByKey, fi.Key, period, months) {
+			// 多月项目按自身周期锚点判断到期（月付房里不会因每月都有
+			// 租金账单而每月重复收 N 个月，也不会收了首期后再无下期）。
+			continue // 未到期，本期不收
 		}
 		amount := round2(fi.DefaultAmount * float64(months))
 		if amount <= 0 {
 			continue
 		}
 		covered := coveredPeriodText(period, fi.Cycle)
+		detail := coveredItemDetail(covered, months, "自定义项目")
+		// 有生效月份窗口的项目，把「几月到几月」写进明细，房东核对账时不用再去翻项目设置。
+		if season := seasonRangeText(fi); season != "" {
+			detail += " · 仅 " + season + " 收取"
+		}
 		items = append(items, BillItem{
 			FeeKey: fi.Key, Name: fi.Name, Kind: feeKindFixed,
 			Amount: amount, Cycle: fi.Cycle,
-			Detail: coveredItemDetail(covered, months, "自定义项目"),
+			Detail: detail,
 		})
 		extra = round2(extra + amount)
 	}
 	return items, extra
+}
+
+// seasonRangeText 把生效月份窗口渲染成「11–3 月」这样的短文案；不限时返回空串。
+func seasonRangeText(fi FeeItem) string {
+	from, to := fi.SeasonFromMonth, fi.SeasonToMonth
+	switch {
+	case from == 0 && to == 0:
+		return ""
+	case from == 0:
+		return fmt.Sprintf("1–%d 月", to)
+	case to == 0:
+		return fmt.Sprintf("%d–12 月", from)
+	case from == to:
+		return fmt.Sprintf("%d 月", from)
+	default:
+		return fmt.Sprintf("%d–%d 月", from, to)
+	}
 }
 
 // handlePaymentList 收款流水（时间倒序 + 月份区间筛选），带账单快照字段。
@@ -634,12 +873,22 @@ func handleAnalytics(db *gorm.DB) gin.HandlerFunc {
 			Where("bill_id IN (SELECT id FROM bills WHERE period >= ? AND org_id IN ?)", start[:7], ledgerIDs).
 			Group("name").Order("amount DESC").Scan(&itemRows)
 
-		// 当前欠缴总额（可见台账内全部未缴清账单）。
-		var arrears float64
-		db.Model(&Bill{}).Where("status <> ?", billStatusPaid).
-			Where("org_id IN ?", ledgerIDs).
-			Select("COALESCE(SUM(total_amount - paid_amount), 0)").Scan(&arrears)
-		arrears = round2(arrears)
+		// 当前欠缴总额（可见台账内的未结净额）。
+		//
+		// 口径与总览一致（见 stats.go 的说明）：对**全部账单**求和再相减，
+		// 让「多交顺延」的超收能冲减前面的欠缴。若按 status<>paid 过滤，
+		// 多收的那张单会被排除，导致明明已抵扣完还显示欠款。
+		//
+		// 未开启结转的台账没有超收，两种算法等价，对老用户零影响。
+		var billedAll, paidAll float64
+		db.Model(&Bill{}).Where("org_id IN ?", ledgerIDs).
+			Select("COALESCE(SUM(total_amount), 0)").Scan(&billedAll)
+		db.Model(&Bill{}).Where("org_id IN ?", ledgerIDs).
+			Select("COALESCE(SUM(paid_amount), 0)").Scan(&paidAll)
+		arrears := round2(billedAll - paidAll)
+		if arrears < 0 {
+			arrears = 0 // 净多收：欠缴额最小为 0，不显示负数欠款
+		}
 
 		rate := 0.0
 		if sumBilled > 0 {
@@ -703,6 +952,32 @@ func registerFeeModels() {
 				}
 			}
 			return nil
+		},
+	})
+
+	// 0.6.14：收费项目的「单据显示」开关，以及内置项目停用真正生效（0.6.13 粉丝反馈）。
+	//
+	// 只做加法：
+	//   - fee_items 补 receipt_hidden 列（AutoMigrate 已加），默认 false = 照旧显示；
+	//   - bills 补 disabled_fees 列（同样是 AutoMigrate 加），默认空 = 没有任何停用项。
+	//
+	// **存量数据一行不动**：老账单的金额、明细与单据显示与升级前完全一致。
+	// 新列的回填没有业务含义（false / 空 JSON 就是升级前的口径），因此这里只做
+	// NEW 列的空值兜底，避免老库读出 NULL 让 JSON 反序列化失败。
+	database.Upgrades = append(database.Upgrades, database.Upgrade{
+		Version: "0.6.14",
+		Name:    "rental_fee_item_receipt_hidden",
+		Upgrade: func(db *gorm.DB) error {
+			if err := db.Exec("UPDATE fee_items SET receipt_hidden = 0 WHERE receipt_hidden IS NULL").Error; err != nil {
+				return err
+			}
+			if err := db.Exec("UPDATE bills SET disabled_fees = '[]' WHERE disabled_fees IS NULL").Error; err != nil {
+				return err
+			}
+			// 内置项目的 enabled 列在更早的版本里没有 default 兜底，老库可能读出 NULL；
+			// NULL 会被 GORM 当成 false，等于把全部内置项目判成「已停用」——
+			// 那样升级后新账单会一分钱不收。这里统一按 1（启用）兜底，与升级前一致。
+			return db.Exec("UPDATE fee_items SET enabled = 1 WHERE enabled IS NULL").Error
 		},
 	})
 }

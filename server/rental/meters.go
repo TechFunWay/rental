@@ -7,6 +7,7 @@
 package rental
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,15 @@ type meterRow struct {
 	UsageWater float64 `gorm:"-" json:"usage_water"`
 	UsageElec  float64 `gorm:"-" json:"usage_elec"`
 	UsageGas   float64 `gorm:"-" json:"usage_gas"`
+	// PhotoCount 该房该账期的抄表照片数（水/电/燃气合计）。列表页据此显示
+	// 「照片 n」入口，不必为每一行再发一次请求；点开才按房+账期取照片。
+	PhotoCount int64 `gorm:"-" json:"photo_count"`
+	// 本期账单：该房该账期已开票时给出金额，列表页直接显示「账单 ￥x」，
+	// 并单列其中的自定义收费合计，避免新增的收费项目在抄表记录里看不出效果
+	//（2026-10-17 粉丝反馈）。未开票时三者都是零值。
+	BillID    uint    `gorm:"-" json:"bill_id"`
+	BillTotal float64 `gorm:"-" json:"bill_total"`
+	BillExtra float64 `gorm:"-" json:"bill_extra"`
 }
 
 func init() {
@@ -180,6 +190,59 @@ func fillMeterRows(db *gorm.DB, c *gin.Context, rows []meterRow) {
 		rows[i].UsageWater = meterUsage(prev[0], cur[0])
 		rows[i].UsageElec = meterUsage(prev[1], cur[1])
 		rows[i].UsageGas = meterUsage(prev[2], cur[2])
+	}
+
+	// 抄表照片数：一次分组查询取本页涉及房间与账期的合计（水/电/燃气一起算），
+	// 列表页据此显示「照片 n」，避免逐行请求（SQLite 单连接，N+1 代价高）。
+	periods := make([]string, 0, len(rows))
+	seen := map[string]bool{}
+	for i := range rows {
+		if !seen[rows[i].Period] {
+			seen[rows[i].Period] = true
+			periods = append(periods, rows[i].Period)
+		}
+	}
+	type photoCount struct {
+		RoomID uint
+		Period string
+		N      int64
+	}
+	counts := make([]photoCount, 0)
+	pq, _ := scopeLedger(db.Model(&MeterPhoto{}), c)
+	pq.Select("room_id, period, count(*) AS n").
+		Where("room_id IN ? AND period IN ?", roomIDs, periods).
+		Group("room_id, period").Scan(&counts)
+	countByKey := map[string]int64{}
+	for _, pc := range counts {
+		countByKey[fmt.Sprintf("%d|%s", pc.RoomID, pc.Period)] = pc.N
+	}
+	for i := range rows {
+		rows[i].PhotoCount = countByKey[fmt.Sprintf("%d|%s", rows[i].RoomID, rows[i].Period)]
+	}
+
+	// 本期账单：一次查出本页涉及的 (房间, 账期) 账单，列表页直接展示本期
+	// 应收金额与其中的自定义收费合计（未开票的房间保持零值）。
+	type billInfo struct {
+		ID          uint
+		RoomID      uint
+		Period      string
+		TotalAmount float64
+		ExtraAmount float64
+	}
+	bills := make([]billInfo, 0)
+	bq, _ := scopeLedger(db.Model(&Bill{}), c)
+	bq.Select("id, room_id, period, total_amount, extra_amount").
+		Where("room_id IN ? AND period IN ?", roomIDs, periods).Scan(&bills)
+	billByKey := map[string]billInfo{}
+	for _, b := range bills {
+		billByKey[fmt.Sprintf("%d|%s", b.RoomID, b.Period)] = b
+	}
+	for i := range rows {
+		if b, ok := billByKey[fmt.Sprintf("%d|%s", rows[i].RoomID, rows[i].Period)]; ok {
+			rows[i].BillID = b.ID
+			rows[i].BillTotal = b.TotalAmount
+			rows[i].BillExtra = b.ExtraAmount
+		}
 	}
 }
 
