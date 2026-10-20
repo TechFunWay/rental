@@ -56,7 +56,8 @@
               <th class="py-3 px-4 font-medium">位置</th>
               <th class="py-3 px-4 font-medium text-right">月租金（元）</th>
               <th class="py-3 px-4 font-medium text-right">卫生费（元/月）</th>
-              <th class="py-3 px-4 font-medium text-right">管理费（元/月）</th>
+              <!-- 房东口语里把这项叫「物业费」，与账单收费项目「管理费」是同一项 -->
+              <th class="py-3 px-4 font-medium text-right whitespace-nowrap">管理费／物业费（元/月）</th>
               <th class="py-3 px-4 font-medium">电/燃气单价</th>
               <th class="py-3 px-4 font-medium">计费与缴费（随租户）</th>
               <th class="py-3 px-4 font-medium">在租租户</th>
@@ -193,6 +194,29 @@
             <p class="text-[11px] text-muted-foreground mt-1">{{ houseStyle === 'rural' ? '同一村组/地址内不能重复' : '同一小区内房号不能重复' }}</p>
           </div>
         </div>
+        <!-- 定位地址与面积（2026-10-20 粉丝需求）：地图搜不到的老房/民房靠一段文字
+             位置描述找人；面积是签合同、算物业费时的常用数字。两者都选填。 -->
+        <div class="rounded-xl border border-border p-3.5 space-y-2.5">
+          <div class="flex items-center justify-between gap-2">
+            <p class="text-xs font-semibold text-muted-foreground">位置与面积（选填）</p>
+            <span class="text-[11px] text-muted-foreground">签合同、带看、算物业费都用得上</span>
+          </div>
+          <label class="block">
+            <span class="text-[11px] text-muted-foreground">定位地址</span>
+            <input
+              v-model="form.address" class="input-field !py-2 mt-1" maxlength="200"
+              :placeholder="houseStyle === 'rural' ? '如 双联村村委东侧第二排第三间' : '如 幸福路 88 号 3 栋东单元（导航到小区门口，进门左转）'"
+            />
+            <p class="text-[11px] text-muted-foreground mt-1">楼栋/房号之外的位置补充，方便租客找、也方便打印在合同上。</p>
+          </label>
+          <label class="block">
+            <span class="text-[11px] text-muted-foreground">建筑面积（㎡）</span>
+            <input
+              v-model.number="form.area_size" type="number" step="0.01" min="0" max="100000"
+              class="input-field !py-2 mt-1" placeholder="如 68.5，留空表示未填"
+            />
+          </label>
+        </div>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">标签</label>
           <TagInput v-model="formTags" :suggestions="tagSuggestions" placeholder="如 物业代管 / 临街 / 精装，回车添加" />
@@ -269,7 +293,7 @@
             <input v-model.number="form.default_sanitation_fee" type="number" step="0.01" min="0" class="input-field" />
           </div>
           <div>
-            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">管理费（元/月）</label>
+            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">管理费／物业费（元/月）</label>
             <input v-model.number="form.default_management_fee" type="number" step="0.01" min="0" class="input-field" />
           </div>
         </div>
@@ -584,6 +608,7 @@ function openCreate() {
     default_rent: 0, default_sanitation_fee: 0, default_management_fee: 0,
     elec_price: 0, gas_price: 0,
     initial_water: 0, initial_elec: 0, initial_gas: 0,
+    address: '', area_size: 0,
     tags: [],
     notes: '',
   }
@@ -881,6 +906,10 @@ async function save() {
       initial_water: Number(form.value.initial_water) || 0,
       initial_elec: Number(form.value.initial_elec) || 0,
       initial_gas: Number(form.value.initial_gas) || 0,
+      // 定位地址与面积（2026-10-20）：地址截到 200 字（与后端上限一致），
+      // 面积 0 = 未填，负数按 0 处理（后端同样会拒，前端先兜一层）
+      address: (form.value.address || '').trim().slice(0, 200),
+      area_size: Math.max(0, Number(form.value.area_size) || 0),
       tags: form.value.tags ?? [],
       notes: form.value.notes,
       landlord_name: (form.value.landlord_name || '').trim(),

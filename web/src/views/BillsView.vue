@@ -64,7 +64,8 @@
               <th colspan="6" class="py-2 px-3 font-medium text-center border-b border-border/60">抄数（上月 → 本月）</th>
               <th colspan="3" class="py-2 px-3 font-medium text-center border-b border-border/60">抄表费用</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">卫生费（元）</th>
-              <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">管理费（元）</th>
+              <!-- 房东口语叫「物业费」，与收费项目「管理费」是同一项，表头带说明避免对不上 -->
+              <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom" title="即房东常说的物业费，按房源设置的默认金额计入账单">管理费／物业费（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom" title="入住押金：只在租户首张账单上收一次">押金（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">本月租金（元）</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">已收（元）</th>
@@ -285,7 +286,7 @@
             <input v-model.number="editForm.sanitation_fee" type="number" step="0.01" min="0" class="input-field" :disabled="feeExcluded('sanitation')" />
           </div>
           <div>
-            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">管理费（元）</label>
+            <label class="text-xs font-semibold text-muted-foreground block mb-1.5">管理费／物业费（元）</label>
             <input v-model.number="editForm.management_fee" type="number" step="0.01" min="0" class="input-field" :disabled="feeExcluded('management')" />
           </div>
           <!-- 押金：只在首张账单上出现。不参与「排除项」（服务端也不受它影响），

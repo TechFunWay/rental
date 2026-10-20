@@ -114,6 +114,16 @@ type Room struct {
 	Notes         string    `json:"notes"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+
+	// Address / AreaSize 定位地址与建筑面积（2026-10-20 房东需求）：地图定位与门牌
+	// 之外的补充位置描述（如「XX路XX号门口便利店旁」）和面积大小，都选填；
+	// Address ≤200 字，AreaSize 0~100000 ㎡（0 = 未填），校验见 rooms.go。
+	//
+	// 之所以放在结构体末尾：两者不参与任何计费计算，只是展示与合同/清单打印用；
+	// 插在前面的字段组里会让 gofmt 重排那一整段的列对齐（几十行纯空格 diff），
+	// 放在末尾自成一组，改动一眼看得清。
+	Address  string  `json:"address"`
+	AreaSize float64 `gorm:"default:0" json:"area_size"`
 }
 
 // Tenant 租户。宿舍场景同一房间可登记多名在租租户；

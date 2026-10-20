@@ -6,7 +6,7 @@
 #
 # 镜像需先构建或拉取：
 #   - 本地构建：make build-docker-multi（多平台 OCI）或 make build-docker
-#   - 远程部署：需先将 techfunways/rental:v0.7.0 推送到镜像仓库
+#   - 远程部署：需先将 techfunways/rental:v0.7.1 推送到镜像仓库
 #
 # 升级到新版本时，修改下方 image 版本号后重新执行：
 #   docker compose -f docker-compose.version.yml pull && \
@@ -14,7 +14,7 @@
 version: '3.8'
 services:
   rental:
-    image: techfunways/rental:v0.7.0
+    image: techfunways/rental:v0.7.1
     container_name: techfunway-rental
     ports:
       - "8910:8910"
