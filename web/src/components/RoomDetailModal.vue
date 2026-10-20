@@ -43,7 +43,13 @@
       <!-- 房间物品台账（issue #5 需求 5）：跟着房子走、不绑租客。
            房东据此分清哪些是自己买的、哪些是租客自带的，退租时照清单核对缺失与损坏。 -->
       <div class="rounded-xl border border-border p-3">
-        <RoomItemsCard :room-id="room.id" :can-edit="canEditRooms" />
+        <RoomItemsCard
+          :room-id="room.id"
+          :can-edit="canEditRooms"
+          :room-label="printRoomLabel"
+          :landlord-name="room.landlord_name || ''"
+          :tenant-name="tenants.map((t) => t.name).join('、')"
+        />
       </div>
 
       <!-- 在租租户：姓名/手机号/身份证等资料，一次看全 -->
@@ -231,6 +237,14 @@ const locationText = computed(() => {
   return [r.community, r.building, r.unit, r.floor ? r.floor + '层' : ''].filter(Boolean).join(' ') || '—'
 })
 
+/** 物品清单打印上的房屋名：位置 + 房号 + 定位地址（地址是 2026-10-20 新增字段）。 */
+const printRoomLabel = computed(() => {
+  const r = props.room
+  if (!r) return ''
+  const label = [locationText.value, r.room_no].filter(Boolean).join(' ')
+  return r.address ? `${label}（${r.address}）` : label
+})
+
 // 概况里的字段表：手机端两列、桌面三列，金额与单价都带单位，避免"裸数字"
 const roomFacts = computed(() => {
   const r = props.room
@@ -239,8 +253,11 @@ const roomFacts = computed(() => {
   const gas = (r.gas_price || 0) > 0 ? r.gas_price : billingDefaults.value.gasPrice
   return [
     { label: '月租金', value: `${fmtMoney(r.default_rent)} 元` },
+    // 面积与定位地址在 2026-10-20 新增；未填时不占位置（老房源不用补）。
+    ...(Number(r.area_size || 0) > 0 ? [{ label: '建筑面积', value: `${numText(r.area_size)} ㎡` }] : []),
+    ...(r.address ? [{ label: '定位地址', value: r.address }] : []),
     { label: '卫生费', value: `${fmtMoney(r.default_sanitation_fee)} 元/月` },
-    { label: '管理费', value: `${fmtMoney(r.default_management_fee)} 元/月` },
+    { label: '管理费（物业费）', value: `${fmtMoney(r.default_management_fee)} 元/月` },
     { label: '电单价', value: `${numText(elec)} 元/度` },
     { label: '燃气单价', value: `${numText(gas)} 元/方` },
     { label: '计费与缴费（随租户）', value: roomBillingSummary(r.billing) },

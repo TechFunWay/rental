@@ -46,6 +46,14 @@ type billingView struct {
 	ExcludedFees    []string `json:"excluded_fees"`     // 不参与计费的项目 key（空=全部参与）
 }
 
+// maxRoomAddressRunes / maxRoomAreaSize 是定位地址与建筑面积的校验上限（2026-10-20
+// 房东需求），表单（validateRoomRequest）与 CSV 导入（importRoomRow）共用一个口径。
+// 面积上限 100000 ㎡ 是防呆：真实住宅不可能到十万平，挡掉把平方尺/亩当㎡填这类单位错误。
+const (
+	maxRoomAddressRunes = 200
+	maxRoomAreaSize     = 100000.0
+)
+
 type roomRequest struct {
 	Community            string   `json:"community"` // 小区（单小区可留空）
 	RoomNo               string   `json:"room_no" binding:"required"`
@@ -61,7 +69,11 @@ type roomRequest struct {
 	InitialElec          float64  `json:"initial_elec"`
 	InitialGas           float64  `json:"initial_gas"`
 	Tags                 []string `json:"tags"`
-	Notes                string   `json:"notes"`
+	// 定位地址与建筑面积（2026-10-20 房东需求）：都是选填，校验见 validateRoomRequest
+	// （地址 ≤200 字；面积 0=未填，上限 100000 ㎡，挡掉单位填错这类明显脏数据）。
+	Address  string  `json:"address"`
+	AreaSize float64 `json:"area_size"`
+	Notes    string  `json:"notes"`
 	// 房东姓名与联系电话（选填）
 	LandlordName  string `json:"landlord_name"`
 	LandlordPhone string `json:"landlord_phone"`
@@ -396,6 +408,15 @@ func validateRoomRequest(req *roomRequest) string {
 	if req.InitialWater < 0 || req.InitialElec < 0 || req.InitialGas < 0 {
 		return "抄表底数不能为负数"
 	}
+	// 定位地址与面积（2026-10-20 房东需求）：都选填，填了就要合理——
+	// 地址限 200 字防粘贴整段公告；面积 0=未填，上限 100000 ㎡挡掉把
+	// 平方尺/亩当㎡填这类单位错误（真实住宅不可能到十万平）。
+	if len([]rune(strings.TrimSpace(req.Address))) > maxRoomAddressRunes {
+		return "定位地址不能超过 200 字"
+	}
+	if req.AreaSize < 0 || req.AreaSize > maxRoomAreaSize {
+		return "建筑面积必须在 0~100000 ㎡ 之间（0 表示未填）"
+	}
 	// 房东姓名与电话都是选填，但填了就要像样：姓名不超 30 字、电话走与登记链接
 	// 同一套宽松规则（允许座机与分隔符），避免存进打不通的号码。
 	if len([]rune(strings.TrimSpace(req.LandlordName))) > 30 {
@@ -424,6 +445,9 @@ func applyRoomRequest(room *Room, req *roomRequest) {
 	room.InitialElec = req.InitialElec
 	room.InitialGas = req.InitialGas
 	room.Tags = normalizeTags(req.Tags)
+	// 定位地址与面积：创建/更新都走这里，统一 trim（地址是自由文本，去首尾空白即可）。
+	room.Address = strings.TrimSpace(req.Address)
+	room.AreaSize = req.AreaSize
 	room.LandlordName = strings.TrimSpace(req.LandlordName)
 	room.LandlordPhone = strings.TrimSpace(req.LandlordPhone)
 	room.Notes = req.Notes

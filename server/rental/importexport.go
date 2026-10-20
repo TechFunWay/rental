@@ -127,14 +127,17 @@ func handleBillsExport(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// roomExportColumns 是房源导出的 20 列表头：前 14 列是房源自身字段，
+// roomExportColumns 是房源导出的 22 列表头：房源自身字段列与导入模板同名同序，
 // "水费模式/水费单价/水费包月金额"与"缴费周期/缴费日/提前提醒天数" 6 列
 // 是该房当前生效的租户级设置（在租租户 → 全局默认），仅用于核对口径，
 // 房源导入不接受这 6 列的写入（见 importRoomsCSV）。
+// 末尾的"定位地址/面积(㎡)"是 2026-10-20 房东需求新增的两列；追加在末尾、
+// 不动既有列顺序，保证用户手里的旧 20 列导出文件仍可回导（见 roomHeaderSlots）。
 var roomExportColumns = [...]string{
 	"房号", "小区", "楼栋", "单元", "楼层", "默认租金", "默认卫生费", "默认管理费",
 	"水费模式", "水费单价", "水费包月金额", "电费单价", "燃气单价", "水表底数", "电表底数", "燃气表底数", "备注",
 	"缴费周期", "缴费日", "提前提醒天数",
+	"定位地址", "面积(㎡)",
 }
 
 // handleRoomsExport 导出房源列表。
@@ -179,6 +182,7 @@ func handleRoomsExport(db *gorm.DB) gin.HandlerFunc {
 				formatPrice(r.InitialWater), formatPrice(r.InitialElec), formatPrice(r.InitialGas),
 				r.Notes,
 				cycleLabel(cfg.PayCycle), payDay, strconv.Itoa(cfg.RemindDays),
+				r.Address, formatArea(r.AreaSize),
 			})
 		}
 		writeCSV(c, utils.ExportFilename("rental_rooms", "csv"), rows)
@@ -583,18 +587,31 @@ func formatPrice(v float64) string {
 	return s
 }
 
+// formatArea 建筑面积输出：0（未填）导出空单元格而不是 "0"——回导时空值走
+// "留空保留原值"合并，与表单里 0=未填 的语义保持一致。
+func formatArea(v float64) string {
+	if v <= 0 {
+		return ""
+	}
+	return formatPrice(v)
+}
+
 // ---------------------------------------------------------------------------
 // 房源导入
 // ---------------------------------------------------------------------------
 
-// roomColumns 是房源导入模板的 14 列表头，与房源编辑表单字段一一对应。
+// roomColumns 是房源导入模板的 16 列表头，与房源编辑表单字段一一对应。
 // 计费与缴费设置（水费模式/单价/包月、缴费周期/缴费日/提醒天数）自 v0.2.3
 // 起挂在租户上，不在房源导入范围内，模板刻意不含这些列。
+// 末尾的"定位地址/面积(㎡)"是 2026-10-20 房东需求新增的两列；只追加在末尾、
+// 不动既有列的顺序与名称，用户手里的旧 14 列文件仍可导入（缺列按留空处理，
+// 见 roomHeaderSlots）。
 var roomColumns = [...]string{
 	"房号", "小区", "楼栋", "单元", "楼层",
 	"默认租金", "默认卫生费", "默认管理费",
 	"电费单价", "燃气单价",
 	"水表底数", "电表底数", "燃气表底数", "备注",
+	"定位地址", "面积(㎡)",
 }
 
 // handleRoomTemplate 下载房源导入模板：表头 + 2 行示例。
@@ -602,37 +619,60 @@ func handleRoomTemplate(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rows := [][]string{roomColumns[:]}
 		rows = append(rows,
-			[]string{"101", "阳光小区", "1栋", "1单元", "3", "1500", "10", "30", "1.2", "3.5", "100", "800", "50", "示例行，可删除"},
-			[]string{"102", "", "", "", "", "1200", "", "", "", "", "", "", "", ""},
+			[]string{"101", "阳光小区", "1栋", "1单元", "3", "1500", "10", "30", "1.2", "3.5", "100", "800", "50", "示例行，可删除", "XX路XX号门口便利店旁", "68"},
+			[]string{"102", "", "", "", "", "1200", "", "", "", "", "", "", "", "", "", ""},
 		)
 		writeCSV(c, utils.ExportFilename("rental_rooms_import_template", "csv"), rows)
 	}
 }
 
 // roomSlots 把房源字段的语义槽位（下标与 roomColumns 一致）映射到 CSV 列
-// 下标，用于兼容两种表头：14 列导入模板与 20 列房源导出文件（导出 → 修改
-// → 回导）。导出文件多出的 6 列计费/缴费设置不参与映射，值一律忽略——
-// 它们是租户级设置的当前生效值，房源表已不再存储（v0.2.3 迁移搬走）。
+// 下标，用于兼容四种表头：旧 14 列导入模板、新 16 列导入模板、旧 20 列房源
+// 导出、新 22 列房源导出（导出 → 修改 → 回导）。导出文件多出的 6 列计费/
+// 缴费设置不参与映射，值一律忽略——它们是租户级设置的当前生效值，房源表已
+// 不再存储（v0.2.3 迁移搬走）。槽位为 -1 表示该字段在这份表头里没有对应列
+// （用户手里的旧文件缺「定位地址 / 面积(㎡)」），读取时按留空处理。
 type roomSlots [len(roomColumns)]int
+
+// 新增两列只追加在两种表头的**末尾**，既有列的顺序与名称一律不动，所以旧文件
+// 的列数正好是「新列数 - 2」。这两个常量让四种长度组合共用同一套比对逻辑。
+const (
+	legacyRoomColumns   = len(roomColumns) - 2       // 旧导入模板 14 列
+	legacyExportColumns = len(roomExportColumns) - 2 // 旧房源导出 20 列
+)
 
 func roomHeaderSlots(header []string) (roomSlots, bool) {
 	var slots roomSlots
+	for i := range slots {
+		slots[i] = -1
+	}
 	switch len(header) {
-	case len(roomColumns):
-		for i := range slots {
+	case legacyRoomColumns, len(roomColumns):
+		// 导入模板：逐列同名同序；旧 14 列文件少的两列保持 -1（留空）。
+		for i := range header {
 			if strings.TrimSpace(header[i]) != roomColumns[i] {
 				return slots, false
 			}
 			slots[i] = i
 		}
-	case len(roomExportColumns):
-		// 导出表头：14 个房源字段列去掉中间插入的 3 列水费设置后的下标。
-		exportFieldCols := [len(roomColumns)]int{0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16}
+	case legacyExportColumns, len(roomExportColumns):
+		// 导出表头：14 个房源字段列中间插了 3 列水费设置，按下标跳过。
+		exportFieldCols := [legacyRoomColumns]int{0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16}
 		for i, col := range exportFieldCols {
 			if strings.TrimSpace(header[col]) != roomExportColumns[col] {
 				return slots, false
 			}
 			slots[i] = col
+		}
+		// 新 22 列导出：末尾两列就是定位地址/面积；旧 20 列导出没有，留 -1。
+		if len(header) == len(roomExportColumns) {
+			for j, col := range []int{legacyExportColumns, legacyExportColumns + 1} {
+				name := roomColumns[legacyRoomColumns+j]
+				if strings.TrimSpace(header[col]) != name {
+					return slots, false
+				}
+				slots[legacyRoomColumns+j] = col
+			}
 		}
 	default:
 		return slots, false
@@ -792,6 +832,23 @@ func importRoomRow(db *gorm.DB, c *gin.Context, rec []string, slots roomSlots, s
 	if v := get(13); v != "" {
 		room.Notes = v
 	}
+	// 定位地址与面积(㎡)（2026-10-20 房东需求新增的两列）：旧表头缺列时槽位是 -1、
+	// get 返回空串，等价于"留空不覆盖"，与其余列的合并规则一致。
+	// 地址超长与面积非法都整行报错（与表单校验同口径，不让脏数据静默落库）。
+	if v := get(14); v != "" {
+		if len([]rune(v)) > 200 {
+			return false, "定位地址不能超过 200 字"
+		}
+		room.Address = v
+	}
+	area, setArea, areaMsg := parseRoomNumber("面积(㎡)", get(15))
+	if areaMsg != "" {
+		return false, areaMsg
+	}
+	if setArea && area > maxRoomAreaSize {
+		return false, "面积(㎡)不能超过 100000"
+	}
+	room.AreaSize = mergeRoomNumber(room.AreaSize, area, setArea, isNew)
 	// 房源上的水费/缴费字段是 0.2.2 及以前的遗留列，此处刻意不动
 	//（与 applyRoomRequest 同规则）：编辑房源不会覆盖或清掉老数据。
 

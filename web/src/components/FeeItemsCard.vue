@@ -171,7 +171,7 @@
             明细相加仍等于合计。
           </p>
         </div>
-        <p class="text-[11px] text-muted-foreground">自定义项目按固定金额 × 周期月数并入账单（季付一次收 3 个月）；水/电/燃气按抄表读数计费，不在此列。周期本次仍只提供月付/季付两项。</p>
+        <p class="text-[11px] text-muted-foreground">自定义项目按固定金额 × 周期月数并入账单（季付一次收 3 个月、半年付 6 个月、年付 12 个月）；水/电/燃气按抄表读数计费，不在此列。</p>
         <p v-if="formError" class="text-sm text-destructive">{{ formError }}</p>
         <div class="flex gap-3 pt-1">
           <button type="button" class="btn-ghost flex-1" @click="showModal = false">取消</button>
@@ -197,21 +197,24 @@ import ConfirmDialog from './ConfirmDialog.vue'
 import Modal from './Modal.vue'
 import { toast } from '../utils/toast'
 import { createFeeItem, deleteFeeItem, getFeeItems, updateFeeItem, type FeeItem } from '../api/rental'
-import { cycleLabel, cycleMonths, type PayCycle } from '../utils/cycle'
+import { cycleLabel, cycleMonths, payCycleOptions, type PayCycle } from '../utils/cycle'
 
-// 自定义收费项目本次只提供月付/季付两项（后端已支持四周期，此处刻意不放开）。
-// 取值与文案集中在 utils/cycle.ts：既保证表单里的 value 是后端认的周期值，
-// 也保证 cycleMonths 换算与「季付 = 3 个月」的展示一致。
-const FEE_ITEM_CYCLES: { value: PayCycle; label: string }[] = [
-  { value: 'monthly', label: cycleLabel('monthly') },
-  { value: 'quarterly', label: cycleLabel('quarterly') },
-]
+// 自定义收费项目的周期下拉：2026-10-20 起放开全部四项（月付/季付/半年付/年付）。
+//
+// 之前只提供月付/季付两项，是担心「半年付/年付」的固定费在非锚点月为 0 会让
+// 用户困惑；但房东实际会遇到宽带费按年交、取暖费按季交这类场景，锁死在季付
+// 反而逼着他们把年费拆成 4 张账单手工算（粉丝反馈「续租周期只到三个月，还会
+// 遇到半年和年付」）。后端 cycle.go/fixedItemDue 早已支持四周期，这里只需
+// 把选项放开——取值与文案仍集中在 utils/cycle.ts，保证与账单口径同源。
+const FEE_ITEM_CYCLES: { value: PayCycle; label: string }[] = payCycleOptions.map((o) => ({
+  value: o.value,
+  label: o.label,
+}))
 
-// 下拉选项：默认就是上面两项。但后端 handleFeeItemCreate/Update 对 cycle 用的是
-// normalizePayCycle（认四个周期），历史数据或直接调接口可能存进半年付/年付。
-// 若原样把它绑进只有两项的 select，浏览器会匹配不到 option 而显示为空白（用户
-// 看不到当前周期、一保存还可能被改成月付）。所以遇到两项之外的合法周期时，把
-// 当前值**临时补进选项**并保持选中，让"展示"与"已存值"不自相矛盾。
+// 下拉选项：四周期全在。仍保留「当前值不在表里就临时补进选项」的兜底——
+// 后端对 cycle 用 normalizePayCycle，将来若再扩周期、或直接调接口写入了未知值，
+// 绑定到 select 会因匹配不到 option 显示空白（用户看不到当前周期、一保存还可
+// 能被改成月付）。补一项并保持选中，让"展示"与"已存值"不自相矛盾。
 const cycleOptions = computed(() => {
   const current = form.value.cycle
   if (!current || FEE_ITEM_CYCLES.some((o) => o.value === current)) return FEE_ITEM_CYCLES

@@ -66,6 +66,10 @@ export interface Room {
   initial_water: number
   initial_elec: number
   initial_gas: number
+  /** 定位地址（2026-10-20 房东需求）：地图定位/门牌之外的补充位置描述，自由文本，≤200 字 */
+  address: string
+  /** 建筑面积（㎡）：0 = 未填（表单留空即 0，展示按未填处理） */
+  area_size: number
   notes: string
   /** 房东姓名与联系电话（选填）：中介/村委核实带看用 */
   landlord_name: string

@@ -8,12 +8,21 @@
           记下这间房里有什么（冰箱/洗衣机/机顶盒/路由器/钥匙…），退租时照着核对缺失与损坏；物品跟着房间走，换租客也还在，每间房最多 {{ ROOM_ITEM_MAX }} 件。
         </p>
       </div>
-      <button
-        v-if="canEdit"
-        type="button"
-        class="btn-brand !px-3 !py-2 text-xs shrink-0"
-        @click="openCreate"
-      >＋ 新增物品</button>
+      <div class="flex items-center gap-2 shrink-0">
+        <!-- 物品清单打印（2026-10-20 粉丝需求）：交房/退房各打一份，双方核对签字 -->
+        <button
+          v-if="items.length > 0"
+          type="button"
+          class="btn-ghost !px-3 !py-2 text-xs"
+          @click="showPrint = true"
+        >打印清单</button>
+        <button
+          v-if="canEdit"
+          type="button"
+          class="btn-brand !px-3 !py-2 text-xs"
+          @click="openCreate"
+        >＋ 新增物品</button>
+      </div>
     </div>
 
     <div v-if="loading" class="text-xs text-muted-foreground py-2">物品加载中…</div>
@@ -235,6 +244,15 @@
       confirm-type="danger"
       @confirm="onConfirm"
     />
+
+    <!-- 物品清单 A4 打印：双方核对签字用（2026-10-20 粉丝需求） -->
+    <ItemListPrintModal
+      v-model="showPrint"
+      :room-label="roomLabel"
+      :landlord-name="landlordName"
+      :tenant-name="tenantName"
+      :items="items"
+    />
   </div>
 </template>
 
@@ -242,6 +260,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import ConfirmDialog from './ConfirmDialog.vue'
+import ItemListPrintModal from './ItemListPrintModal.vue'
 import Modal from './Modal.vue'
 import {
   createRoomItem, deleteRoomItem, deleteRoomItemPhoto, fetchRoomItemPhotoBlob,
@@ -267,7 +286,13 @@ const props = withDefaults(defineProps<{
   roomId: number
   /** 是否可编辑（房源模块操作档）；false 时只看不改 */
   canEdit?: boolean
-}>(), { canEdit: false })
+  /** 打印清单上的房屋展示（如 A栋 3层 302），由房源详情传入 */
+  roomLabel?: string
+  /** 打印清单上的出租方姓名（房东），为空则打印时留手写位 */
+  landlordName?: string
+  /** 打印清单上的承租方（在租租户姓名，多人用「、」连接） */
+  tenantName?: string
+}>(), { canEdit: false, roomLabel: '', landlordName: '', tenantName: '' })
 
 const emit = defineEmits<{ changed: [] }>()
 
@@ -318,6 +343,8 @@ function conditionClass(condition: string, extra = ''): string {
 // ---------------------------------------------------------------------------
 
 const showForm = ref(false)
+// 打印清单弹窗（只读快照，不触发重新拉取）
+const showPrint = ref(false)
 const editing = ref<RoomItemView | null>(null)
 const saving = ref(false)
 const formError = ref('')

@@ -114,6 +114,8 @@
                 <button class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openMembers(t)">
                   {{ t.members_count ? `成员 ${t.members_count}` : '＋成员' }}
                 </button>
+                <!-- 续租：老租户续半年/一年是最常见的动作，入口放在退租前面（2026-10-20 粉丝需求） -->
+                <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openRenew(t)">续租</button>
                 <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300 hover:underline mr-3" @click="checkout(t)">退租</button>
                 <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300 hover:underline mr-3" @click="openAccount(t)">
                   账号<span v-if="t.account_user_id" class="ml-0.5 text-emerald-600 dark:text-emerald-400" title="已关联登录账号">✓</span>
@@ -167,6 +169,7 @@
             <button class="text-brand-600 dark:text-brand-300" @click="openMembers(t)">
               {{ t.members_count ? `成员 ${t.members_count}` : '成员' }}
             </button>
+            <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-brand-600 dark:text-brand-300" @click="openRenew(t)">续租</button>
             <button v-if="ledgerStore.canEdit('tenants') && t.active" class="text-amber-600 dark:text-amber-300" @click="checkout(t)">退租</button>
             <button v-if="ledgerStore.canEdit('tenants')" class="text-brand-600 dark:text-brand-300" @click="openAccount(t)">
               账号<span v-if="t.account_user_id" class="ml-0.5 text-emerald-600 dark:text-emerald-400">✓</span>
@@ -326,6 +329,14 @@
           <div>
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">到期时间</label>
             <DateField v-model="form.lease_end_date" type="date" />
+            <!-- 租期快捷 chip：半年 / 一年最常用，按入住日期一键算到期日（2026-10-20 粉丝需求） -->
+            <LeaseTermChips
+              class="mt-1.5"
+              :model-value="formLeaseTerm"
+              :base-date="form.move_in_date || ''"
+              base-label="入住日期"
+              @update:model-value="onTenantFormTerm"
+            />
           </div>
           <div>
             <label class="text-xs font-semibold text-muted-foreground block mb-1.5">押金（元）</label>
@@ -550,9 +561,17 @@
     <!-- 合同存档弹窗 -->
     <Modal v-model="showContracts" title="租赁合同">
       <div class="space-y-4">
-        <div class="rounded-xl bg-muted/60 px-3 py-2.5 text-xs text-muted-foreground leading-relaxed">
-          <span class="font-semibold text-foreground">{{ contractTenantLabel }}</span> ·
-          上传合同拍照、扫描件或 PDF（单个 ≤20MB，每租户最多 20 份），退租后记录保留。
+        <div class="rounded-xl bg-muted/60 px-3 py-2.5 text-xs text-muted-foreground leading-relaxed flex items-start justify-between gap-3">
+          <span>
+            <span class="font-semibold text-foreground">{{ contractTenantLabel }}</span> ·
+            上传合同拍照、扫描件或 PDF（单个 ≤20MB，每租户最多 20 份），退租后记录保留。
+          </span>
+          <!-- 合同打印（2026-10-20 粉丝需求）：模板合同就地生成，已上传件按原文件打印 -->
+          <button
+            type="button"
+            class="text-brand-600 dark:text-brand-300 hover:underline shrink-0 whitespace-nowrap"
+            @click="openContractPrint"
+          >打印合同</button>
         </div>
         <div v-if="ledgerStore.canEdit('tenants')">
           <span class="text-xs font-semibold text-muted-foreground block mb-1.5">上传合同文件</span>
@@ -659,6 +678,22 @@
     <!-- 住户成员：挂在租户名下的同住人，只登记身份、不参与计费（docs/08） -->
     <TenantMembersModal v-model="showMembers" :tenant="membersTenant" @changed="load(page)" />
 
+    <!-- 续租：带历史留痕（续了几次/每次多长/租金怎么变），不走编辑表单覆盖日期 -->
+    <RenewModal
+      v-model="showRenew"
+      :tenant="renewTenantRow"
+      :room-label="renewTenantRow?.room_label || renewTenantRow?.room_no || ''"
+      :current-rent="renewRoomRent"
+      @renewed="onRenewed"
+    />
+
+    <!-- 合同打印：模板合同（租赁合同/续租协议）+ 已上传件按原文件打印 -->
+    <ContractPrintModal
+      v-model="showContractPrint"
+      :tenant="contractPrintTenant"
+      :room="contractPrintRoom"
+    />
+
     <ConfirmDialog
       v-model="confirmState.show"
       :title="confirmState.title"
@@ -670,7 +705,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useLedgerStore } from '../stores/ledger'
 import { ID_CARD_PATTERN, idCardHint } from '../utils/id-card'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -686,6 +721,9 @@ import TenantChangeReviewModal from '../components/TenantChangeReviewModal.vue'
 import TenantDepositPhotos from '../components/TenantDepositPhotos.vue'
 import TenantMembersModal from '../components/TenantMembersModal.vue'
 import TenantPasteModal from '../components/TenantPasteModal.vue'
+import LeaseTermChips from '../components/LeaseTermChips.vue'
+import ContractPrintModal from '../components/ContractPrintModal.vue'
+import RenewModal from '../components/RenewModal.vue'
 import { getChangeRequestPendingCount } from '../api/tenant'
 import { toast } from '../utils/toast'
 import {
@@ -701,6 +739,7 @@ import {
   tenantBillingSummary, waterModeLabel, type BillingDefaults, type WaterMode,
 } from '../utils/billing'
 import { cycleLabel, payCycleOptions } from '../utils/cycle'
+import { leaseEndDateStr } from '../utils/lease'
 
 const ledgerStore = useLedgerStore()
 
@@ -758,6 +797,36 @@ const formError = ref('')
 const form = ref<Partial<Tenant>>({})
 // 新租户表单里暂存的押金单照片：保存成功拿到租户 ID 后再上传（编辑态组件自己即时上传）
 const depositFiles = ref<File[]>([])
+
+// 租期快捷 chip 的选中态：0 = 手填到期日（不选中任何时长）。打开表单或手改日期时
+// 都按「入住日期 + 到期日」反推一次，保证 chip 高亮与真实日期一致，不会出现
+// 「看起来选了半年、日期却是手填的三个月」这种自相矛盾。
+const formLeaseTerm = ref(0)
+
+/** 由入住日期与到期日反推最接近的整月租期；对不上任何一个预置项就返回 0。 */
+function inferLeaseTerm(moveIn?: string, leaseEnd?: string): number {
+  if (!moveIn || !leaseEnd) return 0
+  for (const opt of [1, 3, 6, 12]) {
+    if (leaseEndDateStr(moveIn, opt) === leaseEnd) return opt
+  }
+  // 12 个月以上的整数年也认（两年涨租合同）。
+  for (let y = 2; y <= 5; y++) {
+    if (leaseEndDateStr(moveIn, y * 12) === leaseEnd) return y * 12
+  }
+  return 0
+}
+
+/** chip 被点击：0 表示清除（恢复手填），否则把算好的到期日写进表单。 */
+function onTenantFormTerm(months: number) {
+  formLeaseTerm.value = months
+  if (months > 0) form.value.lease_end_date = leaseEndDateStr(form.value.move_in_date || '', months)
+}
+
+// 入住日期或到期日一变（含用户点日历手改），重新反推 chip 高亮。
+watch(
+  () => [form.value.move_in_date, form.value.lease_end_date],
+  ([mi, le]) => { formLeaseTerm.value = inferLeaseTerm(mi as string, le as string) },
+)
 
 // ---------- 批量导入 ----------
 
@@ -903,6 +972,7 @@ function openCreate() {
     tags: [],
     notes: '',
   }
+  formLeaseTerm.value = 0
   // 新租户默认全部收费项目参与
   excludedInput.value = []
   formMembers.value = []
@@ -1089,6 +1159,7 @@ function convertToTenant(a: TenantApplication) {
     pay_cycle: '', pay_day: -1, remind_days: -1,
     tags: [], notes: '',
   }
+  formLeaseTerm.value = 0
   excludedInput.value = []
   formError.value = ''
   showModal.value = true
@@ -1124,6 +1195,7 @@ function openEdit(t: Tenant) {
   editing.value = t
   depositFiles.value = []
   form.value = { ...t }
+  formLeaseTerm.value = inferLeaseTerm(t.move_in_date, t.lease_end_date)
   excludedInput.value = [...(t.excluded_fees || [])]
   formMembers.value = []
   formError.value = ''
@@ -1332,6 +1404,21 @@ async function loadContracts(tenantId: number) {
   }
 }
 
+// ---------- 合同打印 ----------
+// 打印入口挂在合同弹窗里（用户看合同的地方），但打印是独立弹窗：模板合同要预览
+// A4 纸张、已上传件要按原文件打印，混在存档弹窗里会让两个弹窗互相遮挡。
+const showContractPrint = ref(false)
+const contractPrintTenant = ref<Tenant | null>(null)
+const contractPrintRoom = computed(() => {
+  const rid = contractPrintTenant.value?.room_id
+  return rid ? allRooms.value.find((r) => r.id === rid) ?? null : null
+})
+
+function openContractPrint() {
+  contractPrintTenant.value = contractTenant.value
+  showContractPrint.value = true
+}
+
 async function uploadContractFiles(files: File[]) {
   const t = contractTenant.value
   if (!t || files.length === 0) return
@@ -1406,6 +1493,29 @@ function removeContract(ct: Contract) {
 // 与费用无关的同住人：只登记身份信息（见 docs/08-租户与住户成员设计.md）。
 const showMembers = ref(false)
 const membersTenant = ref<Tenant | null>(null)
+
+// ---------- 续租（2026-10-20 粉丝需求） ----------
+// 行数据里已有 room_id，补上房源默认月租给弹窗做「涨/降租金」对比：
+// 租户表不存租金，账单一直是「房源默认月租 × 月数」（bills.go），所以续租调租金
+// 调的就是这个字段。
+const showRenew = ref(false)
+const renewTenantRow = ref<Tenant | null>(null)
+const renewRoomRent = computed(() => {
+  const rid = renewTenantRow.value?.room_id
+  return allRooms.value.find((r) => r.id === rid)?.default_rent ?? 0
+})
+
+function openRenew(t: Tenant) {
+  renewTenantRow.value = t
+  showRenew.value = true
+}
+
+/** 续租成功：重拉列表（到期日/续租次数/租金都可能变）。 */
+async function onRenewed() {
+  await load(page.value)
+  // 房源默认月租可能被改（续租时调租金），顺带刷新房源缓存。
+  await loadRooms()
+}
 
 function openMembers(t: Tenant) {
   membersTenant.value = t
