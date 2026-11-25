@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
 	"smallgo/server/config"
 )
 
@@ -442,5 +444,28 @@ func TestCheckReportsFnOSInstall(t *testing.T) {
 	InvalidateCache()
 	if got := Check("v0.7.0"); got.FnOSInstall {
 		t.Fatalf("直连形态下 fnos_install 应为 false：%+v", got)
+	}
+}
+// 2026-11-01 追加：飞牛安装形态硬关闭一键更新的路由级回归测试。
+// 白屏事故后用户定调：飞牛安装的实例取消自动更新，只保留「有更新」提示，
+// 引导去飞牛应用中心或下载 .fpk 手动安装。后端必须在路由层挡死，
+// 不能依赖前端藏按钮（旧前端缓存仍可调该接口）。
+func TestApplyRefusedOnFnOSInstall(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setFnOSApp(t, true)
+
+	r := gin.New()
+	RegisterApplyRoutes(r.Group("/admin"))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/update/apply", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("飞牛安装形态 POST /update/apply = %d, want 400；body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "飞牛应用中心") {
+		t.Fatalf("拒绝文案应引导飞牛应用中心：%s", w.Body.String())
+	}
+	if applyJob.running.Load() {
+		t.Fatal("飞牛安装形态下不应启动更新任务")
 	}
 }

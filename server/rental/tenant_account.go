@@ -59,7 +59,11 @@ func handleTenantAccountGet(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// handleTenantAccountCandidates 候选账号：role=tenant 且未被任何档案绑定。
+// handleTenantAccountCandidates 候选账号：role 为 tenant 或 user 且未被任何档案绑定。
+//
+// 2026-11-25 多角色定调（用户明确）：一个账号可以**同时**是房东和租户——自己
+// 出租房、自己也在租别人的房。因此 role=user 的账号同样出现在候选里，房东
+// 选中即把他的档案关联给他；他的后台权限不受影响，多出一个「租户门户」入口。
 //
 // 账号枚举防护沿用邀请搜人的口径（2026-10-11 审计）：要求至少 2 个字，
 // 只回前 10 条。另外**必须过滤掉已绑定的账号**——否则房东会在候选里看到
@@ -87,7 +91,8 @@ func handleTenantAccountCandidates(db *gorm.DB) gin.HandlerFunc {
 		// 注册后正是 status=2，过滤掉他就没法关联了；被驳回停用的 status=0 已排除。
 		if err := db.Table("users").
 			Select("id, username").
-			Where("role = ? AND status IN ?", user.RoleTenant,
+			// tenant + user 都可被关联（多角色）；admin 是平台管理员，刻意排除。
+			Where("role IN ? AND status IN ?", []string{user.RoleTenant, user.RoleUser},
 				[]int{UserStatusActive, UserStatusPending}).
 			Where("id NOT IN (SELECT account_user_id FROM tenants WHERE account_user_id > 0)").
 			Where("username LIKE ?", "%"+q+"%").
@@ -105,7 +110,8 @@ func handleTenantAccountCandidates(db *gorm.DB) gin.HandlerFunc {
 //  1. 调用者对**该租户所属台账**的 tenants 模块 ≥ edit（按对象台账复核，
 //     防跨台账越权——只挂在路由上的 requireModule 在校验「本次请求选中的台账」，
 //     不带参数时会回落到个人台账，挡不住往别人台账里关联账号）；
-//  2. 目标账号存在、role=tenant、未停用；
+//  2. 目标账号存在、role 为 tenant 或 user（多角色：房东账号也能被关联为租户）、
+//     未停用；
 //  3. 目标账号**未被任何档案绑定**；
 //  4. 该档案**未绑定任何账号**。
 //
@@ -133,7 +139,8 @@ func handleTenantAccountBind(db *gorm.DB) gin.HandlerFunc {
 			if err := tx.First(&target, body.UserID).Error; err != nil {
 				return errAccountNotFound
 			}
-			if target.Role != user.RoleTenant || target.Status == UserStatusDisabled {
+			if (target.Role != user.RoleTenant && target.Role != user.RoleUser) ||
+				target.Status == UserStatusDisabled {
 				return errAccountNotTenant
 			}
 			// 同一个账号不能绑两条档案（唯一索引的兜底之外，先给出可读错误）。
@@ -157,8 +164,10 @@ func handleTenantAccountBind(db *gorm.DB) gin.HandlerFunc {
 				Update("account_user_id", target.ID).Error; err != nil {
 				return err
 			}
-			// 关联即审核通过：状态置 1，账号可以进门户。
-			if target.Status != UserStatusActive {
+			// 关联即审核通过：**仅对纯租户账号**（role=tenant）状态置 1——那是它
+			// 唯一的身份通道。role=user 的账号保持原状态：待审核（status=2）的普通
+			// 用户被关联为租户档案 ≠ 平台批准他当房东，不能借这条链路绕过账号审核。
+			if target.Role == user.RoleTenant && target.Status != UserStatusActive {
 				if err := tx.Model(&database.User{}).Where("id = ?", target.ID).
 					Update("status", UserStatusActive).Error; err != nil {
 					return err
@@ -172,7 +181,7 @@ func handleTenantAccountBind(db *gorm.DB) gin.HandlerFunc {
 			case errAccountNotFound:
 				response.ErrorNotFound(c, "账号不存在")
 			case errAccountNotTenant:
-				response.ErrorBadRequest(c, "只能关联租户类型（注册时选「我是租客」）的账号")
+				response.ErrorBadRequest(c, "只能关联租户或普通用户类型的账号")
 			case errAccountAlreadyBound:
 				response.ErrorBadRequest(c, "该账号已关联了其他租户档案，请先在那条档案上解除关联")
 			case errTenantAlreadyBound:

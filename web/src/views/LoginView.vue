@@ -16,9 +16,6 @@
         <template #icon>
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V8a4 4 0 118 0v3"/></svg>
         </template>
-        <template #labelRight>
-          <router-link to="/forgot-password" class="text-xs font-medium text-brand-300 hover:text-brand-200 transition-colors">忘记密码？</router-link>
-        </template>
       </AuthField>
 
       <transition enter-active-class="transition duration-200" enter-from-class="opacity-0 -translate-y-1" leave-active-class="transition duration-150" leave-to-class="opacity-0">
@@ -63,9 +60,19 @@
       </transition>
     </Teleport>
 
-    <template #footer v-if="authStore.allowRegister">
-      还没有账号？
-      <router-link to="/register" class="font-semibold text-brand-300 hover:text-brand-200 transition-colors">立即注册</router-link>
+    <!-- 次要链接统一放在卡片下方（2026-11-25 用户反馈）：之前「忘记密码？」
+         挂在密码框 label 右侧，Tab 顺序夹在密码框与登录按钮之间，输完密码按
+         Tab 会跳到它而不是登录按钮，很困扰。挪到页脚后顺序变成
+         用户名 → 密码 → 登录 → 忘记密码 / 立即注册，不再打断主流程。
+         注册开关关闭时仍保留「忘记密码」，所以不整块用 v-if 包住。 -->
+    <template #footer>
+      <div class="flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5">
+        <router-link to="/forgot-password" class="font-semibold text-brand-300 hover:text-brand-200 transition-colors">忘记密码？</router-link>
+        <span v-if="authStore.allowRegister">
+          还没有账号？
+          <router-link to="/register" class="font-semibold text-brand-300 hover:text-brand-200 transition-colors">立即注册</router-link>
+        </span>
+      </div>
     </template>
   </AuthShell>
 </template>

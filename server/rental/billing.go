@@ -383,6 +383,7 @@ func handleBillingDefaults(db *gorm.DB) gin.HandlerFunc {
 			target = ledgerID[0]
 		}
 		d := ledgerBillingDefaultsFor(db, target)
+		sw := meterSwitchesFor(db, target)
 		response.Success(c, gin.H{
 			"ledger_id":         d.LedgerID,
 			"water_mode":        d.WaterMode,
@@ -391,8 +392,14 @@ func handleBillingDefaults(db *gorm.DB) gin.HandlerFunc {
 			"pay_cycle":         d.PayCycle,
 			"pay_day":           d.PayDay,
 			"elec_price":        d.ElecPrice,
+			"elec_peak_price":   d.ElecPeakPrice,
+			"elec_valley_price": d.ElecValleyPrice,
 			"gas_price":         d.GasPrice,
 			"remind_days":       d.RemindDays,
+			// 表种启停（2026-10-30 粉丝反馈）：抄表开票、房源表单、账单列表
+			// 都要据此隐藏用不到的表，跟着计费默认一起下发最省一次请求。
+			"elec_enabled": sw.ElecEnabled,
+			"gas_enabled":  sw.GasEnabled,
 		})
 	}
 }

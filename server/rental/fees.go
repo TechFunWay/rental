@@ -239,6 +239,11 @@ func enabledCustomFeeItems(db *gorm.DB, ledgerID uint) []FeeItem {
 //
 // 口径：内置项目的启停是**台账级计费开关**，开票时快照进账单（Bill.DisabledFees），
 // 由 recalc 清零；历史账单按快照走，停用不会改写已开出的账单金额。
+//
+// 2026-10-30 追加：表种开关（电表/燃气表）关掉时，等价于「这个台账不收这一项」，
+// 与在收费项目里停用是同一效果，所以合并进同一份快照。这样房东只需关一次
+// 「启用电表」，账单与单据都不再出现电费，不必再去收费项目里停用一遍。
+// 注意只加**关掉**的项：开关默认开，没关过的台账快照不变（存量行为零影响）。
 func disabledBuiltInFeeKeys(db *gorm.DB, ledgerID uint) []string {
 	keys := make([]string, 0, 6)
 	if db == nil {
@@ -247,6 +252,13 @@ func disabledBuiltInFeeKeys(db *gorm.DB, ledgerID uint) []string {
 	db.Model(&FeeItem{}).
 		Where("built_in = ? AND enabled = ? AND org_id = ?", true, false, ledgerID).
 		Order("sort ASC, id ASC").Pluck("key", &keys)
+	// 表种开关关闭 → 该项本期不收（读数照记，只是不计费）。
+	if !meterEnabled(db, meterElecEnabledKey, ledgerID) {
+		keys = append(keys, feeKeyElec)
+	}
+	if !meterEnabled(db, meterGasEnabledKey, ledgerID) {
+		keys = append(keys, feeKeyGas)
+	}
 	return keys
 }
 
@@ -609,9 +621,18 @@ func billBuiltInItems(b Bill) []BillItem {
 			Detail: "读数 " + fmtAmount(b.WaterLast) + " → " + fmtAmount(b.WaterNow) + " 吨 · 单价 " + fmtAmount(b.WaterPrice) + " 元/吨"})
 	}
 	if b.ElecFee > 0 {
+		detail := "读数 " + fmtAmount(b.ElecLast) + " → " + fmtAmount(b.ElecNow) + " 度 · 单价 " + fmtAmount(b.ElecPrice) + " 元/度"
+		if b.ElecTou {
+			// 峰谷分时：明细写清两路用量×单价，房东核对租户电费单时一眼能对上。
+			detail = "峰 " + fmtAmount(b.ElecPeakLast) + "→" + fmtAmount(b.ElecPeakNow) +
+				" 度 ×" + fmtAmount(b.ElecPeakPrice) +
+				" · 谷 " + fmtAmount(b.ElecValleyLast) + "→" + fmtAmount(b.ElecValleyNow) +
+				" 度 ×" + fmtAmount(b.ElecValleyPrice) +
+				" · 合计 " + fmtAmount(b.ElecLast) + "→" + fmtAmount(b.ElecNow) + " 度"
+		}
 		items = append(items, BillItem{FeeKey: feeKeyElec, Name: "电费", Kind: feeKindMeter,
 			Amount: b.ElecFee, Cycle: payCycleMonthly,
-			Detail: "读数 " + fmtAmount(b.ElecLast) + " → " + fmtAmount(b.ElecNow) + " 度 · 单价 " + fmtAmount(b.ElecPrice) + " 元/度"})
+			Detail: detail})
 	}
 	if b.GasFee > 0 {
 		items = append(items, BillItem{FeeKey: feeKeyGas, Name: "燃气费", Kind: feeKindMeter,

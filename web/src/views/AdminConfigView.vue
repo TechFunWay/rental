@@ -19,6 +19,7 @@
             </template>
           </p>
           <p v-if="supportStore.updateInfo && !supportStore.updateInfo.has_update" class="mt-1 text-xs text-emerald-600 dark:text-emerald-400">✓ 已经是最新版本</p>
+          <p v-else-if="supportStore.updateInfo?.has_update && supportStore.isFnosInstall" class="mt-1 text-xs text-brand-600 dark:text-brand-300">发现新版本：飞牛安装形态请前往飞牛应用中心更新，或打开「版本与更新」下载 .fpk 手动安装</p>
           <p v-else-if="supportStore.updateInfo?.has_update" class="mt-1 text-xs text-brand-600 dark:text-brand-300">发现新版本，可一键更新或手动下载</p>
           <p v-if="supportStore.applyMessage" class="mt-1 text-xs text-muted-foreground">{{ supportStore.applyMessage }}</p>
         </div>
@@ -27,7 +28,7 @@
             {{ supportStore.checkingUpdate ? '检查中…' : '检查更新' }}
           </button>
           <button
-            v-if="supportStore.updateInfo?.has_update && supportStore.updateInfo?.fpk_assets?.length"
+            v-if="supportStore.updateInfo?.has_update && supportStore.updateInfo?.fpk_assets?.length && !supportStore.isFnosInstall"
             class="btn-brand !py-2 !px-3 text-xs min-h-10"
             :disabled="supportStore.applying"
             @click="supportStore.applyNewVersion()"

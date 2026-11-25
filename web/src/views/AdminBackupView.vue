@@ -83,6 +83,11 @@
               <td class="py-3.5 px-4 text-muted-foreground whitespace-nowrap">{{ formatTime(item.created_at) }}</td>
               <td class="py-3.5 px-6 text-right whitespace-nowrap">
                 <button @click="handleDownload(item)" class="text-sm font-medium text-brand-600 dark:text-brand-300 hover:underline mr-4">下载</button>
+                <button
+                  @click="handleEmailBackup(item)"
+                  :disabled="emailing === item.name"
+                  class="text-sm font-medium text-brand-600 dark:text-brand-300 hover:underline mr-4 disabled:opacity-50"
+                >{{ emailing === item.name ? '发送中…' : '发到邮箱' }}</button>
                 <button @click="confirmRestore = { show: true, name: item.name }" class="text-sm font-medium text-amber-600 dark:text-amber-300 hover:underline mr-4">恢复</button>
                 <button @click="handleDelete(item)" class="text-sm font-medium text-destructive hover:underline">删除</button>
               </td>
@@ -358,6 +363,10 @@ const exportKeepInput = ref('30')
 // 正在保存的配置项 key（空串=无）。用它禁用对应的输入与按钮，并显示「保存中…」。
 const savingConfig = ref('')
 
+// 正在发送邮件的备份文件名（空串=空闲）。用它禁用对应行的按钮，
+// 避免连点发出多封同样的备份。
+const emailing = ref('')
+
 const toastMsg = ref('')
 const toastType = ref<'success' | 'error'>('success')
 async function toast(message: string, type: 'success' | 'error' = 'success') {
@@ -625,6 +634,28 @@ async function handleDownload(item: BackupItem) {
     window.URL.revokeObjectURL(url)
   } catch {
     await toast('下载失败，请重试', 'error')
+  }
+}
+
+// 把这份备份当附件发到当前管理员已绑定的邮箱（Gitee issue IKW41H 需求 8）。
+// 接口挂在 adminGroup（/api/rental/backups/:name/email），与框架备份同一层鉴权；
+// SMTP 与收件邮箱复用「通知设置」里已配好的那一份，这里不再让用户重复填。
+async function handleEmailBackup(item: BackupItem) {
+  emailing.value = item.name
+  try {
+    const res = await request.post<{ code: number; message: string }>(
+      `/api/rental/backups/${encodeURIComponent(item.name)}/email`,
+    )
+    if (res.data?.code === 0) {
+      await toast('已发送到你绑定的邮箱，请查收', 'success')
+    } else {
+      await toast(res.data?.message || '发送失败', 'error')
+    }
+  } catch (e: any) {
+    // 后端把「没配 SMTP / 没绑邮箱 / 附件超限」的中文说明直接放在 message 里。
+    await toast(e?.response?.data?.message || '发送失败，请检查邮件服务配置', 'error')
+  } finally {
+    emailing.value = ''
   }
 }
 

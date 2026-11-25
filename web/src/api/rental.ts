@@ -63,9 +63,18 @@ export interface Room {
   default_management_fee: number
   elec_price: number
   gas_price: number
+  /** 峰谷分时电价（分表双寄存器）：开启后抄表按峰/谷两路录，各自计价 */
+  elec_tou: boolean
+  /** 峰时电价覆盖（元/度），0 = 跟随台账/系统默认 */
+  elec_peak_price: number
+  /** 谷时电价覆盖（元/度），0 = 跟随台账/系统默认 */
+  elec_valley_price: number
   initial_water: number
   initial_elec: number
   initial_gas: number
+  /** 峰/谷表底数：仅 TOU 房首次开账前衔接用 */
+  initial_elec_peak: number
+  initial_elec_valley: number
   /** 定位地址（2026-10-20 房东需求）：地图定位/门牌之外的补充位置描述，自由文本，≤200 字 */
   address: string
   /** 建筑面积（㎡）：0 = 未填（表单留空即 0，展示按未填处理） */
@@ -141,6 +150,10 @@ export interface Tenant {
   lease_end_date: string
   move_out_date: string
   deposit: number
+  /** 入住时抄的水/电/燃气表底数（0 = 没填，首期账单回落到房间底数或上期读数） */
+  init_water: number
+  init_elec: number
+  init_gas: number
   /** '' = 跟随全局默认；meter 按吨；monthly 包月 */
   water_mode: '' | 'meter' | 'monthly'
   /** 按吨单价（元/吨），0 = 跟随全局默认 */
@@ -216,6 +229,8 @@ export interface MeterRecord {
   id: number
   room_id: number
   period: string
+  /** 抄表时间（YYYY-MM-DD，选填；空串 = 没记）。不参与计费，纯台账凭证 */
+  read_at: string
   water: number
   elec: number
   gas: number
@@ -266,6 +281,14 @@ export interface Bill {
   water_price: number
   elec_price: number
   gas_price: number
+  /** 开票快照：是否峰谷分时计费（电费 = 峰用量×峰价 + 谷用量×谷价） */
+  elec_tou: boolean
+  elec_peak_last: number
+  elec_peak_now: number
+  elec_valley_last: number
+  elec_valley_now: number
+  elec_peak_price: number
+  elec_valley_price: number
   water_fee: number
   elec_fee: number
   gas_fee: number
@@ -507,7 +530,9 @@ export function getTenants(params: { page?: number; pageSize?: number; keyword?:
  */
 export type TenantMemberPayload = TenantMemberInput & { id?: number }
 
-export function createTenant(data: Partial<Tenant> & { application_id?: number; members?: TenantMemberPayload[] }) {
+export function createTenant(
+  data: Partial<Tenant> & { application_id?: number; members?: TenantMemberPayload[]; create_first_bill?: boolean },
+) {
   return request.post(withLedgerUrl('/api/rental/tenants'), data)
 }
 
@@ -800,6 +825,8 @@ export function getMeterRecords(params: { page?: number; pageSize?: number; peri
 export function upsertMeterRecord(data: {
   room_id: number
   period: string
+  /** 抄表时间（YYYY-MM-DD，选填）：不传 = 保留原值，传空串 = 清空 */
+  read_at?: string
   water: number
   elec: number
   gas: number
@@ -897,6 +924,9 @@ export function createBill(roomId: number, period: string, readings?: {
   water_now?: number; elec_now?: number; gas_now?: number
   water_mode?: 'meter' | 'monthly'
   water_price?: number; elec_price?: number; gas_price?: number
+  /** 峰谷分时：TOU 房建账时传本月峰/谷读数与单价 */
+  elec_peak_now?: number; elec_valley_now?: number
+  elec_peak_price?: number; elec_valley_price?: number
   /** 租金金额（元/期）：抄表开票时可改，未传则按房间默认租金与缴费周期预填 */
   rent?: number
   /** 备注：抄表开票时可写（如"租金对应租期 2026-09~2027-08"） */
@@ -1407,8 +1437,16 @@ export interface BillingDefaultsPayload {
   pay_cycle: PayCycle
   pay_day: number
   elec_price: number
+  /** 峰时电价（元/度），峰谷分时房用 */
+  elec_peak_price: number
+  /** 谷时电价（元/度），峰谷分时房用 */
+  elec_valley_price: number
   gas_price: number
   remind_days: number
+  /** 表种启停（2026-10-30 粉丝反馈）：false 表示该台账不用这块表，
+   *  前端据此隐藏抄表/账单/房源里的对应输入与列（缺省按启用，与后端默认一致） */
+  elec_enabled?: boolean
+  gas_enabled?: boolean
 }
 
 export function getBillingDefaults() {

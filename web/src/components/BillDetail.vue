@@ -14,7 +14,7 @@
         <div class="flex justify-between gap-2"><span class="text-muted-foreground shrink-0">账期</span><span class="text-foreground tabular-nums">{{ bill.period }}</span></div>
         <div class="flex justify-between gap-2"><span class="text-muted-foreground shrink-0">缴费周期</span><span class="text-foreground">{{ cycleText }}</span></div>
         <div class="flex justify-between gap-2"><span class="text-muted-foreground shrink-0">单据编号</span><span class="text-foreground tabular-nums truncate">{{ bill.receipt_no || '—' }}</span></div>
-        <div v-if="bill.remark" class="flex justify-between gap-2 col-span-2"><span class="text-muted-foreground shrink-0">备注</span><span class="text-foreground truncate" :title="bill.remark">{{ bill.remark }}</span></div>
+        <div v-if="bill.remark" class="flex justify-between gap-2 col-span-2"><span class="text-muted-foreground shrink-0">备注</span><span class="text-foreground whitespace-pre-line break-words text-right">{{ bill.remark }}</span></div>
       </div>
     </div>
 

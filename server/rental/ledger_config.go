@@ -111,6 +111,8 @@ type ledgerBillingDefaults struct {
 	WaterPrice      float64 `json:"water_price"`
 	WaterMonthlyFee float64 `json:"water_monthly_fee"`
 	ElecPrice       float64 `json:"elec_price"`
+	ElecPeakPrice   float64 `json:"elec_peak_price"`
+	ElecValleyPrice float64 `json:"elec_valley_price"`
 	GasPrice        float64 `json:"gas_price"`
 	PayCycle        string  `json:"pay_cycle"`
 	PayDay          int     `json:"pay_day"`
@@ -126,6 +128,8 @@ func ledgerBillingDefaultsFor(db *gorm.DB, ledgerID uint) ledgerBillingDefaults 
 		WaterPrice:      ledgerConfigFloat(db, "rental_water_price", ledgerID, 5.0),
 		WaterMonthlyFee: ledgerConfigFloat(db, "rental_water_monthly_fee", ledgerID, 0),
 		ElecPrice:       ledgerConfigFloat(db, "rental_elec_price", ledgerID, 1.20),
+		ElecPeakPrice:   ledgerConfigFloat(db, "rental_elec_peak_price", ledgerID, 1.50),
+		ElecValleyPrice: ledgerConfigFloat(db, "rental_elec_valley_price", ledgerID, 0.60),
 		GasPrice:        ledgerConfigFloat(db, "rental_gas_price", ledgerID, 3.50),
 		PayCycle:        normalizePayCycle(ledgerConfigString(db, "rental_pay_cycle", ledgerID, payCycleMonthly)),
 		PayDay:          clampPayDay(ledgerConfigInt(db, "rental_pay_day", ledgerID, 0)),
@@ -144,11 +148,17 @@ func ledgerBillingDefaultsFor(db *gorm.DB, ledgerID uint) ledgerBillingDefaults 
 var rentalConfigKeys = []string{
 	"rental_water_price", "rental_water_mode", "rental_water_monthly_fee",
 	"rental_pay_cycle", "rental_pay_day",
-	"rental_elec_price", "rental_gas_price", "rental_remind_days",
+	"rental_elec_price", "rental_elec_peak_price", "rental_elec_valley_price",
+	"rental_gas_price", "rental_remind_days",
 	"rental_property_name", "rental_contact", "rental_receipt_note",
+	// 表种启停（2026-10-30 粉丝反馈）：必须列在这里，否则台账设置接口的
+	// 白名单会把开关挡掉——房东在界面上点了关，后端 400，以为关了其实没关。
+	meterElecEnabledKey, meterGasEnabledKey,
 	// 少交/多交结转开关（issue #5 需求 7）：默认关闭，按台账开启。
 	// 必须列在这里，否则台账设置接口的白名单会把它挡掉（见 ledger_api.go 的校验）。
 	carryoverConfigKey,
+	// 自动出账单（Gitee issue IKW41H 需求 4）：模式与统一出账日按台账可覆盖。
+	autobillModeConfigKey, autobillDayConfigKey,
 }
 
 // receiptHeaderFor 某台账的单据抬头（出租方名称/联系电话/底部备注）。

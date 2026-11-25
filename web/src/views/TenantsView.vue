@@ -343,6 +343,27 @@
             <input v-model.number="form.deposit" type="number" step="0.01" min="0" class="input-field" placeholder="0" />
           </div>
         </div>
+        <!-- 入住表底数（Gitee issue IKW41H 需求 7）：「入住登记的时候，顺便记录水电
+             煤气各类项目的起始读数」。填了就在该租户的首期账单里当作「上月读数」，
+             换租客时不必再从上一任的最后读数硬接；留 0 = 没抄，按房源底数或上期账单走。 -->
+        <div class="rounded-xl border border-border p-3">
+          <p class="text-xs font-semibold text-muted-foreground">入住表底数（选填）</p>
+          <div class="grid grid-cols-3 gap-2 mt-2">
+            <div>
+              <label class="text-[11px] text-muted-foreground block mb-1">水表</label>
+              <input v-model.number="form.init_water" type="number" step="0.01" min="0" class="input-field !py-2" placeholder="0" />
+            </div>
+            <div>
+              <label class="text-[11px] text-muted-foreground block mb-1">电表</label>
+              <input v-model.number="form.init_elec" type="number" step="0.01" min="0" class="input-field !py-2" placeholder="0" />
+            </div>
+            <div>
+              <label class="text-[11px] text-muted-foreground block mb-1">燃气表</label>
+              <input v-model.number="form.init_gas" type="number" step="0.01" min="0" class="input-field !py-2" placeholder="0" />
+            </div>
+          </div>
+          <p class="text-[11px] text-muted-foreground mt-1.5">只在首期账单生效；留 0 表示没抄，按房源底数或上一张账单衔接。</p>
+        </div>
         <!-- 押金单照片（选填）：押金不能只录一个数字，实物单子拍照留档，
              换房东/退租结算/对账时都能拿出来对。新租户保存后自动上传。 -->
         <div class="rounded-xl border border-border p-3">
@@ -352,6 +373,16 @@
             v-model:pending="depositFiles"
           />
         </div>
+        <!-- 首期账单（2026-11-18 粉丝需求）：勾上后登记成功即有一张「房租+押金」待缴单，
+             账期取入住日期所在月（没填按当月），同房同期已有账单会自动跳过不会重复收。
+             账单是账单模块的写操作：没有账单权限的成员看不到这个勾选（服务端同样把关）。 -->
+        <label v-if="!editing && ledgerStore.canEdit('bills')" class="flex items-start gap-2.5 rounded-xl border border-border p-3 cursor-pointer">
+          <input v-model="createFirstBill" type="checkbox" class="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0" />
+          <span class="min-w-0">
+            <span class="text-sm font-medium text-foreground block">同时生成首期账单（房租＋押金）</span>
+            <span class="text-[11px] text-muted-foreground mt-0.5 block">账期取入住日期所在月；押金每房只随首张账单收一次，已有账单的房间自动跳过不重复。</span>
+          </span>
+        </label>
         <!-- 入住成员：登记租户时就一起录，与租户同一事务保存。
              只登记身份、不参与计费（费用仍只按租户算）；「＋」加一行、行内可改可删，
              保存时以这份列表为准（删掉的行保存后即从档案里移除）。 -->
@@ -793,6 +824,10 @@ const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
 const showModal = ref(false)
 const editing = ref<Tenant | null>(null)
 const saving = ref(false)
+// 首期账单勾选（2026-11-18 粉丝需求「登记入住之后没有生成待缴费订单」）：
+// 只在新登记时出现；勾上后服务端把「租户 + 首期账单」放进同一事务，
+// 押金沿用该房首张账单口径。每次开弹窗都回落到默认勾上（房东的主诉求就是别漏单）。
+const createFirstBill = ref(true)
 const formError = ref('')
 const form = ref<Partial<Tenant>>({})
 // 新租户表单里暂存的押金单照片：保存成功拿到租户 ID 后再上传（编辑态组件自己即时上传）
@@ -961,10 +996,13 @@ function openCreate() {
   editing.value = null
   convertingId.value = 0
   depositFiles.value = []
+  createFirstBill.value = true
   form.value = {
     name: '', phone: '', id_card: '', room_id: allRooms.value[0]?.id,
     address: '', emergency_contact: '', emergency_phone: '',
     move_in_date: '', lease_end_date: '', deposit: 0,
+    // 入住表底数（Gitee issue IKW41H 需求 7）：0 = 没填，首期账单回落到房间底数/上期读数
+    init_water: 0, init_elec: 0, init_gas: 0,
     // 空串/-1 = 跟随全局默认；金额按全局默认预填，切到显式方式时直接可用
     water_mode: '', water_price: billingDefaults.value.waterMeterPrice,
     water_monthly_fee: billingDefaults.value.waterMonthlyFee,
@@ -1273,7 +1311,7 @@ async function save() {
     const mode = form.value.water_mode
     // 未勾选的收费项目（排除项）落库；存量排除里已停用/已删除的项目一并清掉。
     const excluded = billableFeeItems.value.filter((f) => !feeChecked(f.key)).map((f) => f.key)
-    const payload: Partial<Tenant> & { application_id?: number; members?: TenantMemberPayload[] } = {
+    const payload: Partial<Tenant> & { application_id?: number; members?: TenantMemberPayload[]; create_first_bill?: boolean } = {
       ...form.value,
       water_price: mode === 'meter' ? Number(form.value.water_price) || 0 : 0,
       water_monthly_fee: mode === 'monthly' ? Number(form.value.water_monthly_fee) || 0 : 0,
@@ -1282,6 +1320,8 @@ async function save() {
       excluded_fees: excluded,
       // 租客自助登记转入：带上申请 id，服务端标记已入库并把身份证照片转进附件
       application_id: editing.value ? undefined : convertingId.value || undefined,
+      // 首期账单：仅新建时随勾选传入（编辑态出现该字段服务端也忽略）
+      create_first_bill: !editing.value && createFirstBill.value,
       // 入住成员与租户一起保存：uid 只是界面 key，提交给服务端前剥掉；
       // 各行的搬离日期填了就按已搬离存，免得出现「已搬离却还在住」的矛盾记录。
       members: formMembers.value.map(({ uid: _uid, ...row }) => ({

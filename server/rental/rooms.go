@@ -65,9 +65,16 @@ type roomRequest struct {
 	DefaultManagementFee float64  `json:"default_management_fee"`
 	ElecPrice            float64  `json:"elec_price"`
 	GasPrice             float64  `json:"gas_price"`
+	// 峰谷分时电价（分表双寄存器）：ElecTou 开启后抄表按峰/谷两路录，各自计价。
+	// 峰/谷单价 0 = 跟随台账/系统默认；底数仅首次 TOU 开账前衔接用。
+	ElecTou            bool    `json:"elec_tou"`
+	ElecPeakPrice      float64 `json:"elec_peak_price"`
+	ElecValleyPrice    float64 `json:"elec_valley_price"`
 	InitialWater         float64  `json:"initial_water"`
 	InitialElec          float64  `json:"initial_elec"`
 	InitialGas           float64  `json:"initial_gas"`
+	InitialElecPeak      float64  `json:"initial_elec_peak"`
+	InitialElecValley    float64  `json:"initial_elec_valley"`
 	Tags                 []string `json:"tags"`
 	// 定位地址与建筑面积（2026-10-20 房东需求）：都是选填，校验见 validateRoomRequest
 	// （地址 ≤200 字；面积 0=未填，上限 100000 ㎡，挡掉单位填错这类明显脏数据）。
@@ -405,7 +412,11 @@ func validateRoomRequest(req *roomRequest) string {
 	if req.ElecPrice < 0 || req.GasPrice < 0 {
 		return "电费/燃气单价不能为负数"
 	}
-	if req.InitialWater < 0 || req.InitialElec < 0 || req.InitialGas < 0 {
+	if req.ElecPeakPrice < 0 || req.ElecValleyPrice < 0 {
+		return "峰时/谷时电价不能为负数"
+	}
+	if req.InitialWater < 0 || req.InitialElec < 0 || req.InitialGas < 0 ||
+		req.InitialElecPeak < 0 || req.InitialElecValley < 0 {
 		return "抄表底数不能为负数"
 	}
 	// 定位地址与面积（2026-10-20 房东需求）：都选填，填了就要合理——
@@ -441,9 +452,14 @@ func applyRoomRequest(room *Room, req *roomRequest) {
 	room.DefaultManagementFee = req.DefaultManagementFee
 	room.ElecPrice = req.ElecPrice
 	room.GasPrice = req.GasPrice
+	room.ElecTou = req.ElecTou
+	room.ElecPeakPrice = req.ElecPeakPrice
+	room.ElecValleyPrice = req.ElecValleyPrice
 	room.InitialWater = req.InitialWater
 	room.InitialElec = req.InitialElec
 	room.InitialGas = req.InitialGas
+	room.InitialElecPeak = req.InitialElecPeak
+	room.InitialElecValley = req.InitialElecValley
 	room.Tags = normalizeTags(req.Tags)
 	// 定位地址与面积：创建/更新都走这里，统一 trim（地址是自由文本，去首尾空白即可）。
 	room.Address = strings.TrimSpace(req.Address)

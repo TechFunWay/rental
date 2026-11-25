@@ -164,7 +164,7 @@ export function getMyApproval() {
 // ---------- 按台账的租房设置 ----------
 
 /**
- * 可被台账覆盖的 11 个租房设置键（顺序与后端 rentalConfigKeys 一致）。
+ * 可被台账覆盖的租房设置键（顺序与后端 rentalConfigKeys 一致）。
  * 未覆盖的键跟随系统级默认值。
  */
 export type LedgerSettingKey =
@@ -174,11 +174,16 @@ export type LedgerSettingKey =
   | 'rental_pay_cycle'
   | 'rental_pay_day'
   | 'rental_elec_price'
+  | 'rental_elec_peak_price'
+  | 'rental_elec_valley_price'
   | 'rental_gas_price'
   | 'rental_remind_days'
   | 'rental_property_name'
   | 'rental_contact'
   | 'rental_receipt_note'
+  // 表种启停（2026-10-30 粉丝反馈）：关掉用不到的电表/燃气表
+  | 'rental_elec_enabled'
+  | 'rental_gas_enabled'
 
 /** 一次可提交的设置集合（键受限于 LedgerSettingKey）。 */
 export type LedgerSettingsPayload = Partial<Record<LedgerSettingKey, string>>

@@ -18,6 +18,9 @@
           <div class="receipt-item"><span class="receipt-label">租户</span><span class="receipt-value font-semibold">{{ bill.tenant_name || '—' }}</span></div>
           <div class="receipt-item"><span class="receipt-label">账期</span><span class="receipt-value tabular-nums">{{ bill.period }}</span></div>
           <div class="receipt-item"><span class="receipt-label">缴费周期</span><span class="receipt-value">{{ cycleText }}</span></div>
+          <!-- 计租区间（Gitee issue IKW41H 需求 3）：只写「2026-11」时租户看不出这笔
+               钱覆盖哪几天，季付/年付尤其容易扯皮，所以把自然日起止写清楚。 -->
+          <div class="receipt-item col-span-2"><span class="receipt-label">计租区间</span><span class="receipt-value tabular-nums">{{ periodRange }}</span></div>
           <div class="receipt-item col-span-2"><span class="receipt-label">开票日期</span><span class="receipt-value tabular-nums">{{ today }}</span></div>
         </div>
 
@@ -131,7 +134,9 @@
 
         <!-- 底部 -->
         <div class="text-xs text-muted-foreground space-y-1">
-          <p v-if="bill.remark">备注：{{ bill.remark }}</p>
+          <!-- 备注支持多行（2026-11-18 粉丝需求）：房东在编辑弹窗里换行写的内容，
+               单据上原样分行显示；pre-line 折叠连续空格但保留换行。 -->
+          <p v-if="bill.remark" class="whitespace-pre-line break-words">备注：{{ bill.remark }}</p>
           <p v-if="property.note">{{ property.note }}</p>
           <div class="flex flex-col sm:flex-row sm:justify-between gap-1 pt-2">
             <span>联系电话：{{ property.contact || '—' }}</span>
@@ -146,7 +151,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { arrearsOf, carryInOf, fmtMoney, isArrears, payableOf, type Bill, type PropertyMeta } from '../api/rental'
-import { coveredPeriodText, cycleLabel, cycleMonths } from '../utils/cycle'
+import { coveredDateRange, coveredPeriodText, cycleLabel, cycleMonths } from '../utils/cycle'
 import { appendPrintPage } from '../utils/print-root'
 
 const props = defineProps<{
@@ -183,6 +188,9 @@ const cycleText = computed(() => {
   const label = cycleLabel(props.bill.pay_cycle)
   return months > 1 ? `${label}（${coveredPeriodText(props.bill.period, props.bill.pay_cycle)}，共 ${months} 个月）` : label
 })
+
+// 计租区间：账期覆盖的自然日（月付当月 1 号至月末，季付跨到第 3 个月月末）。
+const periodRange = computed(() => coveredDateRange(props.bill.period, props.bill.pay_cycle) || '—')
 
 const today = computed(() => new Date().toISOString().slice(0, 10))
 
@@ -248,7 +256,36 @@ const receiptRows = computed<ReceiptRow[]>(() => {
       if (it.key === 'water') {
         rows.push(reading('water', it.name, b.water_last, b.water_now, b.water_price, it.amount, b.water_mode === 'monthly'))
       } else if (it.key === 'elec') {
-        rows.push(reading('elec', it.name, b.elec_last, b.elec_now, b.elec_price, it.amount, false))
+        if (b.elec_tou) {
+          // 峰谷分时：峰/谷分列用量与单价，再给合计行，单据上能对上分表读数
+          const peakUsage = usage(b.elec_peak_last, b.elec_peak_now)
+          const valleyUsage = usage(b.elec_valley_last, b.elec_valley_now)
+          rows.push({
+            key: 'elec_peak', name: '电费（峰）', detail: '',
+            amount: Math.round(peakUsage * b.elec_peak_price * 100) / 100,
+            isReading: true,
+            lastText: `${fmtRead(b.elec_peak_last)} 度`, nowText: `${fmtRead(b.elec_peak_now)} 度`,
+            usageText: `${fmtRead(peakUsage)} 度`, priceText: `${fmtRead(b.elec_peak_price)} 元/度`,
+          })
+          rows.push({
+            key: 'elec_valley', name: '电费（谷）', detail: '',
+            amount: Math.round(valleyUsage * b.elec_valley_price * 100) / 100,
+            isReading: true,
+            lastText: `${fmtRead(b.elec_valley_last)} 度`, nowText: `${fmtRead(b.elec_valley_now)} 度`,
+            usageText: `${fmtRead(valleyUsage)} 度`, priceText: `${fmtRead(b.elec_valley_price)} 元/度`,
+          })
+          // 合计金额挂在谷行上会拆错——用 detail 合计行校准：把差额并进最后一行
+          // 改为：峰谷两行已分列，若与 it.amount 有分差，把差额记在谷行上，
+          // 保证「明细之和 = 合计」。
+          const splitSum = Math.round((peakUsage * b.elec_peak_price + valleyUsage * b.elec_valley_price) * 100) / 100
+          const gap = Math.round((it.amount - splitSum) * 100) / 100
+          if (Math.abs(gap) >= 0.01) {
+            const last = rows[rows.length - 1]
+            last.amount = Math.round((last.amount + gap) * 100) / 100
+          }
+        } else {
+          rows.push(reading('elec', it.name, b.elec_last, b.elec_now, b.elec_price, it.amount, false))
+        }
       } else if (it.key === 'gas') {
         rows.push(reading('gas', it.name, b.gas_last, b.gas_now, b.gas_price, it.amount, false))
       } else {
@@ -270,12 +307,44 @@ const receiptRows = computed<ReceiptRow[]>(() => {
   }
 
   // 回退：后端没给明细时由 bills 固定列生成（老数据兼容），含押金与自定义合计。
+  //
+  // 电/燃气按**金额**决定是否出现，而不是按表种开关：单据是账单快照，
+  // 历史账单真收过的电费必须照旧印出来（2026-10-30 表种开关只影响新账单）。
+  // 反过来，关掉表种后新账单的这两项金额是 0，自然不会印出「电费 0.00」这种噪音。
   const rows: ReceiptRow[] = []
   rows.push({ key: 'rent', name: '租金', detail: '', amount: b.rent, isReading: false })
   rows.push(reading('water', b.water_mode === 'monthly' ? '水费（包月）' : '水费',
     b.water_last, b.water_now, b.water_price, b.water_fee, b.water_mode === 'monthly'))
-  rows.push(reading('elec', '电费', b.elec_last, b.elec_now, b.elec_price, b.elec_fee, false))
-  rows.push(reading('gas', '燃气费', b.gas_last, b.gas_now, b.gas_price, b.gas_fee, false))
+  // 电费：峰谷分时房拆成峰/谷两行（与账单明细口径一致），单一电价房一行。
+  // 两者都按**金额**决定是否出现——关掉表种后新账单金额为 0，不再印出
+  // 「电费 0.00」这种噪音；历史真收过的费用照旧印出（单据是账单快照）。
+  if (b.elec_tou) {
+    const peakUsage = usage(b.elec_peak_last, b.elec_peak_now)
+    const valleyUsage = usage(b.elec_valley_last, b.elec_valley_now)
+    const peakAmount = Math.round(peakUsage * b.elec_peak_price * 100) / 100
+    if (peakAmount > 0) {
+      rows.push({
+        key: 'elec_peak', name: '电费（峰）', detail: '', amount: peakAmount,
+        isReading: true,
+        lastText: `${fmtRead(b.elec_peak_last)} 度`, nowText: `${fmtRead(b.elec_peak_now)} 度`,
+        usageText: `${fmtRead(peakUsage)} 度`, priceText: `${fmtRead(b.elec_peak_price)} 元/度`,
+      })
+    }
+    const valleyAmount = Math.round((b.elec_fee - peakAmount) * 100) / 100
+    if (valleyAmount > 0) {
+      rows.push({
+        key: 'elec_valley', name: '电费（谷）', detail: '', amount: valleyAmount,
+        isReading: true,
+        lastText: `${fmtRead(b.elec_valley_last)} 度`, nowText: `${fmtRead(b.elec_valley_now)} 度`,
+        usageText: `${fmtRead(valleyUsage)} 度`, priceText: `${fmtRead(b.elec_valley_price)} 元/度`,
+      })
+    }
+  } else if (b.elec_fee > 0) {
+    rows.push(reading('elec', '电费', b.elec_last, b.elec_now, b.elec_price, b.elec_fee, false))
+  }
+  if (b.gas_fee > 0) {
+    rows.push(reading('gas', '燃气费', b.gas_last, b.gas_now, b.gas_price, b.gas_fee, false))
+  }
   rows.push({ key: 'sanitation', name: '卫生费', detail: '', amount: b.sanitation_fee, isReading: false })
   rows.push({ key: 'management', name: '管理费', detail: '', amount: b.management_fee, isReading: false })
   if (b.deposit_fee > 0) {

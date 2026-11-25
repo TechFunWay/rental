@@ -624,3 +624,108 @@ func safeError(err error) string {
 	}
 	return text
 }
+
+// ---------------------------------------------------------------------------
+// 邮件附件（备份发送等运维场景）
+// ---------------------------------------------------------------------------
+
+// MaxEmailAttachmentBytes 邮件附件上限 25MB。主流邮箱（QQ / 163 / Gmail）单封
+// 附件上限在 25-50MB 之间，取最保守的一档；超出的备份请走「下载」留存。
+const MaxEmailAttachmentBytes = 25 << 20
+
+// SendEmailAttachment 用已配置的 SMTP 把一份文件作为附件发到用户已绑定的邮箱。
+//
+// 与 SendDigest 的区别：那条链路是定时提醒的文本汇总、带「每渠道每天至多一条」
+// 去重；这里是用户主动触发的运维动作（把数据库备份发到自己邮箱留档），没有
+// 去重语义、需要带附件。SMTP 服务商配置与邮箱绑定都复用同一份，不引入第二套
+// 凭据，也不改动既有提醒链路的行为。
+func SendEmailAttachment(db *gorm.DB, userID uint, subject, body, filename string, content []byte) error {
+	if len(content) > MaxEmailAttachmentBytes {
+		return &deliveryError{
+			Code:      "ATTACHMENT_TOO_LARGE",
+			Message:   fmt.Sprintf("备份 %dMB 超出邮箱附件上限（%dMB），请改用「下载」留存", len(content)>>20, MaxEmailAttachmentBytes>>20),
+			Permanent: true,
+		}
+	}
+	values, err := providerSettings(db, ChannelEmail)
+	if err != nil {
+		return &deliveryError{Code: "PROVIDER_CONFIG_INVALID", Message: "读取邮件服务配置失败", Permanent: true}
+	}
+	if values["host"] == "" || values["from_address"] == "" {
+		return &deliveryError{Code: "PROVIDER_CONFIG_INVALID", Message: "邮件服务尚未配置，请先在设置里填写 SMTP", Permanent: true}
+	}
+	recipients, err := activeEmailRecipients(db, userID, nil)
+	if err != nil {
+		return &deliveryError{Code: "TARGET_DECRYPT_FAILED", Message: "读取邮箱绑定失败", Permanent: true}
+	}
+	if len(recipients) == 0 {
+		return &deliveryError{Code: "CHANNEL_NOT_BOUND", Message: "还没有绑定收件邮箱，请先在通知设置里绑定邮箱", Permanent: true}
+	}
+	host := values["host"]
+	port := values["port"]
+	if port == "" {
+		port = "587"
+	}
+	from := values["from_address"]
+	name := values["from_name"]
+	if name == "" {
+		name = notificationBrand()
+	}
+	var auth smtp.Auth
+	if user := values["username"]; user != "" {
+		auth = smtp.PlainAuth("", user, values["password"], host)
+	}
+	message := buildAttachmentMail(name, from, recipients, subject, body, filename, content)
+	if err := sendSMTP(host, port, auth, from, recipients, message); err != nil {
+		return &deliveryError{Code: "SMTP_SEND_FAILED", Message: smtpErrorMessage(host, err)}
+	}
+	return nil
+}
+
+// buildAttachmentMail 拼一封 multipart/mixed 邮件：一段纯文本正文 + 一个附件，
+// 两段都用 base64 传输（备份是二进制；中文正文在部分老客户端下也必须编码）。
+func buildAttachmentMail(fromName, from string, recipients []string, subject, body, filename string, content []byte) []byte {
+	// 文件名会进邮件头，先剥掉引号与换行，避免头注入。
+	safeName := strings.NewReplacer("\"", "", "\r", "", "\n", "").Replace(filename)
+	boundary := "----=_rental_" + randomHex(16)
+	var b bytes.Buffer
+	b.WriteString("From: " + fromName + " <" + from + ">\r\n")
+	b.WriteString("To: " + strings.Join(recipients, ", ") + "\r\n")
+	b.WriteString("Subject: =?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(subject)) + "?=\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n\r\n")
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+	b.WriteString(wrapBase64([]byte(body)))
+	b.WriteString("\r\n--" + boundary + "\r\n")
+	b.WriteString("Content-Type: application/octet-stream; name=\"" + safeName + "\"\r\n")
+	b.WriteString("Content-Transfer-Encoding: base64\r\n")
+	b.WriteString("Content-Disposition: attachment; filename=\"" + safeName + "\"\r\n\r\n")
+	b.WriteString(wrapBase64(content))
+	b.WriteString("\r\n--" + boundary + "--\r\n")
+	return b.Bytes()
+}
+
+// wrapBase64 按 RFC 2045 每 76 字符折行，行间用 CRLF。
+func wrapBase64(data []byte) string {
+	encoded := base64.StdEncoding.EncodeToString(data)
+	var b strings.Builder
+	for len(encoded) > 76 {
+		b.WriteString(encoded[:76])
+		b.WriteString("\r\n")
+		encoded = encoded[76:]
+	}
+	b.WriteString(encoded)
+	return b.String()
+}
+
+// randomHex 生成分隔符用的随机串；随机源不可用时退回时间戳（分隔符只需唯一）。
+func randomHex(n int) string {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return fmt.Sprintf("%x", buf)
+}
+

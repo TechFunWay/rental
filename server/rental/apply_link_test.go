@@ -230,7 +230,7 @@ func TestGatewayDirectHostKeepsDomain(t *testing.T) {
 		host string
 		want string
 	}{
-		{"DDNS 域名带端口", "m5plus.wycto.cc:5643", "m5plus.wycto.cc"},
+		{"DDNS 域名带端口", "nas.example.com:5643", "nas.example.com"},
 		{"裸域名无端口", "zufang.example.com", "zufang.example.com"},
 		{"IPv4 照用", "192.0.2.151:5643", "192.0.2.151"},
 		{"IPv4 无端口", "192.168.1.10", "192.168.1.10"},
@@ -261,10 +261,10 @@ func TestApplyLinkOnGatewayKeepsDomain(t *testing.T) {
 	roomID := seedRoom(t, env, "2205")
 
 	w := doGatewayJSON(r, http.MethodPost, testGatewayPrefix+"/api/rental/rooms/"+itoa(roomID)+"/apply-link",
-		env.token, "m5plus.wycto.cc:5643", nil)
+		env.token, "nas.example.com:5643", nil)
 	data := applyLinkData(t, w)
 
-	want := "http://m5plus.wycto.cc:8910" + testGatewayPrefix + "/apply/" + data["token"].(string)
+	want := "http://nas.example.com:8910" + testGatewayPrefix + "/apply/" + data["token"].(string)
 	if got := data["link"].(string); got != want {
 		t.Fatalf("网关域（域名）上的登记链接 = %q，期望 %q", got, want)
 	}

@@ -160,3 +160,77 @@ func TestBillCreatesMeterRecord(t *testing.T) {
 		t.Errorf("existing record overwritten: %v/%v", after.Water, after.Elec)
 	}
 }
+
+// TestBillUpdateSyncsMeterRecord 复现并验证 2026-10-31 粉丝反馈的修复：
+// 水电表不在一处，先抄水开票（建账 + 沉淀台账，电还是旧值），再抄电时账单
+// 已存在、走**更新账单**路径——台账的电读数必须跟着更新，否则「抄表记录」
+// 界面显示旧值而账单金额是对的（用户看到的"副号抄的数据不显示"）。
+func TestBillUpdateSyncsMeterRecord(t *testing.T) {
+	env := setupEnv(t)
+	roomID := env.seedRoomWithFees("M4", 1000, 10, 100)
+	env.seedTenant(roomID, "分表租户")
+
+	// 第一遍：只抄水建账。
+	if w := env.do(http.MethodPost, "/api/rental/bills", map[string]interface{}{
+		"room_id": roomID, "period": "2026-11", "water_now": 18,
+	}); w.Code != http.StatusOK {
+		t.Fatalf("create bill: %d %s", w.Code, w.Body.String())
+	}
+
+	var rec MeterRecord
+	if err := env.db.Where("room_id = ? AND period = ?", roomID, "2026-11").First(&rec).Error; err != nil {
+		t.Fatalf("meter record not settled on create: %v", err)
+	}
+	if rec.Water != 18 || rec.Elec != 100 {
+		t.Fatalf("settled readings = %v/%v, want 18/100", rec.Water, rec.Elec)
+	}
+
+	// 第二遍：抄电表，更新账单（读数 + 备注，模拟抄表弹窗保存）。
+	var bill Bill
+	if err := env.db.Where("room_id = ? AND period = ?", roomID, "2026-11").First(&bill).Error; err != nil {
+		t.Fatalf("find bill: %v", err)
+	}
+	w := env.do(http.MethodPut, fmt.Sprintf("/api/rental/bills/%d", bill.ID), map[string]interface{}{
+		"room_id": roomID, "period": "2026-11",
+		"water_last": 10, "water_now": 18,
+		"elec_last": 100, "elec_now": 260, "elec_price": 1.2,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("update bill: %d %s", w.Code, w.Body.String())
+	}
+
+	var synced MeterRecord
+	if err := env.db.Where("room_id = ? AND period = ?", roomID, "2026-11").First(&synced).Error; err != nil {
+		t.Fatalf("find meter record after bill update: %v", err)
+	}
+	if synced.Elec != 260 {
+		t.Errorf("ledger elec = %v, want 260（更新账单后台账必须跟上）", synced.Elec)
+	}
+	if synced.Water != 18 {
+		t.Errorf("ledger water = %v, want 18", synced.Water)
+	}
+	// 只更新一条，不新增。
+	var n int64
+	env.db.Model(&MeterRecord{}).Where("room_id = ? AND period = ?", roomID, "2026-11").Count(&n)
+	if n != 1 {
+		t.Errorf("meter records = %d, want 1", n)
+	}
+
+	// 台账被删掉后更新账单 → 按建账口径补一条（不静默丢失）。
+	env.db.Where("room_id = ? AND period = ?", roomID, "2026-11").Delete(&MeterRecord{})
+	w = env.do(http.MethodPut, fmt.Sprintf("/api/rental/bills/%d", bill.ID), map[string]interface{}{
+		"room_id": roomID, "period": "2026-11",
+		"water_last": 10, "water_now": 18,
+		"elec_last": 100, "elec_now": 265, "elec_price": 1.2,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("update bill #2: %d %s", w.Code, w.Body.String())
+	}
+	var recreated MeterRecord
+	if err := env.db.Where("room_id = ? AND period = ?", roomID, "2026-11").First(&recreated).Error; err != nil {
+		t.Fatalf("meter record not recreated after update: %v", err)
+	}
+	if recreated.Elec != 265 {
+		t.Errorf("recreated elec = %v, want 265", recreated.Elec)
+	}
+}

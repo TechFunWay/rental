@@ -110,15 +110,20 @@ func userRole(db *gorm.DB, userID uint) string {
 	return role
 }
 
-// requireTenantRole 只放行租户角色（门户路由组用）。
+// requireTenantRole 门户路由组门禁：放行租户与普通用户（多角色，2026-11-25 用户定调）。
 //
-// 为什么必须先判角色再判绑定：房东账号绑不绑定都进不了门户——门户的数据范围
-// 是「本人档案」，与房东的台账权限是两套东西，混进来只会产生歧义入口。
+// 一个账号可以同时是房东和租户：role=user 的账号被房东关联到租户档案后，
+// 也能进门户看**本人被关联的那条档案**。数据范围永远由 portalTenant 按当前
+// 账号的绑定档案收窄（不接受 tenant_id 入参），所以 user 进门户看不到任何
+// 台账业务数据，只是多了一个「自己作为租客」的视图——与他自己的后台权限
+// 是两套互不干扰的东西。admin（平台管理员）刻意不放：管理员不该被当成租户
+// 档案的登录账号，真有这需求让房东换个账号关联。
 func requireTenantRole() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 用 context 里的 role（RequireAuth 认人时读出来的，权威且省一次查询），
 		// 不在这里再查一次库：SQLite MaxOpenConns=1，每请求多一条 SQL 是要还的。
-		if c.GetString("role") != user.RoleTenant {
+		role := c.GetString("role")
+		if role != user.RoleTenant && role != user.RoleUser {
 			response.ErrorForbidden(c, "该功能仅租户可用")
 			c.Abort()
 			return
@@ -321,7 +326,9 @@ func handlePortalStatus(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.GetUint("userID")
 		out := gin.H{
-			"role":     user.RoleTenant,
+			// 多角色：user 账号被关联后同样能进门户，前端据 role 决定显示
+			// 「返回管理后台」的入口。
+			"role":     c.GetString("role"),
 			"bound":    false,
 			"status":   userStatus(db, userID),
 			"username": c.GetString("username"),

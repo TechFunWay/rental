@@ -106,8 +106,32 @@ interface SettingDef {
 }
 interface SettingGroup { title: string; items: SettingDef[] }
 
-/** 与后端 registerConfigs 的 11 个键、中文标签一一对应，按用途分三组。 */
+/** 与后端 registerConfigs 登记的键、中文标签一一对应，按用途分组。 */
 const SETTING_GROUPS: SettingGroup[] = [
+  {
+    // 表种开关放第一组：它决定下面「计费单价」里哪些项还有意义
+    // （关掉电表后电价填了也用不上），先开关后单价符合使用顺序。
+    // 2026-10-30 粉丝反馈「能不能把用不到的功能关掉（电表 燃气表）」。
+    title: '表种',
+    items: [
+      {
+        key: 'rental_elec_enabled', label: '启用电表', type: 'select',
+        hint: '关掉后抄表记录、抄表开票、账单列表与编辑、房源表单都不再出现电表，新生成的账单也不再收电费；已开出的账单是快照，金额与单据不变。',
+        options: [
+          { value: 'true', label: '启用（抄电表、收电费）' },
+          { value: 'false', label: '关闭（用不到电表）' },
+        ],
+      },
+      {
+        key: 'rental_gas_enabled', label: '启用燃气表', type: 'select',
+        hint: '关掉后抄表记录、抄表开票、账单列表与编辑、房源表单都不再出现燃气表，新生成的账单也不再收燃气费；已开出的账单是快照，金额与单据不变。',
+        options: [
+          { value: 'true', label: '启用（抄燃气表、收燃气费）' },
+          { value: 'false', label: '关闭（用不到燃气表）' },
+        ],
+      },
+    ],
+  },
   {
     title: '计费单价',
     items: [
@@ -122,6 +146,8 @@ const SETTING_GROUPS: SettingGroup[] = [
       },
       { key: 'rental_water_monthly_fee', label: '水费包月金额（元/月）', type: 'string', hint: '计费方式为包月时的默认金额。' },
       { key: 'rental_elec_price', label: '电费单价（元/度）', type: 'string', hint: '生成账单时的默认电价。' },
+      { key: 'rental_elec_peak_price', label: '峰时电价（元/度）', type: 'string', hint: '启用峰谷分时电价的房源，默认峰段单价。' },
+      { key: 'rental_elec_valley_price', label: '谷时电价（元/度）', type: 'string', hint: '启用峰谷分时电价的房源，默认谷段单价。' },
       { key: 'rental_gas_price', label: '燃气单价（元/方）', type: 'string', hint: '生成账单时的默认气价。' },
     ],
   },

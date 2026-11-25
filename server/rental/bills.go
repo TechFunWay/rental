@@ -60,8 +60,17 @@ type billRequest struct {
 	WaterNow      *float64 `json:"water_now"`
 	ElecLast      *float64 `json:"elec_last"`
 	ElecNow       *float64 `json:"elec_now"`
-	GasLast       *float64 `json:"gas_last"`
-	GasNow        *float64 `json:"gas_now"`
+	// 峰谷分时读数与单价（仅 ElecTou 账单计费；非 TOU 账单传入会被忽略计费，
+	// 字段仍会落库以便随时切回分时后核对）。
+	ElecTou         *bool    `json:"elec_tou"`
+	ElecPeakLast    *float64 `json:"elec_peak_last"`
+	ElecPeakNow     *float64 `json:"elec_peak_now"`
+	ElecValleyLast  *float64 `json:"elec_valley_last"`
+	ElecValleyNow   *float64 `json:"elec_valley_now"`
+	ElecPeakPrice   *float64 `json:"elec_peak_price"`
+	ElecValleyPrice *float64 `json:"elec_valley_price"`
+	GasLast         *float64 `json:"gas_last"`
+	GasNow          *float64 `json:"gas_now"`
 	WaterMode     string   `json:"water_mode"`
 	WaterPrice    *float64 `json:"water_price"`
 	ElecPrice     *float64 `json:"elec_price"`
@@ -100,7 +109,9 @@ func (b *Bill) recalc() {
 	b.SanitationFee = excludedAmount(b.SanitationFee, excluded[feeKeySanitation])
 	b.ManagementFee = excludedAmount(b.ManagementFee, excluded[feeKeyManagement])
 	b.WaterFee = excludedAmount(b.waterFee(), excluded[feeKeyWater])
-	b.ElecFee = excludedAmount(meterFee(b.ElecLast, b.ElecNow, b.ElecPrice), excluded[feeKeyElec])
+	b.ElecFee = excludedAmount(elecFee(b.ElecTou, b.ElecLast, b.ElecNow, b.ElecPrice,
+		b.ElecPeakLast, b.ElecPeakNow, b.ElecValleyLast, b.ElecValleyNow,
+		b.ElecPeakPrice, b.ElecValleyPrice), excluded[feeKeyElec])
 	b.GasFee = excludedAmount(meterFee(b.GasLast, b.GasNow, b.GasPrice), excluded[feeKeyGas])
 	b.TotalAmount = round2(b.Rent + b.WaterFee + b.ElecFee + b.GasFee + b.SanitationFee + b.ManagementFee + b.DepositFee + b.ExtraAmount)
 	// 应缴与缴纳状态都按「本期费用 + 上期结转」算：租户欠的是应缴额，不是本期费用。
@@ -158,6 +169,26 @@ func defaultPrices(db *gorm.DB) (water, elec, gas float64) {
 		configFloat(db, "rental_gas_price", 0, 3.5)
 }
 
+// defaultElecTOUPrices 系统级默认峰/谷电价（元/度）。台账可覆盖（ledger_config）。
+func defaultElecTOUPrices(db *gorm.DB) (peak, valley float64) {
+	return configFloat(db, "rental_elec_peak_price", 0, 1.5),
+		configFloat(db, "rental_elec_valley_price", 0, 0.6)
+}
+
+// resolveElecTOUPrices 解析某台账生效的峰/谷电价：房源覆盖（>0）→ 台账覆盖 →
+// 系统级 → 代码默认。与 elec_price 的回退链同构。
+func resolveElecTOUPrices(db *gorm.DB, room *Room) (peak, valley float64) {
+	peak, valley = ledgerConfigFloat(db, "rental_elec_peak_price", room.LedgerID, 1.5),
+		ledgerConfigFloat(db, "rental_elec_valley_price", room.LedgerID, 0.6)
+	if room.ElecPeakPrice > 0 {
+		peak = room.ElecPeakPrice
+	}
+	if room.ElecValleyPrice > 0 {
+		valley = room.ElecValleyPrice
+	}
+	return peak, valley
+}
+
 // activeTenantNames 返回房间在租租户姓名（多人顿号连接，作为账单快照）。
 // ledgerID 非 0 时限定同台账，杜绝跨台账孤儿租户进了账单抬头。
 func activeTenantNames(db *gorm.DB, roomID uint, ledgerID uint) string {
@@ -173,7 +204,9 @@ func activeTenantNames(db *gorm.DB, roomID uint, ledgerID uint) string {
 // prefillReadings 计算开票时的"上月读数"：优先取上一期账单的本月读数，
 // 无历史账单则取房间底数，再无则为 0。
 // 上一期账单只在同台账内找：别台账的同房号账单不能拿来当读数衔接。
-func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast float64) {
+// 峰谷分时房额外返回上期峰/谷本月读数与「上期是否已是 TOU 账单」——
+// 非 TOU 历史不能把 (0,0) 当成真实寄存器读数，见 elecTOULastFor。
+func prefillReadings(db *gorm.DB, room *Room, period string) (waterLast, elecLast, gasLast, peakLast, valleyLast float64, prevTOU bool) {
 	var prev Bill
 	q := db.Where("room_id = ?", room.ID)
 	if ledgerColumnReady(db, "bills") {
@@ -181,9 +214,71 @@ func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast floa
 	}
 	err := q.Order("period DESC").First(&prev).Error
 	if err == nil {
-		return prev.WaterNow, prev.ElecNow, prev.GasNow
+		waterLast, elecLast, gasLast = prev.WaterNow, prev.ElecNow, prev.GasNow
+		peakLast, valleyLast, prevTOU = prev.ElecPeakNow, prev.ElecValleyNow, prev.ElecTou
+	} else {
+		waterLast, elecLast, gasLast = room.InitialWater, room.InitialElec, room.InitialGas
+		peakLast, valleyLast = room.InitialElecPeak, room.InitialElecValley
 	}
-	return room.InitialWater, room.InitialElec, room.InitialGas
+	// 入住起始读数（Gitee issue IKW41H 需求 7）：新租户的首张账单从入住时抄的
+	// 表底数起算，而不是上一任租客的最后读数——这正是换租客时最需要的一步。
+	// 逐项覆盖（填了哪项用哪项），续期账单不生效（见 tenantInitialReadings）。
+	if iw, ie, ig := tenantInitialReadings(db, room, period); iw > 0 || ie > 0 || ig > 0 {
+		if iw > 0 {
+			waterLast = iw
+		}
+		if ie > 0 {
+			elecLast = ie
+		}
+		if ig > 0 {
+			gasLast = ig
+		}
+	}
+	return waterLast, elecLast, gasLast, peakLast, valleyLast, prevTOU
+}
+
+// tenantInitialReadings 该房租户「入住时抄的表底数」，只用于这个租户的首张账单。
+//
+// 判定两个条件同时成立才返回：
+//   - 在租租户填了底数（0 表示没填，也不可能是真实读数）；
+//   - 该房从租户入住那个月起**还没有任何账单**——说明这确实是他入驻后的第一张。
+//
+// 为什么要看「入住月起」而不是「整房没有账单」：换租客时房间里必然有上一任的
+// 历史账单，但新租客的首张单仍要从交接读数起算，所以不能简单地要求全房无账单。
+// 反过来，一旦本月已开过单（比如手动开票后再跑自动出账），就不再覆盖，
+// 避免把已经录好的读数改回底数。
+func tenantInitialReadings(db *gorm.DB, room *Room, period string) (water, elec, gas float64) {
+	var t Tenant
+	tq := db.Where("room_id = ? AND active = ?", room.ID, true)
+	if ledgerColumnReady(db, "tenants") {
+		tq = tq.Where("org_id = ?", room.LedgerID)
+	}
+	if err := tq.Order("id DESC").First(&t).Error; err != nil {
+		return 0, 0, 0
+	}
+	if t.InitWater <= 0 && t.InitElec <= 0 && t.InitGas <= 0 {
+		return 0, 0, 0
+	}
+	// 入住日期是选填：没填时以本次开票的账期为基准。房东登记时往往先录底数、
+	// 入住日期等过几天才补，若因缺日期就不认底数，等于把功能做成摆设
+	// （2026-11-24 无头实测抓到：三个表底数都填了，首期账单读数却全是 0）。
+	moveInMonth := period
+	if len(t.MoveInDate) >= 7 && isValidPeriod(t.MoveInDate[:7]) {
+		moveInMonth = t.MoveInDate[:7]
+	}
+	// 账单账期早于入住月（补开历史账）与入住无关，不套底数。
+	if moveInMonth > period {
+		return 0, 0, 0
+	}
+	var existing int64
+	bq := db.Model(&Bill{}).Where("room_id = ? AND period >= ?", room.ID, moveInMonth)
+	if ledgerColumnReady(db, "bills") {
+		bq = bq.Where("org_id = ?", room.LedgerID)
+	}
+	if err := bq.Count(&existing).Error; err != nil || existing > 0 {
+		return 0, 0, 0
+	}
+	return t.InitWater, t.InitElec, t.InitGas
 }
 
 // newBillFromRoom 以房间默认值开票：读数衔接、单价默认值、租户名快照。
@@ -205,7 +300,7 @@ func prefillReadings(db *gorm.DB, room *Room) (waterLast, elecLast, gasLast floa
 // （多月周期房的上一张是 N 个月前，用量跨一个周期）。
 func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 	cfg := effectiveRoomBilling(db, room)
-	waterLast, elecLast, gasLast := prefillReadings(db, room)
+	waterLast, elecLast, gasLast, peakLast, valleyLast, prevTOU := prefillReadings(db, room, period)
 	_, elec, gas := defaultPrices(db)
 	if room.ElecPrice > 0 {
 		elec = room.ElecPrice
@@ -249,6 +344,14 @@ func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 		// recalc 会把它们清零，并在明细里不生成对应行。
 		DisabledFees: disabledBuiltInFeeKeys(db, room.LedgerID),
 	}
+	// 峰谷分时电价：房源开启时快照 TOU 标志与生效峰/谷单价；读数衔接见下。
+	if room.ElecTou {
+		b.ElecTou = true
+		b.ElecPeakPrice, b.ElecValleyPrice = resolveElecTOUPrices(db, room)
+		b.ElecPeakLast, b.ElecValleyLast = elecTOULastFor(room, elecLast, peakLast, valleyLast, prevTOU)
+		b.ElecPeakNow, b.ElecValleyNow = b.ElecPeakLast, b.ElecValleyLast
+		syncElecTOUTotals(b)
+	}
 	b.recalc()
 	// 结转（issue #5 需求 7）：把上期少交/多交带入本期应缴。
 	// 放在 recalc 之后——CarryIn 要加成在已算好的本期费用上。
@@ -256,6 +359,34 @@ func newBillFromRoom(db *gorm.DB, room *Room, period string) *Bill {
 	applyCarryIn(db, b, room)
 	b.Status = billStatus(b.Payable, 0)
 	return b
+}
+
+// elecTOULastFor 决定 TOU 房开票时的峰/谷"上月读数"：
+//   - 上期已是 TOU：prefill 带回的 peak/valleyNow 直接用（各自寄存器衔接，含 0）；
+//   - 无历史且房间填了峰/谷底数：用底数；
+//   - 从单一电价切换过来（上期非 TOU）：把上期总读数并入**峰段**、谷段从 0 起
+//     （总读数不丢；表盘是独立双寄存器时房东可在抄表里改本月读数核对）。
+func elecTOULastFor(room *Room, totalLast, peakLast, valleyLast float64, prevTOU bool) (peak, valley float64) {
+	if prevTOU {
+		return peakLast, valleyLast
+	}
+	if room.InitialElecPeak > 0 || room.InitialElecValley > 0 {
+		return room.InitialElecPeak, room.InitialElecValley
+	}
+	if totalLast > 0 {
+		return totalLast, 0
+	}
+	return 0, 0
+}
+
+// syncElecTOUTotals 把峰/谷读数同步进 ElecLast/ElecNow（合计），
+// 抄表台账与非 TOU 展示路径继续只认合计列。
+func syncElecTOUTotals(b *Bill) {
+	if !b.ElecTou {
+		return
+	}
+	b.ElecLast = round2(b.ElecPeakLast + b.ElecValleyLast)
+	b.ElecNow = round2(b.ElecPeakNow + b.ElecValleyNow)
 }
 
 // firstBillDeposit 返回「本期该不该收押金、收多少」。
@@ -586,6 +717,11 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 			TenantName string   `json:"tenant_name"`
 			WaterNow   *float64 `json:"water_now"`
 			ElecNow    *float64 `json:"elec_now"`
+			// 峰谷分时：TOU 房建账时传本月峰/谷读数（不传则本月=上月，用量 0）。
+			ElecPeakNow     *float64 `json:"elec_peak_now"`
+			ElecValleyNow   *float64 `json:"elec_valley_now"`
+			ElecPeakPrice   *float64 `json:"elec_peak_price"`
+			ElecValleyPrice *float64 `json:"elec_valley_price"`
 			GasNow     *float64 `json:"gas_now"`
 			WaterMode  *string  `json:"water_mode"`
 			WaterPrice *float64 `json:"water_price"`
@@ -642,6 +778,25 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 		if req.ElecNow != nil {
 			bill.ElecNow = *req.ElecNow
 		}
+		// 峰谷分时：传了就覆盖本月峰/谷读数与单价，随后用 syncElecTOUTotals
+		// 把合计列对齐（电费只按峰/谷算，合计列给抄表台账与旧展示用）。
+		if bill.ElecTou {
+			if req.ElecPeakNow != nil {
+				bill.ElecPeakNow = *req.ElecPeakNow
+			}
+			if req.ElecValleyNow != nil {
+				bill.ElecValleyNow = *req.ElecValleyNow
+			}
+			if req.ElecPeakPrice != nil {
+				bill.ElecPeakPrice = *req.ElecPeakPrice
+			}
+			if req.ElecValleyPrice != nil {
+				bill.ElecValleyPrice = *req.ElecValleyPrice
+			}
+			// 非 TOU 建账路径若也传了总读数，且没传峰/谷：保持新装表总读数语义，
+			// 不把总读数拆进峰谷（房东用的是分表双寄存器时应改传峰/谷）。
+			syncElecTOUTotals(bill)
+		}
 		if req.GasNow != nil {
 			bill.GasNow = *req.GasNow
 		}
@@ -690,8 +845,21 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 			bill.TenantName = strings.TrimSpace(req.TenantName)
 		}
 		// 包月水费不看抄表，读数倒挂不再拦；按吨仍要求本月不小于上月。
-		if (bill.WaterNow < bill.WaterLast && normalizeWaterMode(bill.WaterMode) == waterModeMeter) ||
-			bill.ElecNow < bill.ElecLast || bill.GasNow < bill.GasLast {
+		// TOU 房电表倒挂按峰/谷分路校验（合计列由 sync 维护，可能等于分路之和）。
+		if bill.WaterNow < bill.WaterLast && normalizeWaterMode(bill.WaterMode) == waterModeMeter {
+			response.ErrorBadRequest(c, "本月读数不能小于上月读数")
+			return
+		}
+		if bill.ElecTou {
+			if bill.ElecPeakNow < bill.ElecPeakLast || bill.ElecValleyNow < bill.ElecValleyLast {
+				response.ErrorBadRequest(c, "本月电表读数不能小于上月读数")
+				return
+			}
+		} else if bill.ElecNow < bill.ElecLast {
+			response.ErrorBadRequest(c, "本月读数不能小于上月读数")
+			return
+		}
+		if bill.GasNow < bill.GasLast {
 			response.ErrorBadRequest(c, "本月读数不能小于上月读数")
 			return
 		}
@@ -709,6 +877,78 @@ func handleBillCreate(db *gorm.DB) gin.HandlerFunc {
 		settleMeterRecord(db, bill)
 		response.Success(c, bill)
 	}
+}
+
+// generateBillForRoom 按标准建账链为房间生成一张 period 账期的账单，
+// 返回（账单, 是否新建, 错误）。这是「一键生成某月账单」与「登记租户即出
+// 首期账单」共用的唯一建账出口（2026-11-18 粉丝反馈：入住登记之后没有
+// 待缴费订单；租期到了不抄表也要有单，以免漏掉）。
+//
+// 口径与手动抄表开票同源（newBillFromRoom → applyCustomFees → recalc，
+// 见 bill_preview_test.go 钉死的"预览=保存"原则）：读数衔接、单价快照、
+// 周期锚点、首张押金、租户排除项与台账停用项、结转全部走同一条链，
+// 任何自动入口都不可能算出第二套金额。
+//
+//   - 幂等：同房同月已有账单就返回 created=false，调用方可放心重放
+//     （定时任务重复触发、用户连点按钮都不会出重复单）；
+//   - **不判 onBillSchedule**：该不该在本期出账由调用方按场景决定
+//     （一键生成查周期锚点；登记首期账单是明确意愿，恒出）；
+//   - 事务安全：db 可传事务句柄，租户与首期账单要么都有、要么都没有。
+func generateBillForRoom(db *gorm.DB, room *Room, period string, userID uint) (*Bill, bool, error) {
+	var existing int64
+	if err := db.Model(&Bill{}).Where("room_id = ? AND period = ? AND org_id = ?",
+		room.ID, period, room.LedgerID).Count(&existing).Error; err != nil {
+		return nil, false, err
+	}
+	if existing > 0 {
+		return nil, false, nil
+	}
+	bill := newBillFromRoom(db, room, period)
+	bill.UserID = userID         // 录入人戳（定时任务传系统值）
+	bill.LedgerID = room.LedgerID // 归属继承房间
+	customs := applyCustomFees(db, room, bill)
+	bill.recalc()
+	if err := db.Create(bill).Error; err != nil {
+		// 并发竞态的收口（2026-11-18 测试矩阵设计时发现）：非事务调用方
+		// （一键生成）里「查已有 → 插入」两步之间存在窗口，两个并发请求可能
+		// 都算出"还没有单"。唯一索引 idx_rental_bill_ledger_period 是最终防线，
+		// 撞上是**正常并发结果**（对方已经建了同一张单），按「已存在、本次跳过」
+		// 返回，不能把 500 甩给用户——重复点击/定时任务与手点撞上都会走这条路。
+		// 只认这张表的唯一冲突；其余错误（约束、磁盘、锁）照原样上抛。
+		if isDuplicateBillIndex(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	// 单据号依赖账单 ID，落库后补写（与手动开票同一函数）。
+	bill.ReceiptNo = receiptNo(bill.Period, bill.RoomNo, bill.ID)
+	if err := db.Model(bill).UpdateColumn("receipt_no", bill.ReceiptNo).Error; err != nil {
+		return nil, false, err
+	}
+	syncBillItems(db, bill, customs)
+	return bill, true, nil
+}
+
+// isDuplicateBillIndex 判断插入失败是否为「同房同台账同账期」唯一索引冲突。
+// SQLite 的错误文案形如 UNIQUE constraint failed: bills.org_id, bills.room_id,
+// bills.period；限定表名前缀，别把别的表的唯一冲突也吞进"跳过"里。
+func isDuplicateBillIndex(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") && strings.Contains(s, "bills.")
+}
+
+// firstBillPeriod 登记新租户时的首期账单账期：优先取入住日期所在月
+// （YYYY-MM-DD 前 7 位），入住日期没填或格式不对时退回当前月。
+// 用入住月而不是"永远当前月"：11 月底登记、12 月初入住的档案，首期账单
+// 不该凭空多出 11 月这一张。
+func firstBillPeriod(moveInDate string) string {
+	if len(moveInDate) >= 7 && isValidPeriod(moveInDate[:7]) {
+		return moveInDate[:7]
+	}
+	return time.Now().Format("2006-01")
 }
 
 // handleBillGenerate 一键生成某月账单：对全部有在租租户且当月尚无账单的
@@ -744,35 +984,38 @@ func handleBillGenerate(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
+		// 整批放进**一个事务**（2026-11-18 测试矩阵抓到的真缺陷）：generateBillForRoom
+		// 的「查已有 → 插入」两步之间原本存在竞态窗口，双击按钮或定时任务与手点
+		// 并发时，两条请求都数出"还没有单"→ 同房同月开出两张重复账单
+		// （httptest 3 路并发实测 18 张 = 6 房 × 3）。SQLite 单连接下，事务期间
+		// 连接被本事务独占，并发的另一路只能等提交后再数——count→create 原子化，
+		// 幂等重新成立。老库还有 (org_id,room_id,period) 唯一索引 + 本函数内的
+		// 冲突收口兜第三道（新装库该索引缺建，见 generateBillForRoom 注释，
+		// 补索引需先给存量库查重，另单处理）。
 		created, skipped := 0, 0
-		for i := range rooms {
-			var existing int64
-			db.Model(&Bill{}).Where("room_id = ? AND period = ? AND org_id = ?",
-				rooms[i].ID, req.Period, writeLedger).Count(&existing)
-			if existing > 0 {
-				skipped++
-				continue
+		if err := db.Transaction(func(tx *gorm.DB) error {
+			for i := range rooms {
+				// 账单每月出一张（onBillSchedule 恒 true）：年付房的每月水电
+				// 也要抄，固定费只在锚点月计入，中间月是只含水电等项目的"月账单"。
+				// 手动开票不受此限制，保留自由度。
+				if !onBillSchedule(tx, &rooms[i], req.Period) {
+					skipped++
+					continue
+				}
+				_, ok, err := generateBillForRoom(tx, &rooms[i], req.Period, currentUserID(c))
+				if err != nil {
+					return err
+				}
+				if !ok {
+					skipped++ // 同房同月已有账单
+					continue
+				}
+				created++
 			}
-			// 账单每月出一张（onBillSchedule 恒 true）：年付房的每月水电
-			// 也要抄，固定费只在锚点月计入，中间月是只含水电等项目的"月账单"。
-			// 手动开票不受此限制，保留自由度。
-			if !onBillSchedule(db, &rooms[i], req.Period) {
-				skipped++
-				continue
-			}
-			bill := newBillFromRoom(db, &rooms[i], req.Period)
-			bill.UserID = currentUserID(c)    // 录入人戳
-			bill.LedgerID = rooms[i].LedgerID // 归属继承房间
-			customs := applyCustomFees(db, &rooms[i], bill)
-			bill.recalc()
-			if err := db.Create(bill).Error; err != nil {
-				response.ErrorInternal(c, "生成账单失败")
-				return
-			}
-			// 单据号依赖账单 ID，落库后补写。
-			db.Model(bill).UpdateColumn("receipt_no", receiptNo(bill.Period, bill.RoomNo, bill.ID))
-			syncBillItems(db, bill, customs)
-			created++
+			return nil
+		}); err != nil {
+			response.ErrorInternal(c, "生成账单失败")
+			return
 		}
 		response.Success(c, gin.H{"created": created, "skipped": skipped})
 	}
@@ -813,6 +1056,16 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 		setIf(&bill.WaterNow, req.WaterNow)
 		setIf(&bill.ElecLast, req.ElecLast)
 		setIf(&bill.ElecNow, req.ElecNow)
+		// 峰谷分时字段：显式传入才覆盖；TOU 标志可切换（历史账单一般不动它）。
+		if req.ElecTou != nil {
+			bill.ElecTou = *req.ElecTou
+		}
+		setIf(&bill.ElecPeakLast, req.ElecPeakLast)
+		setIf(&bill.ElecPeakNow, req.ElecPeakNow)
+		setIf(&bill.ElecValleyLast, req.ElecValleyLast)
+		setIf(&bill.ElecValleyNow, req.ElecValleyNow)
+		setIf(&bill.ElecPeakPrice, req.ElecPeakPrice)
+		setIf(&bill.ElecValleyPrice, req.ElecValleyPrice)
 		setIf(&bill.GasLast, req.GasLast)
 		setIf(&bill.GasNow, req.GasNow)
 		setIf(&bill.WaterPrice, req.WaterPrice)
@@ -865,6 +1118,17 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 				bill.PaidAt = nil
 			}
 		}
+		// TOU 账单：分路读数落库前把合计列对齐为峰+谷（抄表台账与旧展示依赖合计）。
+		if bill.ElecTou {
+			syncElecTOUTotals(bill)
+			if bill.ElecPeakNow < bill.ElecPeakLast || bill.ElecValleyNow < bill.ElecValleyLast {
+				response.ErrorBadRequest(c, "本月电表读数不能小于上月读数")
+				return
+			}
+		} else if bill.ElecNow < bill.ElecLast {
+			response.ErrorBadRequest(c, "本月电表读数不能小于上月读数")
+			return
+		}
 		bill.recalc()
 
 		if err := db.Save(bill).Error; err != nil {
@@ -872,6 +1136,10 @@ func handleBillUpdate(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		syncBillItemsOnUpdate(db, bill)
+		// 读数同步回抄表台账：抄表弹窗第二遍抄电走的就是这里（账单已存在时
+		// 更新而非建账），不回写会让「抄表记录」页停留在旧读数（2026-10-31
+		// 粉丝反馈，详见 syncMeterRecordFromBill 注释）。
+		syncMeterRecordFromBill(db, bill)
 		response.Success(c, bill)
 	}
 }

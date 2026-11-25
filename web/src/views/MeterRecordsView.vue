@@ -42,9 +42,13 @@
               <tr class="text-left text-muted-foreground border-b border-border bg-muted/40">
                 <th class="py-3 px-4 font-medium">账期</th>
                 <th class="py-3 px-4 font-medium">房号</th>
+                <!-- 抄表时间（2026-10-30 粉丝反馈「水表能不能添加上抄时间」）：
+                     账期回答「哪个月的表」，这一列回答「几号上门抄的」。 -->
+                <th class="py-3 px-4 font-medium">抄表时间</th>
                 <th class="py-3 px-4 font-medium">水表（读数 · 用量，吨）</th>
-                <th class="py-3 px-4 font-medium">电表（读数 · 用量，度）</th>
-                <th class="py-3 px-4 font-medium">燃气表（读数 · 用量，方）</th>
+                <!-- 关掉电表/燃气表后，这两列不再出现（房东只用得上水表时是纯噪音） -->
+                <th v-if="elecEnabled" class="py-3 px-4 font-medium">电表（读数 · 用量，度）</th>
+                <th v-if="gasEnabled" class="py-3 px-4 font-medium">燃气表（读数 · 用量，方）</th>
                 <th class="py-3 px-4 font-medium">本期账单</th>
                 <th class="py-3 px-4 font-medium">表盘照片</th>
                 <th class="py-3 px-4 font-medium">备注</th>
@@ -55,13 +59,17 @@
               <tr v-for="r in records" :key="r.id" class="hover:bg-muted/30 transition-colors">
                 <td class="py-2.5 px-4 text-muted-foreground tabular-nums whitespace-nowrap">{{ r.period }}</td>
                 <td class="py-2.5 px-4 font-semibold text-foreground whitespace-nowrap">{{ r.room_no }}</td>
+                <td class="py-2.5 px-4 text-muted-foreground tabular-nums whitespace-nowrap">
+                  <span v-if="r.read_at">{{ r.read_at }}</span>
+                  <span v-else class="text-xs">未记</span>
+                </td>
                 <td class="py-2.5 px-4 tabular-nums whitespace-nowrap">
                   {{ fmtRead(r.water) }} 吨 <span class="text-xs" :class="usageClass(r, r.water, r.prev_water)">· 用 {{ fmtRead(r.usage_water) }} 吨</span>
                 </td>
-                <td class="py-2.5 px-4 tabular-nums whitespace-nowrap">
+                <td v-if="elecEnabled" class="py-2.5 px-4 tabular-nums whitespace-nowrap">
                   {{ fmtRead(r.elec) }} 度 <span class="text-xs" :class="usageClass(r, r.elec, r.prev_elec)">· 用 {{ fmtRead(r.usage_elec) }} 度</span>
                 </td>
-                <td class="py-2.5 px-4 tabular-nums whitespace-nowrap">
+                <td v-if="gasEnabled" class="py-2.5 px-4 tabular-nums whitespace-nowrap">
                   {{ fmtRead(r.gas) }} 方 <span class="text-xs" :class="usageClass(r, r.gas, r.prev_gas)">· 用 {{ fmtRead(r.usage_gas) }} 方</span>
                 </td>
                 <!-- 本期账单：开票后带出应收金额，自定义收费项目单列小字，
@@ -103,6 +111,8 @@
               <div class="min-w-0">
                 <span class="text-sm font-semibold text-foreground">{{ r.room_no }}</span>
                 <span class="text-[11px] text-muted-foreground ml-1.5 tabular-nums">{{ r.period }}</span>
+                <!-- 抄表时间：与账期并列，回答「几号抄的」 -->
+                <span v-if="r.read_at" class="text-[11px] text-muted-foreground ml-1.5 tabular-nums">{{ r.read_at }}</span>
               </div>
               <div class="flex items-center gap-3 text-xs shrink-0">
                 <button v-if="ledgerStore.canEdit('meters')" class="text-brand-600 dark:text-brand-300" @click="openForm(r)">修改</button>
@@ -111,8 +121,9 @@
             </div>
             <div class="text-[11px] leading-5 text-muted-foreground rounded-md bg-muted/50 px-2 py-1.5 tabular-nums">
               <div>水 {{ fmtRead(r.water) }} 吨 <span :class="usageClass(r, r.water, r.prev_water)">· 用 {{ fmtRead(r.usage_water) }} 吨</span></div>
-              <div>电 {{ fmtRead(r.elec) }} 度 <span :class="usageClass(r, r.elec, r.prev_elec)">· 用 {{ fmtRead(r.usage_elec) }} 度</span></div>
-              <div>燃气 {{ fmtRead(r.gas) }} 方 <span :class="usageClass(r, r.gas, r.prev_gas)">· 用 {{ fmtRead(r.usage_gas) }} 方</span></div>
+              <div v-if="elecEnabled">电 {{ fmtRead(r.elec) }} 度 <span :class="usageClass(r, r.elec, r.prev_elec)">· 用 {{ fmtRead(r.usage_elec) }} 度</span></div>
+              <div v-if="gasEnabled">燃气 {{ fmtRead(r.gas) }} 方 <span :class="usageClass(r, r.gas, r.prev_gas)">· 用 {{ fmtRead(r.usage_gas) }} 方</span></div>
+              <div v-if="r.read_at" class="text-muted-foreground">抄表时间 {{ r.read_at }}</div>
               <div v-if="r.bill_id" class="text-brand-600 dark:text-brand-300">
                 账单 ￥{{ fmtRead(r.bill_total) }}<span v-if="r.bill_extra > 0"> · 含其他 ￥{{ fmtRead(r.bill_extra) }}</span>
               </div>
@@ -149,6 +160,14 @@
               <option v-for="r in allRooms" :key="r.id" :value="r.id">{{ roomLabelOf(r) }}</option>
             </select>
           </div>
+        </div>
+        <!-- 抄表时间（2026-10-30 粉丝反馈「水表能不能添加上抄时间」）：
+             账期只说明哪个月，这里记几号上门抄的，对账与处理读数争议时用得上。
+             选填：老数据没有时间，不想记的人留空即可。 -->
+        <div>
+          <label class="text-xs font-semibold text-muted-foreground block mb-1.5">抄表时间（选填）</label>
+          <DateField v-model="form.read_at" type="date" placeholder="没记就留空" />
+          <p class="text-[11px] text-muted-foreground mt-1">记下几号上门抄的表，和租客核对读数时用得上；不参与计费。</p>
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3" @input="formTouched = true">
           <div v-for="m in meterFields" :key="m.key">
@@ -236,6 +255,8 @@ import PageHeader from '../components/PageHeader.vue'
 import Pagination from '../components/Pagination.vue'
 import { useLedgerStore } from '../stores/ledger'
 import { toast } from '../utils/toast'
+import { defaultBilling, fetchBillingDefaults, type BillingDefaults } from '../utils/billing'
+import { lastMeterPeriod, rememberMeterPeriod } from '../utils/meter-period'
 import {
   deleteMeterRecord, getAllRooms, getMeterRecords, upsertMeterRecord,
   type MeterRecord, type RoomView,
@@ -243,15 +264,25 @@ import {
 
 const ledgerStore = useLedgerStore()
 
+// 表种启停（2026-10-30 粉丝反馈「用不到的功能能不能关掉（电表 燃气表）」）：
+// 关掉的表在列表、录入表单、照片入口里一律不出现——房东只用得上水表时，
+// 电表/燃气表那两列纯属噪音。开关来自计费默认接口（跟着台账走）。
+const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
+const elecEnabled = computed(() => billingDefaults.value.elecEnabled)
+const gasEnabled = computed(() => billingDefaults.value.gasEnabled)
+
 // 抄表照片归「抄表」模块：操作档能拍能删，查看档只能看（组件内部区分）。
 const canEditMeters = computed(() => ledgerStore.canEdit('meters'))
 
 // 照片按表种分别留档，三张表各有入口；label 用于文案（「水表照片」）。
-const photoMeters = [
-  { meter: 'water', label: '水表' },
-  { meter: 'elec', label: '电表' },
-  { meter: 'gas', label: '燃气表' },
-] as const
+// 关掉的表种不再给照片入口（没这块表就没必要拍表盘）。
+const photoMeters = computed(() =>
+  [
+    { meter: 'water' as const, label: '水表' },
+    { meter: 'elec' as const, label: '电表' },
+    { meter: 'gas' as const, label: '燃气表' },
+  ].filter((m) => (m.meter === 'elec' ? elecEnabled.value : m.meter === 'gas' ? gasEnabled.value : true)),
+)
 
 // 列表里的「照片 n」入口：记住当前查看的房间与账期，交给弹窗里的选择器加载
 const showPhotos = ref(false)
@@ -310,24 +341,32 @@ const showMetering = ref(false)
 const saving = ref(false)
 const formError = ref('')
 const form = reactive({
-  id: 0, room_id: 0, period: '', water: 0, elec: 0, gas: 0, note: '',
+  id: 0, room_id: 0, period: '', read_at: '', water: 0, elec: 0, gas: 0, note: '',
 })
 // 用户改过读数后才显示倒挂提醒，避免刚打开弹窗就见警告。
 const formTouched = ref(false)
 // 表单参照：同房间最近一期已加载的记录（仅作提示，保存口径以服务端为准）
 const formPrev = ref<{ water: number; elec: number; gas: number } | null>(null)
 
-const meterFields = [
-  { key: 'water', label: '水表读数', unit: '吨' },
-  { key: 'elec', label: '电表读数', unit: '度' },
-  { key: 'gas', label: '燃气表读数', unit: '方' },
-] as const
+// 录入表单里的表种字段：关掉的表不渲染输入框（也就不会被误填）。
+const meterFields = computed(() =>
+  [
+    { key: 'water' as const, label: '水表读数', unit: '吨' },
+    { key: 'elec' as const, label: '电表读数', unit: '度' },
+    { key: 'gas' as const, label: '燃气表读数', unit: '方' },
+  ].filter((m) => (m.key === 'elec' ? elecEnabled.value : m.key === 'gas' ? gasEnabled.value : true)),
+)
 
 const readingBackwards = computed(() => {
   if (!formTouched.value) return false
-  const prevs = [formPrev.value?.water, formPrev.value?.elec, formPrev.value?.gas]
-  const nows = [Number(form.water) || 0, Number(form.elec) || 0, Number(form.gas) || 0]
-  return prevs.some((p, i) => p !== undefined && nows[i] < p)
+  // 只看启用中的表：关掉的表可能是历史遗留的非零读数，不该弹出提醒。
+  const keys = meterFields.value.map((m) => m.key)
+  const prevMap = { water: formPrev.value?.water, elec: formPrev.value?.elec, gas: formPrev.value?.gas }
+  return keys.some((k) => {
+    const p = prevMap[k]
+    const now = Number(form[k]) || 0
+    return p !== undefined && now < p
+  })
 })
 
 function prevOf(key: 'water' | 'elec' | 'gas'): number {
@@ -357,6 +396,7 @@ function openForm(r?: MeterRecord) {
     form.id = r.id
     form.room_id = r.room_id
     form.period = r.period
+    form.read_at = r.read_at || ''
     form.water = r.water
     form.elec = r.elec
     form.gas = r.gas
@@ -365,7 +405,10 @@ function openForm(r?: MeterRecord) {
   } else {
     form.id = 0
     form.room_id = allRooms.value[0]?.id ?? 0
-    form.period = currentPeriod()
+    // 账期默认落在最近一次抄表的月份（水电表不在一处、分两遍抄时不用重挑）。
+    form.period = lastMeterPeriod()
+    // 新记录默认今天抄的（房东录当天读数是最常见场景），要改就点日期框改。
+    form.read_at = today()
     form.water = 0
     form.elec = 0
     form.gas = 0
@@ -373,6 +416,11 @@ function openForm(r?: MeterRecord) {
     if (form.room_id) guessPrev(form.room_id, form.period)
   }
   showForm.value = true
+}
+
+function today(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 // 从当前已加载记录里找同房间、账期早于表单月份的最近一条作参照；
@@ -388,11 +436,6 @@ function guessPrev(roomIdNum: number, period: string) {
   if (room) {
     formPrev.value = { water: room.initial_water || 0, elec: room.initial_elec || 0, gas: room.initial_gas || 0 }
   }
-}
-
-function currentPeriod(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
 async function loadRooms() {
@@ -431,12 +474,15 @@ async function save() {
   try {
     const res = await upsertMeterRecord({
       room_id: form.room_id, period: form.period,
+      read_at: form.read_at,
       water: Number(form.water) || 0, elec: Number(form.elec) || 0, gas: Number(form.gas) || 0,
       note: form.note,
     })
     if (res.data?.code === 0) {
       showForm.value = false
       toast('已保存抄表记录')
+      // 记住这次抄的账期：下次打开「录入读数」直接停在这个月份
+      rememberMeterPeriod(form.period)
       await load(page.value)
     } else {
       formError.value = res.data?.message || '保存失败'
@@ -467,7 +513,9 @@ function remove(r: MeterRecord) {
 }
 
 onMounted(async () => {
-  await loadRooms()
+  // 表种开关与房间并行拉取：开关只影响渲染，不阻塞列表。
+  const [defaults] = await Promise.all([fetchBillingDefaults(), loadRooms()])
+  billingDefaults.value = defaults
   await load(1)
 })
 </script>

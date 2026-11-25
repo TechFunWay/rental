@@ -14,12 +14,63 @@ import (
 	"time"
 
 	"smallgo/server/database"
+	"smallgo/server/logger"
 	"smallgo/server/response"
+	"smallgo/server/sysconfig"
 	"smallgo/server/utils"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+// 表种启停配置键（2026-10-30 粉丝反馈「能不能把用不到的功能关掉（电表 燃气表）」）。
+//
+// 只用得上水表的场景很常见（自建房、村委统管宿舍往往没有独立燃气表），
+// 电表/燃气表留在界面上就是噪音：抄表要多填两格、账单多两列、房源表单多两行。
+// 关掉后该表种在**抄表记录、抄表开票、账单列表与编辑、房源表单与详情、收费单据**
+// 里都不再出现，且新生成的账单也不再收这一项（历史账单是快照，金额与单据不变）。
+// 水表不设开关：它是最基础的计量项，且水费本来就能切「包月」。
+const (
+	meterElecEnabledKey = "rental_elec_enabled"
+	meterGasEnabledKey  = "rental_gas_enabled"
+)
+
+// registerMeterConfigs 注册表种开关（系统级默认全开，台账可各自覆盖）。
+// 默认 "true" 是刻意的：存量用户升级后行为与升级前一模一样，要用的人自己去关。
+func registerMeterConfigs() {
+	for _, def := range []struct{ key, label string }{
+		{meterElecEnabledKey, "启用电表"},
+		{meterGasEnabledKey, "启用燃气表"},
+	} {
+		sysconfig.RegisterConfig(sysconfig.ConfigDef{
+			Key: def.key, Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeBool,
+			Default: "true", Group: "billing", Label: def.label,
+			Description: "关掉后抄表记录、抄表开票、账单、房源表单都不再出现这个表，" +
+				"新生成的账单也不再收这一项（已开出的账单是快照，金额与单据不变）；" +
+				"只用得上水表的房东可以关掉",
+		})
+	}
+}
+
+// meterEnabled 某台账某表种是否启用：台账覆盖 → 系统级 → 默认启用。
+func meterEnabled(db *gorm.DB, key string, ledgerID uint) bool {
+	return ledgerConfigString(db, key, ledgerID, "true") == "true"
+}
+
+// meterSwitches 某台账生效的表种开关（前端据此隐藏用不到的表）。
+type meterSwitches struct {
+	LedgerID    uint `json:"ledger_id"`
+	ElecEnabled bool `json:"elec_enabled"`
+	GasEnabled  bool `json:"gas_enabled"`
+}
+
+func meterSwitchesFor(db *gorm.DB, ledgerID uint) meterSwitches {
+	return meterSwitches{
+		LedgerID:    ledgerID,
+		ElecEnabled: meterEnabled(db, meterElecEnabledKey, ledgerID),
+		GasEnabled:  meterEnabled(db, meterGasEnabledKey, ledgerID),
+	}
+}
 
 // MeterRecord 每房每月的三表读数。(room, period) 唯一，
 // 重复录入按覆盖处理（改数即重新保存）。UserID 是「录入人」戳。
@@ -29,6 +80,13 @@ type MeterRecord struct {
 	LedgerID uint    `gorm:"column:org_id;index;not null;default:0" json:"ledger_id"` // 归属台账
 	RoomID   uint    `gorm:"index" json:"room_id"`
 	Period   string  `gorm:"not null;index" json:"period"` // YYYY-MM
+	// ReadAt 抄表时间（2026-10-30 粉丝反馈「水表能不能添加上抄时间」）。
+	//
+	// 账期只说明「这是哪个月的表」，回答不了「几号上门抄的」——房东与租客核对
+	// 读数争议（换表、漏抄、代抄）要看时点。存 YYYY-MM-DD（日期粒度足够，
+	// 手填成本最低），空串 = 没填（老数据或用户不想记）。
+	// **不参与任何计费**，纯粹是台账凭证。
+	ReadAt   string  `gorm:"size:10" json:"read_at"`
 	Water    float64 `gorm:"default:0" json:"water"`
 	Elec     float64 `gorm:"default:0" json:"elec"`
 	Gas      float64 `gorm:"default:0" json:"gas"`
@@ -260,10 +318,13 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 		var req struct {
 			RoomID uint    `json:"room_id" binding:"required"`
 			Period string  `json:"period" binding:"required"`
-			Water  float64 `json:"water"`
-			Elec   float64 `json:"elec"`
-			Gas    float64 `json:"gas"`
-			Note   string  `json:"note"`
+			// ReadAt 抄表时间（YYYY-MM-DD，选填）；ReadAtSet 让「显式清空」与
+			// 「没传」区分开——编辑时用户可能要把填错的日期删掉。
+			ReadAt    *string `json:"read_at"`
+			Water     float64 `json:"water"`
+			Elec      float64 `json:"elec"`
+			Gas       float64 `json:"gas"`
+			Note      string  `json:"note"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.ErrorBadRequest(c, "请选择房间与账期")
@@ -272,6 +333,10 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 		req.Period = strings.TrimSpace(req.Period)
 		if !isValidPeriod(req.Period) {
 			response.ErrorBadRequest(c, "账期格式应为 YYYY-MM")
+			return
+		}
+		readAt, ok := normalizeReadAt(c, req.ReadAt)
+		if !ok {
 			return
 		}
 		room, ok := loadRoom(db, c, req.RoomID)
@@ -289,6 +354,11 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 		err := q.First(&rec).Error
 		if err == nil {
 			rec.Water, rec.Elec, rec.Gas, rec.Note = req.Water, req.Elec, req.Gas, strings.TrimSpace(req.Note)
+			// 只覆盖客户端显式传了的抄表时间：没传就保留原值，
+			// 免得「只改读数」把之前记的时间弄丢。
+			if req.ReadAt != nil {
+				rec.ReadAt = readAt
+			}
 			if err := db.Save(&rec).Error; err != nil {
 				response.ErrorInternal(c, "保存抄表记录失败")
 				return
@@ -298,7 +368,8 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 		}
 		rec = MeterRecord{
 			UserID: currentUserID(c), LedgerID: room.LedgerID, RoomID: room.ID, Period: req.Period, // UserID 录入人戳
-			Water: req.Water, Elec: req.Elec, Gas: req.Gas, Note: strings.TrimSpace(req.Note),
+			ReadAt: readAt,
+			Water:  req.Water, Elec: req.Elec, Gas: req.Gas, Note: strings.TrimSpace(req.Note),
 		}
 		if err := db.Create(&rec).Error; err != nil {
 			response.ErrorInternal(c, "保存抄表记录失败")
@@ -306,6 +377,29 @@ func handleMeterUpsert(db *gorm.DB) gin.HandlerFunc {
 		}
 		response.Success(c, rec)
 	}
+}
+
+// normalizeReadAt 校验并归一抄表时间：nil（没传）→ 空串 + 不写库；
+// 空串（显式清空）→ 空串；合法 YYYY-MM-DD → 原样。
+// 返回 (值, 是否继续)；校验失败时已写好 400，调用方直接 return。
+func normalizeReadAt(c *gin.Context, raw *string) (string, bool) {
+	if raw == nil {
+		return "", true
+	}
+	v := strings.TrimSpace(*raw)
+	if v == "" {
+		return "", true
+	}
+	// 只收日期：房东手填「几号抄的」，不需要时分秒；带时间的输入截到日期，
+	// 让前端直接传 datetime 字符串也能用。
+	if len(v) > 10 {
+		v = v[:10]
+	}
+	if _, err := time.ParseInLocation("2006-01-02", v, time.Local); err != nil {
+		response.ErrorBadRequest(c, "抄表时间格式应为 YYYY-MM-DD")
+		return "", false
+	}
+	return v, true
 }
 
 func handleMeterDelete(db *gorm.DB) gin.HandlerFunc {
@@ -341,6 +435,9 @@ func handleMeterDelete(db *gorm.DB) gin.HandlerFunc {
 // settleMeterRecord 开票后把当期读数沉淀进台账：该月已有记录时不覆盖
 // （台账是抄表时点的原始记录），失败不影响开票主流程。
 // 记录继承账单的台账（= 房间台账），避免跨台账孤儿记录。
+//
+// 抄表时间（2026-10-30 新增）按开票当天记：这条记录本来就是「开票时顺手沉淀」的，
+// 时点就是此刻。房东后来在台账里补填/改正都能覆盖（upsert 按房+账期）。
 func settleMeterRecord(db *gorm.DB, bill *Bill) {
 	var n int64
 	q := db.Model(&MeterRecord{}).Where("room_id = ? AND period = ?",
@@ -354,7 +451,49 @@ func settleMeterRecord(db *gorm.DB, bill *Bill) {
 	}
 	db.Create(&MeterRecord{
 		UserID: bill.UserID, LedgerID: bill.LedgerID, RoomID: bill.RoomID, Period: bill.Period,
-		Water: bill.WaterNow, Elec: bill.ElecNow, Gas: bill.GasNow,
+		ReadAt: time.Now().Format("2006-01-02"),
+		Water:  bill.WaterNow, Elec: bill.ElecNow, Gas: bill.GasNow,
 		Note: "随账单生成",
 	})
+}
+
+// syncMeterRecordFromBill 编辑账单（含抄表弹窗更新读数）后把三表当期读数
+// 同步进抄表台账；该月还没有台账记录时按建账口径补一条。
+//
+// 为什么需要（2026-10-31 粉丝反馈「副号抄的数据界面不显示、账单却有」）：
+// 水电表不在一处时，房东先抄水再抄电。第一遍抄表开票给每间房建了账并沉淀
+// 台账（此时电还是上月旧值）；第二遍抄电走的是**更新账单**路径，旧代码只在
+// 建账时沉淀、更新不回写——账单金额是对的，抄表记录页的电表读数却停在旧值。
+// 与 settleMeterRecord 的「已有记录不覆盖」相反，这里是**用户刚刚改过的读数**，
+// 账单即最新意图，台账必须跟上；备注等其它字段不动。
+// 失败只记日志、不影响账单保存主流程（与 settle 同一容错口径）。
+func syncMeterRecordFromBill(db *gorm.DB, bill *Bill) {
+	var rec MeterRecord
+	q := db.Where("room_id = ? AND period = ?", bill.RoomID, bill.Period)
+	if ledgerColumnReady(db, "meter_records") {
+		q = q.Where("org_id = ?", bill.LedgerID)
+	}
+	if err := q.First(&rec).Error; err != nil {
+		settleMeterRecord(db, bill)
+		return
+	}
+	changed := false
+	if rec.Water != bill.WaterNow {
+		rec.Water = bill.WaterNow
+		changed = true
+	}
+	if rec.Elec != bill.ElecNow {
+		rec.Elec = bill.ElecNow
+		changed = true
+	}
+	if rec.Gas != bill.GasNow {
+		rec.Gas = bill.GasNow
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := db.Save(&rec).Error; err != nil {
+		logger.Error("同步抄表台账失败（账单 %d / 房间 %d / %s）: %v", bill.ID, bill.RoomID, bill.Period, err)
+	}
 }

@@ -171,6 +171,10 @@ const siteInitial = computed(() => (authStore.siteTitle || 'S').charAt(0).toUppe
   position: absolute;
   inset: -28px;
   z-index: 0;
+  /* 纯装饰层，必须让点击穿透（2026-11-25 用户反馈「登录页点立即注册没反应」）：
+     inset:-28px 的辉光盒比卡片大一圈，绝对定位 + z-index:0 会盖在页脚这类
+     静态内容之上，把下面的 <a> 全部吃掉。背景/光斑一律 pointer-events:none。 */
+  pointer-events: none;
   border-radius: 40px;
   background: radial-gradient(60% 55% at 50% 0%, rgba(124, 92, 255, 0.45), transparent 72%);
 }

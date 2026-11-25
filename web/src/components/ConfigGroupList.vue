@@ -136,12 +136,19 @@ const groupTitleMap: Record<string, string> = {
   system: '系统维护',
   // 租房管理自己的配置组（server/rental/rental.go 的 registerConfigs）
   billing: '计费默认',
+  // 自动出账单（Gitee issue IKW41H 需求 4）：缴费日到了自动开单，默认关闭。
+  autobill: '自动出账单',
   referral: '介绍费',
   rental: '租客登记与单据',
   export: '数据安全（定时导出）',
 }
 
 const selectOptionLabelMap: Record<string, Record<string, string>> = {
+  rental_autobill_mode: {
+    off: '关闭（升级后默认，行为与以前一致）',
+    payday: '按每个租户的缴费日，到日子自动出账',
+    monthly: '每月固定一天，统一给全部在租房间出账',
+  },
   rental_referral_policy: {
     free: '自愿填写（房东自己决定给不给、给多少）',
     min: '最低介绍费（房东必须填，且不低于下面的最低金额）',
@@ -263,7 +270,11 @@ const itemOrder: Record<string, string[]> = {
     'rental_apply_base', 'rental_property_name', 'rental_contact', 'rental_receipt_note',
   ],
   billing: [
+    // 表种开关排最前：先决定这个台账要不要这块表，后面的单价才有意义
+    //（2026-10-30 粉丝反馈「用不到的功能能不能关掉」）。
+    'rental_elec_enabled', 'rental_gas_enabled',
     'rental_water_mode', 'rental_water_price', 'rental_water_monthly_fee', 'rental_elec_price',
+    'rental_elec_peak_price', 'rental_elec_valley_price',
     'rental_gas_price', 'rental_pay_cycle', 'rental_pay_day', 'rental_remind_days',
   ],
   export: ['rental_export_enabled', 'rental_export_interval_hours', 'rental_export_keep_count'],

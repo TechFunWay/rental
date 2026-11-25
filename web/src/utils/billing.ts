@@ -31,6 +31,10 @@ export interface BillingDefaults {
   waterMonthlyFee: number
   /** 默认电费单价（元/度） */
   elecPrice: number
+  /** 默认峰时电价（元/度），峰谷分时房用 */
+  elecPeakPrice: number
+  /** 默认谷时电价（元/度），峰谷分时房用 */
+  elecValleyPrice: number
   /** 默认燃气单价（元/方） */
   gasPrice: number
   /** 默认缴费周期 */
@@ -39,12 +43,18 @@ export interface BillingDefaults {
   payDay: number
   /** 默认提前提醒天数 */
   remindDays: number
+  /** 是否启用电表（2026-10-30 粉丝反馈：用不到的表可以关掉，界面不再出现） */
+  elecEnabled: boolean
+  /** 是否启用燃气表（同上） */
+  gasEnabled: boolean
 }
 
 export const defaultBilling: BillingDefaults = {
   waterMode: 'meter', waterMeterPrice: 5, waterMonthlyFee: 0,
-  elecPrice: 1.2, gasPrice: 3.5,
+  elecPrice: 1.2, elecPeakPrice: 1.5, elecValleyPrice: 0.6, gasPrice: 3.5,
   payCycle: 'monthly', payDay: 0, remindDays: 3,
+  // 表种默认启用：与后端 ConfigDef 默认值一致，避免首屏闪一下再消失。
+  elecEnabled: true, gasEnabled: true,
 }
 
 function toNumber(v: string, fallback: number): number {
@@ -67,10 +77,16 @@ export async function fetchBillingDefaults(): Promise<BillingDefaults> {
       waterMeterPrice: toNumber(String(d.water_price), defaultBilling.waterMeterPrice),
       waterMonthlyFee: toNumber(String(d.water_monthly_fee), defaultBilling.waterMonthlyFee),
       elecPrice: toNumber(String(d.elec_price), defaultBilling.elecPrice),
+      elecPeakPrice: toNumber(String(d.elec_peak_price), defaultBilling.elecPeakPrice),
+      elecValleyPrice: toNumber(String(d.elec_valley_price), defaultBilling.elecValleyPrice),
       gasPrice: toNumber(String(d.gas_price), defaultBilling.gasPrice),
       payCycle: normalizeCycle(d.pay_cycle),
       payDay: Number.isFinite(payDay) && payDay >= 0 && payDay <= 28 ? payDay : defaultBilling.payDay,
       remindDays: Number.isFinite(remindDays) && remindDays >= 0 ? remindDays : defaultBilling.remindDays,
+      // 表种开关：服务端只在显式配置过时才回键，缺省按启用（不能写成 === true
+      // 那种严格判断，否则老台账会被误判成「已关闭」而隐藏整块抄表输入）。
+      elecEnabled: d.elec_enabled !== false,
+      gasEnabled: d.gas_enabled !== false,
     }
   } catch {
     return { ...defaultBilling }

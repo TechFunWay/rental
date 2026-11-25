@@ -9,13 +9,12 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </div>
-          <h1 class="mt-3 sm:mt-4 text-base sm:text-lg font-bold text-foreground">账号正在等待管理员审核</h1>
+          <h1 class="mt-3 sm:mt-4 text-base sm:text-lg font-bold text-foreground">账号审核中</h1>
           <p class="mt-1.5 sm:mt-2 text-xs sm:text-sm text-muted-foreground leading-5 sm:leading-relaxed">
-            您的账号正在等待管理员审核，审核通过后即可使用。
+            您的账号已注册成功，正在等待管理员审核。审核通过前无法访问任何页面，请耐心等待。
           </p>
           <p class="mt-1.5 sm:mt-2 text-xs text-muted-foreground leading-5 sm:leading-relaxed">
-            审核通过后即可在自己的「个人台账」里录房源与账单；
-            在此之前业务数据不可访问，这是正常现象，无需重复注册。
+            管理员通过后即可使用全部功能；无需重复注册，也不必反复刷新。
           </p>
 
           <div class="mt-3.5 sm:mt-5 w-full rounded-xl border border-border bg-muted/50 px-3 py-2.5 sm:px-3.5 sm:py-3 text-left space-y-1.5">
@@ -26,7 +25,7 @@
             <div class="flex items-center justify-between gap-3 text-xs sm:text-sm">
               <span class="text-muted-foreground shrink-0">当前状态</span>
               <span class="badge bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
-                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>待审核
+                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>审核中
               </span>
             </div>
           </div>
@@ -35,7 +34,7 @@
         <!-- 房东入驻资料（平台化）：已提交的显示摘要，没提交的可以在这里补交 -->
         <div class="mt-3.5 sm:mt-5 w-full rounded-xl border border-border bg-muted/50 px-3 py-2.5 sm:px-3.5 sm:py-3 text-left space-y-1.5">
           <div class="flex items-center justify-between gap-3">
-            <span class="text-xs sm:text-sm text-muted-foreground shrink-0">入驻申请</span>
+            <span class="text-xs sm:text-sm text-muted-foreground shrink-0">房东入驻资料（选填）</span>
             <span
               class="badge"
               :class="apply ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'"
@@ -51,9 +50,9 @@
           </template>
           <div v-else class="space-y-2">
             <p class="text-[11px] text-muted-foreground leading-5">
-              还没有你的入驻资料。平台需要核实房东身份，补齐后才会通过审核。
+              房东入驻资料与账号审核是两回事：选填，不填写不影响管理员通过审核，可稍后在应用内补交。
             </p>
-            <button class="btn-brand !py-1.5 !px-3 text-xs" @click="openApply">填写入驻资料</button>
+            <button class="btn-brand !py-1.5 !px-3 text-xs" @click="openApply">补交资料（选填）</button>
           </div>
         </div>
 
@@ -133,6 +132,7 @@ import { toast } from '../utils/toast'
 //
 // 这里不轮询：用户主动点刷新即可，避免给待审核用户堆无谓的请求。
 const router = useRouter()
+
 const authStore = useAuthStore()
 const ledgerStore = useLedgerStore()
 

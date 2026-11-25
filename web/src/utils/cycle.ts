@@ -69,6 +69,18 @@ export function coveredPeriodText(period: string, cycle: PayCycle | string | und
   return `${period} ~ ${addMonths(period, months - 1)}`
 }
 
+/** 账期覆盖的自然日区间：月付 "2026-11-01 至 2026-11-30"，季付跨到第 3 个月月末 */
+export function coveredDateRange(period: string, cycle: PayCycle | string | undefined | null): string {
+  if (!/^\d{4}-\d{2}$/.test(period)) return ''
+  const months = cycleMonths(cycle)
+  const lastPeriod = addMonths(period, months - 1)
+  const [y, m] = lastPeriod.split('-').map(Number)
+  if (!y || !m) return ''
+  // Date(y, m, 0) 取上个月最后一天：m 是 1 基月份，传 m 即「下个月第 0 天」。
+  const endDay = new Date(y, m, 0).getDate()
+  return `${period}-01 至 ${lastPeriod}-${String(endDay).padStart(2, '0')}`
+}
+
 /**
  * 某房该月是否应出账。
  *

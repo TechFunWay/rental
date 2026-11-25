@@ -95,9 +95,19 @@ type Room struct {
 	WaterMonthlyFee      float64  `gorm:"default:0" json:"-"`  // Deprecated: 见类型注释
 	ElecPrice            float64  `gorm:"default:0" json:"elec_price"`
 	GasPrice             float64  `gorm:"default:0" json:"gas_price"`
+	// 峰谷分时电价（2026-10-20 粉丝反馈）：分表装的是双读数峰谷表时开启。
+	// ElecTou=true 后开票/抄表按峰、谷两路读数各自单价计费；ElecPrice 在
+	// TOU 房里仍保留，作为未启用分时或切换前的单一电价备份。
+	// 峰/谷单价 0 = 跟随台账/系统默认（rental_elec_peak_price / rental_elec_valley_price）。
+	ElecTou         bool    `gorm:"default:false" json:"elec_tou"`
+	ElecPeakPrice   float64 `gorm:"default:0" json:"elec_peak_price"`
+	ElecValleyPrice float64 `gorm:"default:0" json:"elec_valley_price"`
 	InitialWater         float64  `gorm:"default:0" json:"initial_water"`
 	InitialElec          float64  `gorm:"default:0" json:"initial_elec"`
 	InitialGas           float64  `gorm:"default:0" json:"initial_gas"`
+	// 峰/谷表底数：仅 TOU 房首次开账前使用（无上期峰谷读数时的衔接点）。
+	InitialElecPeak   float64 `gorm:"default:0" json:"initial_elec_peak"`
+	InitialElecValley float64 `gorm:"default:0" json:"initial_elec_valley"`
 	// 房东姓名与联系电话（选填）：房东本人的联系方式，方便中介/村委核实与带看。
 	// 与「介绍费」不同，这是**基础联系信息**；免登录房源登记通过审核时会把
 	// 登记人的姓名电话写进这里（见 room_applications.go）。
@@ -167,6 +177,15 @@ type Tenant struct {
 	LeaseEndDate    string  `json:"lease_end_date"` // 租约到期时间 YYYY-MM-DD（空=未约定）
 	MoveOutDate     string  `json:"move_out_date"`
 	Deposit         float64 `gorm:"default:0" json:"deposit"` // 押金（元），退租结算时参考
+	// InitWater/InitElec/InitGas 入住时的表底数（Gitee issue IKW41H 需求 7）：
+	// 「入住登记的时候，顺便记录水电煤气各类项目的起始读数」。
+	//
+	// 0 = 没填，保持旧行为（回落到房间底数或上一张账单）。只作用于**该租户的
+	// 首张账单**：续期账单仍按上期读数衔接，换租客时也不会拿新租客的底数去
+	// 倒填老租客的历史账单（判定见 bills.go 的 tenantInitialReadings）。
+	InitWater float64 `gorm:"default:0" json:"init_water"`
+	InitElec  float64 `gorm:"default:0" json:"init_elec"`
+	InitGas   float64 `gorm:"default:0" json:"init_gas"`
 	WaterMode       string  `gorm:"default:''" json:"water_mode"`
 	WaterPrice      float64 `gorm:"default:0" json:"water_price"`       // 按吨单价 元/吨，0=跟随全局
 	WaterMonthlyFee float64 `gorm:"default:0" json:"water_monthly_fee"` // 包月金额 元/月，0=跟随全局
@@ -223,6 +242,15 @@ type Bill struct {
 	WaterPrice   float64  `json:"water_price"` // 按吨=元/吨，包月=元/月
 	ElecPrice     float64  `json:"elec_price"`
 	GasPrice      float64  `json:"gas_price"`
+	// 峰谷分时电价快照（ElecTou=true 时生效，电费 = 峰用量×峰价 + 谷用量×谷价）。
+	// ElecLast/ElecNow 仍维护为峰+谷合计，抄表台账与「上月读数」衔接不受影响。
+	ElecTou         bool    `gorm:"default:false" json:"elec_tou"`
+	ElecPeakLast    float64 `json:"elec_peak_last"`
+	ElecPeakNow     float64 `json:"elec_peak_now"`
+	ElecValleyLast  float64 `json:"elec_valley_last"`
+	ElecValleyNow   float64 `json:"elec_valley_now"`
+	ElecPeakPrice   float64 `json:"elec_peak_price"`
+	ElecValleyPrice float64 `json:"elec_valley_price"`
 	WaterFee      float64  `json:"water_fee"`
 	ElecFee       float64  `json:"elec_fee"`
 	GasFee        float64  `json:"gas_fee"`
@@ -641,6 +669,8 @@ func init() {
 		SetupAdmin: func(admin *gin.RouterGroup, db *gorm.DB) {
 			setupLedgerAdminRoutes(admin, db)
 			setupBackupUploadRoutes(admin, db)
+			// 备份发邮件（Gitee issue IKW41H 需求 8）：把备份当附件发到管理员已绑定邮箱。
+			setupBackupEmailRoutes(admin, db)
 			// 房东入驻申请的审核队列（平台管理员）
 			setupLandlordReviewRoutes(admin, db)
 		},
@@ -714,9 +744,14 @@ func setupRoutes(api *gin.RouterGroup, db *gorm.DB) {
 //     两边要同步维护（此前「租房设置」这种中文组键直接当标题用，无法控制顺序与复用）。
 func registerConfigs() {
 	registerBillingConfigs()
+	// 表种启停（电表/燃气表开关）随计费默认组一起登记：它决定「这个台账要不要
+	// 收这一项」，与单价、周期同属「算钱」的口径（2026-10-30 粉丝反馈）。
+	registerMeterConfigs()
 	registerReceiptConfigs()
 	registerRegisterConfigs()
 	registerReferralConfigs()
+	// 自动出账单（Gitee issue IKW41H 需求 4）：缴费日到了自动开单，默认关闭。
+	registerAutoBillConfigs()
 }
 
 // registerBillingConfigs 计费默认组：算钱用的默认值，租户/账单可单独覆盖。
@@ -741,6 +776,16 @@ func registerBillingConfigs() {
 		Key: "rental_elec_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
 		Default: "1.20", Group: "billing", Label: "电费单价（元/度）",
 		Description: "生成账单时的默认电价（元/度），租户或账单可单独覆盖",
+	})
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "rental_elec_peak_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
+		Default: "1.50", Group: "billing", Label: "峰时电价（元/度）",
+		Description: "启用峰谷分时电价的房源，默认峰段单价（元/度）；房源或账单可单独覆盖",
+	})
+	sysconfig.RegisterConfig(sysconfig.ConfigDef{
+		Key: "rental_elec_valley_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
+		Default: "0.60", Group: "billing", Label: "谷时电价（元/度）",
+		Description: "启用峰谷分时电价的房源，默认谷段单价（元/度）；房源或账单可单独覆盖",
 	})
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
 		Key: "rental_gas_price", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeString,
@@ -825,10 +870,15 @@ func registerReceiptConfigs() {
 func registerRegisterConfigs() {
 	// v0.6.0：注册审核开关。开户给别人用时打开，新注册账号先进「待审核」，
 	// 管理员在用户管理里审核通过后才可用（首个管理员不受影响；个人台账在注册时就建好）。
+	//
+	// 2026-11-25 改默认关闭：注册流程已改为「注册普通账号 → 登录后选择身份」，
+	// 若默认待审核，新账号一进来就被弹到等待页，身份根本没机会选、也进不了
+	// 业务区，等于把新流程堵死。自用/小范围部署本就不需要审核；要开放给
+	// 陌生人注册时，管理员在「系统配置 → 访问控制」里打开这个开关即可。
 	sysconfig.RegisterConfig(sysconfig.ConfigDef{
 		Key: "register_need_approval", Scope: sysconfig.ScopeSystem, Type: sysconfig.TypeBool,
-		Default: "true", Group: "access", Label: "注册需管理员审核",
-		Description: "开启后新注册账号为「待审核」，可登录但看不到任何业务数据，需管理员审核通过后才能使用",
+		Default: "false", Group: "access", Label: "注册需管理员审核",
+		Description: "开启后新注册账号为「待审核」，可登录但看不到任何业务数据，需管理员审核通过后才能使用；默认关闭，注册后即可选择身份并进入应用",
 	})
 
 	// 注册手机号（2026-10-11 粉丝需求）：管理员在用户列表里要能看出谁是谁。

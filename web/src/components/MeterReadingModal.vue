@@ -31,7 +31,7 @@
         </div>
       </div>
       <div v-if="readingCandidates.length" class="text-xs text-muted-foreground">
-        本月已抄 <strong class="text-foreground tabular-nums">{{ readingBillCount }}</strong> / {{ readingCandidates.length }} 间，保存后自动跳下一间未抄的。
+        本轮已抄 <strong class="text-foreground tabular-nums">{{ sessionDone.size }}</strong> / {{ readingCandidates.length }} 间，保存后自动跳下一间本轮未抄的。
       </div>
       <p class="text-xs text-muted-foreground bg-muted/60 rounded-lg px-3 py-2">
         水/电/燃气每月抄；租金等固定费按缴费周期在到期月一次收。所有在租房间都在名单里。
@@ -90,6 +90,62 @@
                 :period="readingForm.period"
                 meter="water"
                 label="水表"
+                :can-edit="canEditMeterPhotos"
+              />
+            </div>
+          </div>
+          <!-- 电费：普通房单一读数；峰谷分时房分峰/谷两路录入，各自计价 -->
+          <div v-if="readingForm?.elec_tou" class="rounded-lg bg-muted/60 px-2.5 py-2">
+            <div class="flex items-center justify-between mb-1 gap-2">
+              <span class="text-sm font-medium text-foreground flex items-center gap-2">
+                电费
+                <span class="text-[11px] px-1.5 py-0.5 rounded-md bg-brand-500/10 text-brand-600 dark:text-brand-300">峰谷</span>
+              </span>
+              <span class="text-[11px] tabular-nums text-muted-foreground">
+                费用 <strong class="text-foreground">{{ fmtMoney(feeExcluded('elec') ? 0 : touPreviewFee(readingForm)) }}</strong> 元
+              </span>
+            </div>
+            <p v-if="feeExcluded('elec')" class="text-[11px] text-muted-foreground mb-1">
+              {{ feeDisabledByLedger('elec') ? '「电费」已在收费项目里停用' : '本租户不参与电费收费' }}，出账费用为 0（读数仍会记录）。
+            </p>
+            <div class="space-y-1.5">
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5 sm:gap-2 items-end">
+                <div class="hidden sm:block">
+                  <span class="text-[11px] text-muted-foreground block">上月峰（度）</span>
+                  <div class="input-field !px-2 !py-1.5 text-right bg-muted/80 text-muted-foreground tabular-nums">{{ fmtRead(readingForm.elec_peak_last) }}</div>
+                </div>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground block sm:hidden">本月峰（度，上月 {{ fmtRead(readingForm.elec_peak_last) }}）</span>
+                  <span class="hidden text-[11px] text-muted-foreground">本月峰读数（度）*</span>
+                  <input v-model.number="readingForm.elec_peak_now" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">峰价（元/度）</span>
+                  <input v-model.number="readingForm.elec_peak_price" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" @input="markEdited" />
+                </label>
+              </div>
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5 sm:gap-2 items-end">
+                <div class="hidden sm:block">
+                  <span class="text-[11px] text-muted-foreground block">上月谷（度）</span>
+                  <div class="input-field !px-2 !py-1.5 text-right bg-muted/80 text-muted-foreground tabular-nums">{{ fmtRead(readingForm.elec_valley_last) }}</div>
+                </div>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground block sm:hidden">本月谷（度，上月 {{ fmtRead(readingForm.elec_valley_last) }}）</span>
+                  <span class="hidden text-[11px] text-muted-foreground">本月谷读数（度）*</span>
+                  <input v-model.number="readingForm.elec_valley_now" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">谷价（元/度）</span>
+                  <input v-model.number="readingForm.elec_valley_price" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" @input="markEdited" />
+                </label>
+              </div>
+            </div>
+            <div class="mt-1.5">
+              <MeterPhotoPicker
+                :room-id="readingForm.room_id"
+                :period="readingForm.period"
+                meter="elec"
+                label="电表"
                 :can-edit="canEditMeterPhotos"
               />
             </div>
@@ -155,11 +211,12 @@
           </p>
           <label class="block" for="mr-remark">
             <span class="text-[11px] text-muted-foreground">备注</span>
-            <input
+            <textarea
               id="mr-remark"
               v-model="readingForm.remark"
-              class="input-field !px-2 !py-1.5 mt-1"
-              placeholder="如：租金对应租期 2026-01 ~ 2026-06"
+              class="input-field !px-2 !py-1.5 mt-1 min-h-[54px]"
+              rows="2"
+              placeholder="如：租金对应租期 2026-01 ~ 2026-06；可多行，会显示并打印在单据底部"
             />
           </label>
         </div>
@@ -209,7 +266,8 @@ import MeterPhotoPicker from './MeterPhotoPicker.vue'
 import Modal from './Modal.vue'
 import { toast } from '../utils/toast'
 import { useLedgerStore } from '../stores/ledger'
-import { defaultBilling, fetchBillingDefaults, meterUnit, type BillingDefaults } from '../utils/billing'
+import { defaultBilling, fetchBillingDefaults, meterUnit, type BillingDefaults, type MeterKind } from '../utils/billing'
+import { lastMeterPeriod, rememberMeterPeriod } from '../utils/meter-period'
 import { cycleLabel, cycleMonths, normalizeCycle } from '../utils/cycle'
 import {
   createBill, fmtMoney, getAllBills, getAllRooms, previewBill, updateBill,
@@ -240,7 +298,12 @@ const canEditMeterPhotos = computed(() => ledgerStore.canEdit('meters'))
 const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
 fetchBillingDefaults().then((d) => { billingDefaults.value = d })
 
-const readingPeriod = ref(currentPeriod())
+// 默认账期 = 最近一次抄表用的月份（不是系统当前月）：水电表不在一处时，
+// 抄完水退出再进来抄电，月份还在原地，不用每间房重挑一次（粉丝反馈）。
+const readingPeriod = ref(lastMeterPeriod())
+// 本轮弹窗会话里已保存过的房间 id：保存后按它找下一间未抄的（见 saveReading）。
+// 弹窗每次打开、账期每次变更都清零——不同账期各抄各的，互不顶名。
+const sessionDone = ref(new Set<number>())
 const readingBills = ref<Bill[]>([])
 const readingPrevBills = ref<Bill[]>([])
 const readingRooms = ref<RoomView[]>([])
@@ -303,6 +366,9 @@ function applyServerPrefill(bill: Bill, roomId: number, period: string) {
   f.rent = bill.rent
   f.water_price = bill.water_price
   f.elec_price = bill.elec_price
+  f.elec_tou = bill.elec_tou
+  f.elec_peak_price = bill.elec_peak_price
+  f.elec_valley_price = bill.elec_valley_price
   f.gas_price = bill.gas_price
   f.sanitation_fee = bill.sanitation_fee
   f.management_fee = bill.management_fee
@@ -341,17 +407,47 @@ async function loadPreview(roomId: number, period: string) {
   }
 }
 
-// meterBlocks 电/燃气抄表块（水费单独成块，因为可按吨/包月切换）
+// 表种启停（2026-10-30）：来自计费默认接口，跟着台账走。
+const elecEnabled = computed(() => billingDefaults.value.elecEnabled)
+const gasEnabled = computed(() => billingDefaults.value.gasEnabled)
+
+// meterBlocks 电/燃气抄表块（水费单独成块，因为可按吨/包月切换）。
+// 峰谷分时房的电费已在上方单独成块，这里剔除电费，避免双路电表块重复出现。
 // feeKey 用于租户收费项目排除判断（被排除项目费用按 0 预估，读数照常录入）
 // meter / meterLabel 是抄表照片的表种键与文案（表种白名单与后端一致）
-const meterBlocks = [
-  { label: '电费', meterLabel: '电表', meter: 'elec', feeKey: 'elec', unit: meterUnit('elec'), lastKey: 'elec_last', nowKey: 'elec_now', priceKey: 'elec_price' },
-  { label: '燃气费', meterLabel: '燃气表', meter: 'gas', feeKey: 'gas', unit: meterUnit('gas'), lastKey: 'gas_last', nowKey: 'gas_now', priceKey: 'gas_price' },
-] as const
+//
+// 2026-10-30 粉丝反馈「用不到的功能能不能关掉（电表 燃气表）」：关掉的表种
+// 不渲染这个块——房东只用得上水表时，电表/燃气表那两块就是必须跳过的噪音。
+// 两条规则合在一起判断：先按表种开关剔除，再按峰谷分时剔除电费块。
+const meterBlocks = computed((): {
+  label: string; meterLabel: string; meter: MeterKind; feeKey: string; unit: string
+  lastKey: 'elec_last' | 'gas_last'; nowKey: 'elec_now' | 'gas_now'; priceKey: 'elec_price' | 'gas_price'
+}[] => {
+  const blocks = [
+    { label: '电费', meterLabel: '电表', meter: 'elec' as MeterKind, feeKey: 'elec', unit: meterUnit('elec'), lastKey: 'elec_last' as const, nowKey: 'elec_now' as const, priceKey: 'elec_price' as const },
+    { label: '燃气费', meterLabel: '燃气表', meter: 'gas' as MeterKind, feeKey: 'gas', unit: meterUnit('gas'), lastKey: 'gas_last' as const, nowKey: 'gas_now' as const, priceKey: 'gas_price' as const },
+  ]
+  return blocks.filter((m) => {
+    // 表种开关：关掉电表/燃气表后不出现对应的块
+    if (m.meter === 'elec' && !elecEnabled.value) return false
+    if (m.meter === 'gas' && !gasEnabled.value) return false
+    // 峰谷分时：电费在上方单独成块，这里不再重复
+    if (m.meter === 'elec' && readingForm.value?.elec_tou) return false
+    return true
+  })
+})
 
 function previewFee(last: number, now: number, price: number): number {
   const usage = now > last ? now - last : 0
   return Math.round(usage * price * 100) / 100
+}
+
+// touPreviewFee 峰谷分时电费预估：峰用量×峰价 + 谷用量×谷价（与服务端 elecFee 同口径）。
+function touPreviewFee(f: Pick<Bill, 'elec_peak_last' | 'elec_peak_now' | 'elec_valley_last' | 'elec_valley_now' | 'elec_peak_price' | 'elec_valley_price'> | null): number {
+  if (!f) return 0
+  const peak = previewFee(f.elec_peak_last, f.elec_peak_now, f.elec_peak_price)
+  const valley = previewFee(f.elec_valley_last, f.elec_valley_now, f.elec_valley_price)
+  return Math.round((peak + valley) * 100) / 100
 }
 
 // 本租户不参与计费的项目（已有账单取账单快照，新账单取房间生效设置，
@@ -416,7 +512,9 @@ const readingCandidates = computed<ReadingCandidate[]>(() => {
   return readingRooms.value.map((room) => ({ room, bill: byRoom.get(room.id) ?? null }))
 })
 
-// 该账期"已有账单的房间数"，用于空态提示（一个账单都没有才提示先建账/直接抄表均可）
+// 该账期"已有账单的房间数"。此前用于「本月已抄 x/y」计数，2026-10-31 起
+// 连续抄表的下一间改按本轮会话的已抄集合（sessionDone）统计，这里保留给
+// 台账口径参考（哪些房间已出账）。
 const readingBillCount = computed(() => readingBills.value.length)
 
 async function loadReadingData() {
@@ -466,6 +564,15 @@ function selectReadingCandidate(c: ReadingCandidate | null) {
     const prev = readingPrevBills.value.find((b) => b.room_id === room.id)
     const waterLast = prev?.water_now ?? room.initial_water ?? 0
     const elecLast = prev?.elec_now ?? room.initial_elec ?? 0
+    // 峰谷分时房：峰/谷上月读数优先取上期 TOU 账单，否则房间底数；
+    // 从单一电价切过来时把上期总读数并入峰段（与服务端 elecTOULastFor 同口径）。
+    const elecTou = !!room.elec_tou
+    let peakLast = prev?.elec_tou ? (prev.elec_peak_now ?? 0) : (room.initial_elec_peak || 0)
+    let valleyLast = prev?.elec_tou ? (prev.elec_valley_now ?? 0) : (room.initial_elec_valley || 0)
+    if (elecTou && !prev?.elec_tou && !(room.initial_elec_peak || room.initial_elec_valley) && elecLast > 0) {
+      peakLast = elecLast
+      valleyLast = 0
+    }
     const gasLast = prev?.gas_now ?? room.initial_gas ?? 0
     // 水费计费方式与金额、缴费周期取房间生效设置（在租租户 → 全局默认，
     // 后端 room.billing 已解析好），与服务端 newBillFromRoom 同口径
@@ -488,9 +595,14 @@ function selectReadingCandidate(c: ReadingCandidate | null) {
       rent: Math.round((room.default_rent || 0) * months * 100) / 100,
       water_last: waterLast, water_now: waterLast,
       elec_last: elecLast, elec_now: elecLast, gas_last: gasLast, gas_now: gasLast,
+      elec_tou: elecTou,
+      elec_peak_last: peakLast, elec_peak_now: peakLast,
+      elec_valley_last: valleyLast, elec_valley_now: valleyLast,
       pay_cycle: payCycle,
       water_mode: waterMode, water_price: waterAmount,
       elec_price: (room.elec_price || 0) > 0 ? room.elec_price : billingDefaults.value.elecPrice,
+      elec_peak_price: (room.elec_peak_price || 0) > 0 ? room.elec_peak_price : billingDefaults.value.elecPeakPrice,
+      elec_valley_price: (room.elec_valley_price || 0) > 0 ? room.elec_valley_price : billingDefaults.value.elecValleyPrice,
       gas_price: (room.gas_price || 0) > 0 ? room.gas_price : billingDefaults.value.gasPrice,
       sanitation_fee: Math.round((room.default_sanitation_fee || 0) * months * 100) / 100,
       management_fee: Math.round((room.default_management_fee || 0) * months * 100) / 100,
@@ -504,10 +616,11 @@ function selectReadingCandidate(c: ReadingCandidate | null) {
   void loadPreview(c.room.id, readingPeriod.value)
 }
 
-// 打开时初始化：传入 initialBill 定位到该账单，否则从当月开始自由抄
+// 打开时初始化：传入 initialBill 定位到该账单，否则从最近一次抄表的账期开始
 watch(() => props.modelValue, (open) => {
   if (!open) return
   readingError.value = ''
+  sessionDone.value = new Set()
   const target = props.initialBill
   if (target) {
     readingPeriod.value = target.period
@@ -516,7 +629,7 @@ watch(() => props.modelValue, (open) => {
       selectReadingCandidate(c)
     })
   } else {
-    readingPeriod.value = currentPeriod()
+    readingPeriod.value = lastMeterPeriod()
     loadReadingData().then(() => {
       // 默认选第一间：优先已有账单的房间
       const first = readingCandidates.value.find((x) => x.bill) ?? readingCandidates.value[0] ?? null
@@ -526,8 +639,12 @@ watch(() => props.modelValue, (open) => {
 })
 
 // 账期变更：刷新数据后按当前表单的房间重新定位——否则表单停留在旧账期
-// （update 态），保存会把读数打到旧账单上。
+// （update 态），保存会把读数打到旧账单上。同时记住这次选的月份，
+// 下次打开弹窗直接停在这里。
 async function onPeriodChange() {
+  rememberMeterPeriod(readingPeriod.value)
+  // 换账期 = 新一轮抄表，本轮已抄集合清零
+  sessionDone.value = new Set()
   const roomId = readingForm.value?.room_id
   await loadReadingData()
   if (roomId) {
@@ -580,7 +697,7 @@ function readingTotal(): number {
   const builtin =
     (feeExcluded('rent') ? 0 : (f.rent || 0)) +
     (feeExcluded('water') ? 0 : waterPreview(f)) +
-    (feeExcluded('elec') ? 0 : previewFee(f.elec_last, f.elec_now, f.elec_price)) +
+    (feeExcluded('elec') ? 0 : (f.elec_tou ? touPreviewFee(f) : previewFee(f.elec_last, f.elec_now, f.elec_price))) +
     (feeExcluded('gas') ? 0 : previewFee(f.gas_last, f.gas_now, f.gas_price)) +
     (feeExcluded('sanitation') ? 0 : (f.sanitation_fee || 0)) +
     (feeExcluded('management') ? 0 : (f.management_fee || 0))
@@ -601,17 +718,36 @@ async function saveReading() {
   f.rent = num(f.rent)
   f.water_price = num(f.water_price)
   f.elec_price = num(f.elec_price)
+  f.elec_peak_price = num(f.elec_peak_price)
+  f.elec_valley_price = num(f.elec_valley_price)
   f.gas_price = num(f.gas_price)
   f.water_now = num(f.water_now)
   f.water_last = num(f.water_last)
   f.elec_now = num(f.elec_now)
   f.elec_last = num(f.elec_last)
+  f.elec_peak_now = num(f.elec_peak_now)
+  f.elec_peak_last = num(f.elec_peak_last)
+  f.elec_valley_now = num(f.elec_valley_now)
+  f.elec_valley_last = num(f.elec_valley_last)
   f.gas_now = num(f.gas_now)
   f.gas_last = num(f.gas_last)
   f.remark = text(f.remark)
-  // 包月水费不看抄表，读数倒挂不拦
-  if ((f.water_mode !== 'monthly' && (f.water_now ?? 0) < (f.water_last ?? 0)) ||
-    (f.elec_now ?? 0) < (f.elec_last ?? 0) || (f.gas_now ?? 0) < (f.gas_last ?? 0)) {
+  // 包月水费不看抄表，读数倒挂不拦；峰谷电表按分路校验；
+  // 关掉的表种也不拦（界面上本来就不显示，残留的历史读数不该拦住本期开票）。
+  if (f.water_mode !== 'monthly' && (f.water_now ?? 0) < (f.water_last ?? 0)) {
+    readingError.value = '本月读数不能小于上月读数，请核对后再保存'
+    return
+  }
+  if (elecEnabled.value) {
+    const elecBackwards = f.elec_tou
+      ? ((f.elec_peak_now ?? 0) < (f.elec_peak_last ?? 0) || (f.elec_valley_now ?? 0) < (f.elec_valley_last ?? 0))
+      : (f.elec_now ?? 0) < (f.elec_last ?? 0)
+    if (elecBackwards) {
+      readingError.value = '本月电表读数不能小于上月读数，请核对后再保存'
+      return
+    }
+  }
+  if (gasEnabled.value && (f.gas_now ?? 0) < (f.gas_last ?? 0)) {
     readingError.value = '本月读数不能小于上月读数，请核对后再保存'
     return
   }
@@ -623,6 +759,11 @@ async function saveReading() {
     const res = readingIsNew.value
       ? await createBill(f.room_id, f.period, {
           water_now: f.water_now, elec_now: f.elec_now, gas_now: f.gas_now,
+          // 峰谷分时房：本月峰/谷读数与单价一并提交（服务端只对 TOU 房生效）
+          elec_peak_now: f.elec_tou ? f.elec_peak_now : undefined,
+          elec_valley_now: f.elec_tou ? f.elec_valley_now : undefined,
+          elec_peak_price: f.elec_tou ? f.elec_peak_price : undefined,
+          elec_valley_price: f.elec_tou ? f.elec_valley_price : undefined,
           water_mode: f.water_mode === 'monthly' ? 'monthly' : 'meter',
           water_price: f.water_price, elec_price: f.elec_price, gas_price: f.gas_price,
           rent: f.rent, remark: f.remark,
@@ -630,10 +771,18 @@ async function saveReading() {
       : await updateBill(f.id, f)
     if (res.data?.code === 0) {
       toast(`已保存 ${f.room_no} ${f.period} 抄表读数${readingIsNew.value ? '（已生成账单）' : ''}`)
+      rememberMeterPeriod(f.period)
       emit('saved')
-      // 弹窗内连续抄表：刷新该账期名单（当前间标记已抄），自动跳到下一间未抄的；全部抄完才收弹窗
+      // 弹窗内连续抄表：记入本轮已抄集合，自动跳下一间本轮还没抄的；全部抄完才收弹窗。
+      //
+      // 为什么不再按「该账期没有账单」找下一间（2026-10-31 粉丝反馈）：水电表
+      // 常不在一处，房东先抄一遍水（每间都建了账），再进来抄电。此时所有房间
+      // 都已有账单，旧逻辑找不到「无账单」的房间，保存第一间后直接关弹窗，
+      // 剩下每间都得重开一遍弹窗、重挑一次月份。按本轮会话的已抄集合找下一间，
+      // 抄电这一轮同样能连续抄完。换账期或重开弹窗时集合清零。
+      sessionDone.value.add(f.room_id)
       await loadReadingData()
-      const next = readingCandidates.value.find((x) => !x.bill)
+      const next = readingCandidates.value.find((x) => !sessionDone.value.has(x.room.id))
       if (next) {
         selectReadingCandidate(next)
       } else {
@@ -652,10 +801,5 @@ async function saveReading() {
 
 function close() {
   emit('update:modelValue', false)
-}
-
-function currentPeriod(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 </script>

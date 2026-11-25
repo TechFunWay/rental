@@ -38,6 +38,16 @@ func meterFee(last, now, price float64) float64 {
 	return round2(usage(last, now) * price)
 }
 
+// elecFee 电费：峰谷分时（ElecTou）时 = 峰用量×峰价 + 谷用量×谷价；
+// 否则与 meterFee 相同（单一读数差 × 单价）。
+// 换表倒挂的一路按 0 用量计，与 usage 同口径。
+func elecFee(tou bool, last, now, price, peakLast, peakNow, valleyLast, valleyNow, peakPrice, valleyPrice float64) float64 {
+	if !tou {
+		return meterFee(last, now, price)
+	}
+	return round2(usage(peakLast, peakNow)*peakPrice + usage(valleyLast, valleyNow)*valleyPrice)
+}
+
 // 账单缴纳状态(billStatus 的返回值,也是 bills.status 的取值)。
 const (
 	billStatusPaid    = "paid"

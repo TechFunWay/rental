@@ -60,6 +60,22 @@
               >{{ paymentDueCount > 99 ? '99+' : paymentDueCount }}</span>
             </RouterLink>
 
+          <!-- 租客门户（多角色，2026-11-25）：本账号同时被关联为某条租户档案时，
+               从后台一键切到「自己作为租客」的视图看账单；绑定状态由 onMounted
+               拉门户 status 判定，没绑定不显示。 -->
+          <RouterLink
+            v-if="tenantPortalBound"
+            to="/portal"
+            class="nav-link group nav-link-idle"
+            @click="sidebarOpen = false"
+          >
+            <span class="nav-icon bg-muted text-muted-foreground group-hover:text-brand-600 dark:group-hover:text-brand-300">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+            </span>
+            租客门户
+            <span class="ml-auto text-[10px] text-muted-foreground">我是租客</span>
+          </RouterLink>
+
             <template v-if="authStore.isAdmin">
               <div class="px-3 pt-6 pb-2">
                 <span class="text-[11px] font-bold text-muted-foreground uppercase tracking-widest">系统管理</span>
@@ -229,7 +245,8 @@
               {{ supportStore.applyMessage }}
             </p>
             <span class="block sm:inline sm:ml-2 mt-1.5 sm:mt-0">
-              <button v-if="supportStore.updateInfo?.fpk_assets?.length" type="button"
+              <!-- 飞牛安装形态不渲染一键更新（自替换曾致更新后白屏），只留提示与下载入口 -->
+              <button v-if="supportStore.updateInfo?.fpk_assets?.length && !supportStore.isFnosInstall" type="button"
                 class="btn-brand !py-1 !px-2.5 !text-xs mr-2 align-middle"
                 :disabled="supportStore.applying"
                 @click="supportStore.applyNewVersion()">
@@ -335,6 +352,7 @@ import { useLedgerStore } from '../stores/ledger'
 import type { ModuleKey } from '../api/rental'
 import { getVersion } from '../api/config'
 import { getStats } from '../api/rental'
+import { getPortalStatus } from '../api/tenant'
 import { permScore } from '../utils/perm'
 import { landingRouteName } from '../router'
 import { useSupportStore } from '../stores/support'
@@ -378,6 +396,11 @@ async function refreshPaymentBadge() {
   } catch { /* 静默 */ }
 }
 
+// 多角色（2026-11-25）：普通账号若被房东关联为租户档案，侧栏给出「租客门户」
+// 入口。403/失败都按「未绑定」处理——门户接口对 admin 不放行、对 user 未绑定时
+// 返回 bound:false，两者都不显示入口。
+const tenantPortalBound = ref(false)
+
 onMounted(async () => {
   try {
     const res = await getVersion()
@@ -389,6 +412,12 @@ onMounted(async () => {
   // 赞赏提示与新版本检查：仅管理员可见（store 内部只对管理员生效）
   await authStore.init()
   await ledgerStore.ensureLoaded()
+  if (authStore.isAuthenticated && authStore.user?.role === 'user') {
+    try {
+      const res = await getPortalStatus()
+      tenantPortalBound.value = !!res.data?.data?.bound
+    } catch { /* 未绑定或不可用：不显示入口 */ }
+  }
   supportStore.init(authStore.isAdmin)
   // 缴费提醒角标：立即拉一次，之后每 5 分钟刷新
   refreshPaymentBadge()

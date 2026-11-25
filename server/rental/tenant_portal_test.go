@@ -400,19 +400,38 @@ func TestBindRejectsSecondBindingOnEitherSide(t *testing.T) {
 	}
 }
 
-// TestBindRejectsNonTenantAccount：只能关联 role=tenant 的账号。
-func TestBindRejectsNonTenantAccount(t *testing.T) {
+// TestBindAllowsMultiRoleUser（2026-11-25 用户定调「一个账号可以有多种角色」）：
+// role=user 的普通账号（房东）同样能被关联成租户档案，绑定后账号仍是 user，
+// 后台权限不变，只是门户状态变成已绑定、多出一个「租客门户」入口。
+func TestBindAllowsMultiRoleUser(t *testing.T) {
 	env := setupEnv(t)
 	_, tenantID := seedTenantWithRoom(t, env, "401", "丙", "2026-01-01", "")
-	landlordID, _ := registerLandlord(t, env, "boss-other")
+	landlordID, landlordToken := registerLandlord(t, env, "boss-other")
 
 	w := doJSON(env.r, http.MethodPost, fmt.Sprintf("/api/rental/tenants/%d/account", tenantID),
 		env.token, map[string]interface{}{"user_id": landlordID})
-	if w.Code == http.StatusOK {
-		t.Fatalf("不该把出租人账号关联成租户：%s", w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("多角色：普通账号应能被关联成租户，实得 %d %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "租户") {
-		t.Fatalf("错误信息应说明只接受租户账号，实得 %s", w.Body.String())
+	// 角色不被改成 tenant，账号状态也不被顺带激活（关联 ≠ 平台审核通过）。
+	var u database.User
+	if err := env.db.First(&u, landlordID).Error; err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if u.Role != user.RoleUser {
+		t.Errorf("绑定后账号角色应保持 user，实得 %s", u.Role)
+	}
+	// 门户对 user 放开，且能看到自己被关联的档案。
+	status := doJSON(env.r, http.MethodGet, "/api/rental/portal/status", landlordToken, nil)
+	if status.Code != http.StatusOK {
+		t.Fatalf("普通账号应能访问门户状态，实得 %d %s", status.Code, status.Body.String())
+	}
+	data := field(t, decodeBody(t, status), "data").(map[string]interface{})
+	if data["bound"] != true {
+		t.Errorf("门户应显示已绑定，实得 %v", data["bound"])
+	}
+	if data["role"] != user.RoleUser {
+		t.Errorf("门户状态应返回真实角色 user，实得 %v", data["role"])
 	}
 }
 

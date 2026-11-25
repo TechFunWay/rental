@@ -299,18 +299,39 @@
         </div>
         <div class="rounded-xl border border-border p-3.5 space-y-3">
           <p class="text-xs font-semibold text-muted-foreground">单价覆盖（留空或 0 表示使用偏好设置中的全局默认价）</p>
+          <!-- 关掉的表种不出现（2026-10-30 粉丝反馈「用不到的功能能不能关掉」） -->
           <div class="grid grid-cols-2 gap-3">
-            <div>
+            <div v-if="elecEnabled">
               <label class="text-xs text-muted-foreground block mb-1.5">电（元/度）</label>
-              <input v-model.number="form.elec_price" type="number" step="0.01" min="0" class="input-field !py-2" />
+              <input v-model.number="form.elec_price" type="number" step="0.01" min="0" class="input-field !py-2" :disabled="form.elec_tou" />
             </div>
-            <div>
+            <div v-if="gasEnabled">
               <label class="text-xs text-muted-foreground block mb-1.5">燃气（元/方）</label>
               <input v-model.number="form.gas_price" type="number" step="0.01" min="0" class="input-field !py-2" />
             </div>
           </div>
-          <p class="text-[11px] text-muted-foreground">
-            当前全局默认：电 {{ numText(billingDefaults.elecPrice) }} 元/度 · 燃气 {{ numText(billingDefaults.gasPrice) }} 元/方
+          <!-- 峰谷分时：只在电表启用时才有意义（关掉电表就没有电费可算） -->
+          <template v-if="elecEnabled">
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input v-model="form.elec_tou" type="checkbox" class="rounded border-border" />
+              <span class="text-sm text-foreground">峰谷分时电价（双读数分表）</span>
+            </label>
+            <p v-if="form.elec_tou" class="text-[11px] text-muted-foreground">
+              开启后抄表按峰、谷两路读数录入，电费 = 峰用量×峰价 + 谷用量×谷价。
+            </p>
+            <div v-if="form.elec_tou" class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-muted-foreground block mb-1.5">峰价（元/度，0=默认）</label>
+                <input v-model.number="form.elec_peak_price" type="number" step="0.01" min="0" class="input-field !py-2" />
+              </div>
+              <div>
+                <label class="text-xs text-muted-foreground block mb-1.5">谷价（元/度，0=默认）</label>
+                <input v-model.number="form.elec_valley_price" type="number" step="0.01" min="0" class="input-field !py-2" />
+              </div>
+            </div>
+          </template>
+          <p v-if="elecEnabled || gasEnabled" class="text-[11px] text-muted-foreground">
+            当前全局默认：<template v-if="elecEnabled">电 {{ numText(billingDefaults.elecPrice) }} 元/度</template><template v-if="elecEnabled && form.elec_tou">（峰 {{ numText(billingDefaults.elecPeakPrice) }} / 谷 {{ numText(billingDefaults.elecValleyPrice) }}）</template><template v-if="elecEnabled && gasEnabled"> · </template><template v-if="gasEnabled">燃气 {{ numText(billingDefaults.gasPrice) }} 元/方</template>
           </p>
           <p class="text-[11px] text-muted-foreground bg-muted/60 rounded-lg px-2.5 py-2 leading-relaxed">
             水费按吨/包月、水费金额与缴费周期（月付/季付/半年付/年付）、缴费日、提前提醒天数都按<strong class="text-foreground">租户</strong>设置：
@@ -324,13 +345,24 @@
               <label class="text-xs text-muted-foreground block mb-1.5">水表（吨）</label>
               <input v-model.number="form.initial_water" type="number" step="1" min="0" class="input-field !py-2" />
             </div>
-            <div>
+            <div v-if="elecEnabled">
               <label class="text-xs text-muted-foreground block mb-1.5">电表（度）</label>
-              <input v-model.number="form.initial_elec" type="number" step="1" min="0" class="input-field !py-2" />
+              <input v-model.number="form.initial_elec" type="number" step="1" min="0" class="input-field !py-2" :disabled="form.elec_tou" />
             </div>
-            <div>
+            <div v-if="gasEnabled">
               <label class="text-xs text-muted-foreground block mb-1.5">燃气表（方）</label>
               <input v-model.number="form.initial_gas" type="number" step="1" min="0" class="input-field !py-2" />
+            </div>
+          </div>
+          <!-- 峰谷底数：只在电表启用且开启峰谷时才有意义 -->
+          <div v-if="elecEnabled && form.elec_tou" class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs text-muted-foreground block mb-1.5">峰表底数（度）</label>
+              <input v-model.number="form.initial_elec_peak" type="number" step="1" min="0" class="input-field !py-2" />
+            </div>
+            <div>
+              <label class="text-xs text-muted-foreground block mb-1.5">谷表底数（度）</label>
+              <input v-model.number="form.initial_elec_valley" type="number" step="1" min="0" class="input-field !py-2" />
             </div>
           </div>
         </div>
@@ -593,11 +625,31 @@ function setHouseStyle(s: 'estate' | 'rural') {
 // 全局默认（偏好设置 → 租房设置）：单价与"随租户"计费设置的提示文案
 const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
 
-// 单价列文案：电/燃气取房源覆盖价，未覆盖时用全局默认价，都带单位
+// 表种启停（2026-10-30 粉丝反馈「用不到的功能能不能关掉（电表 燃气表）」）：
+// 关掉的表在房源表单与列表单价列里都不出现。
+const elecEnabled = computed(() => billingDefaults.value.elecEnabled)
+const gasEnabled = computed(() => billingDefaults.value.gasEnabled)
+
+// 单价列文案：电/燃气取房源覆盖价，未覆盖时用全局默认价，都带单位。
+// 峰谷分时房按「峰/谷」两个价展示；关掉的表种不列（只用电表或只用燃气表的
+// 房东不该看到另一项）。
 function priceText(r: RoomView): string {
-  const elec = (r.elec_price || 0) > 0 ? r.elec_price : billingDefaults.value.elecPrice
-  const gas = (r.gas_price || 0) > 0 ? r.gas_price : billingDefaults.value.gasPrice
-  return `电 ${numText(elec)} 元/度 / 燃气 ${numText(gas)} 元/方`
+  const parts: string[] = []
+  if (elecEnabled.value) {
+    if (r.elec_tou) {
+      const peak = (r.elec_peak_price || 0) > 0 ? r.elec_peak_price : billingDefaults.value.elecPeakPrice
+      const valley = (r.elec_valley_price || 0) > 0 ? r.elec_valley_price : billingDefaults.value.elecValleyPrice
+      parts.push(`电峰谷 ${numText(peak)}/${numText(valley)} 元/度`)
+    } else {
+      const elec = (r.elec_price || 0) > 0 ? r.elec_price : billingDefaults.value.elecPrice
+      parts.push(`电 ${numText(elec)} 元/度`)
+    }
+  }
+  if (gasEnabled.value) {
+    const gas = (r.gas_price || 0) > 0 ? r.gas_price : billingDefaults.value.gasPrice
+    parts.push(`燃气 ${numText(gas)} 元/方`)
+  }
+  return parts.length ? parts.join(' / ') : '—'
 }
 
 function openCreate() {
@@ -607,6 +659,8 @@ function openCreate() {
     community: '', room_no: '', building: '', unit: '', floor: '',
     default_rent: 0, default_sanitation_fee: 0, default_management_fee: 0,
     elec_price: 0, gas_price: 0,
+    elec_tou: false, elec_peak_price: 0, elec_valley_price: 0,
+    initial_elec_peak: 0, initial_elec_valley: 0,
     initial_water: 0, initial_elec: 0, initial_gas: 0,
     address: '', area_size: 0,
     tags: [],
@@ -903,9 +957,14 @@ async function save() {
       default_management_fee: Number(form.value.default_management_fee) || 0,
       elec_price: Number(form.value.elec_price) || 0,
       gas_price: Number(form.value.gas_price) || 0,
+      elec_tou: !!form.value.elec_tou,
+      elec_peak_price: Number(form.value.elec_peak_price) || 0,
+      elec_valley_price: Number(form.value.elec_valley_price) || 0,
       initial_water: Number(form.value.initial_water) || 0,
       initial_elec: Number(form.value.initial_elec) || 0,
       initial_gas: Number(form.value.initial_gas) || 0,
+      initial_elec_peak: Number(form.value.initial_elec_peak) || 0,
+      initial_elec_valley: Number(form.value.initial_elec_valley) || 0,
       // 定位地址与面积（2026-10-20）：地址截到 200 字（与后端上限一致），
       // 面积 0 = 未填，负数按 0 处理（后端同样会拒，前端先兜一层）
       address: (form.value.address || '').trim().slice(0, 200),

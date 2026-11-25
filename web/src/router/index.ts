@@ -13,6 +13,13 @@ const router = createRouter({
       meta: { requiresAuth: false }
     },
     {
+      // 注册后的「选择身份」页（房东 / 管理人员 / 租户），不要求已选身份
+      path: '/onboarding',
+      name: 'Onboarding',
+      component: () => import('../views/OnboardingView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/register',
       name: 'Register',
       component: () => import('../views/RegisterView.vue'),
@@ -223,6 +230,10 @@ router.beforeEach(async (to, from, next) => {
   // /pending（该页自己也会再自证一次状态）；其余任何路由（含 /admin/**）
   // 一律重定向过去。管理员恒不受此限制。
   if (authStore.isAuthenticated && !authStore.isAdmin && authStore.isPendingUser) {
+    // 管理员开启「注册需审核」时（2026-11-25 用户要求）：待审核用户**唯一**能进的
+    // 页面就是等待审核页，连「选择身份」都不放行——审核通过前不能访问任何页面。
+    // 选身份挪到审核通过之后：通过后用户刷新页面，守卫会发现已不是待审核状态，
+    // 不再拦截，届时从等待页的「进入控制台」按钮走正常落地流程。
     if (to.name !== 'PendingApproval') {
       next({ name: 'PendingApproval' })
       return

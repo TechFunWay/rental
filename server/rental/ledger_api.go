@@ -1069,6 +1069,8 @@ func buildLedgerSettings(db *gorm.DB, ledgerID uint) ledgerSettingsResponse {
 		"rental_water_price":       fmt.Sprintf("%.2f", d.WaterPrice),
 		"rental_water_monthly_fee": fmt.Sprintf("%.2f", d.WaterMonthlyFee),
 		"rental_elec_price":        fmt.Sprintf("%.2f", d.ElecPrice),
+		"rental_elec_peak_price":   fmt.Sprintf("%.2f", d.ElecPeakPrice),
+		"rental_elec_valley_price": fmt.Sprintf("%.2f", d.ElecValleyPrice),
 		"rental_gas_price":         fmt.Sprintf("%.2f", d.GasPrice),
 		"rental_pay_cycle":         d.PayCycle,
 		"rental_pay_day":           fmt.Sprintf("%d", d.PayDay),
@@ -1079,6 +1081,9 @@ func buildLedgerSettings(db *gorm.DB, ledgerID uint) ledgerSettingsResponse {
 		// 结转开关（issue #5 需求 7）：必须出现在 effective 里，否则台账设置
 		// 弹窗读不到当前值，开关永远显示成默认态，房东改完看不到变化。
 		carryoverConfigKey: strconv.FormatBool(carryoverEnabled(db, ledgerID)),
+		// 表种启停（2026-10-30 粉丝反馈）：同理，弹窗要靠它显示当前开/关状态。
+		meterElecEnabledKey: strconv.FormatBool(meterEnabled(db, meterElecEnabledKey, ledgerID)),
+		meterGasEnabledKey:  strconv.FormatBool(meterEnabled(db, meterGasEnabledKey, ledgerID)),
 	}
 	overrides := map[string]string{}
 	for _, key := range rentalConfigKeys {

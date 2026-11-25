@@ -34,8 +34,18 @@
           {{ supportStore.applyMessage }}
         </p>
         <div class="flex flex-col gap-2.5">
+          <!-- 飞牛安装形态：应用内自动更新已关闭（自替换曾是更新后白屏的根源，
+               2026-11-01 定调），只保留提示与手动安装引导。 -->
+          <div
+            v-if="authStore.isAdmin && supportStore.isFnosInstall"
+            class="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs leading-5 text-foreground"
+          >
+            当前为飞牛安装形态，应用内自动更新已关闭（避免更新后页面白屏）。请前往
+            <strong>飞牛应用中心</strong>更新本应用，或点击下方链接下载对应架构的
+            <strong>.fpk 安装包</strong>后手动安装。
+          </div>
           <button
-            v-if="authStore.isAdmin && supportStore.updateInfo?.fpk_assets?.length"
+            v-if="authStore.isAdmin && supportStore.updateInfo?.fpk_assets?.length && !supportStore.isFnosInstall"
             type="button"
             class="btn-brand min-h-11 w-full"
             :disabled="supportStore.applying"
@@ -45,7 +55,7 @@
           </button>
           <!-- 按部署形态说明点下去会发生什么：飞牛安装形态装 .fpk（含网关基址前端），
                Docker/直连形态装发行包 .tar.gz。 -->
-          <p v-if="authStore.isAdmin && supportStore.updateInfo?.fpk_assets?.length" class="text-xs leading-5 text-muted-foreground">
+          <p v-if="authStore.isAdmin && supportStore.updateInfo?.fpk_assets?.length && !supportStore.isFnosInstall" class="text-xs leading-5 text-muted-foreground">
             {{ applyPlanHint }}
           </p>
 
@@ -137,13 +147,12 @@ function fpkArch(name: string): string {
   return /arm|aarch/i.test(name) ? 'ARM' : 'x86'
 }
 
-/** 点「一键更新」时按部署形态说明要装什么包（文案与后端真实行为保持一致）。 */
-const applyPlanHint = computed(() => supportStore.isFnosInstall
-  ? `点「一键更新」会下载${supportStore.applyArtifactLabel}，用包内程序与带网关基址的前端替换当前文件并自动重启，数据目录不受影响；替换前会校验待装前端基址与当前部署形态一致，不一致会中止并保留原前端。`
-  : `点「一键更新」会下载${supportStore.applyArtifactLabel}，校验后替换程序与前端并自动重启，数据目录不受影响。`)
+/** 点「一键更新」时说明要装什么包（仅非飞牛形态会渲染，飞牛形态按钮已隐藏）。 */
+const applyPlanHint = computed(() =>
+  `点「一键更新」会下载${supportStore.applyArtifactLabel}，校验后替换程序与前端并自动重启，数据目录不受影响。`)
 
 /** 弹窗底部常驻说明：同样按部署形态区分，避免出现笼统的过期口径。 */
 const deployNote = computed(() => supportStore.isFnosInstall
-  ? '一键更新仅管理员可用：当前为飞牛安装形态，更新装的是飞牛安装包（.fpk，含网关基址前端），替换程序与前端并原地重启，数据目录不受影响。手动升级可下载飞牛安装包（.fpk）后到飞牛应用中心安装，或从 Gitee / GitHub 发行版页面获取。'
+  ? '当前为飞牛安装形态：应用内自动更新已关闭（应用本体由飞牛应用中心管理，自行替换曾导致更新后页面白屏）。请到飞牛应用中心更新，或从上方链接下载 .fpk 安装包后手动安装；更新检查与下载入口照常可用。'
   : '一键更新仅管理员可用：当前为 Docker/直连形态，更新装的是发行包（.tar.gz），替换程序与前端并原地重启，数据目录不受影响。手动升级请从 Gitee / GitHub 发行版页面下载发行包。')
 </script>

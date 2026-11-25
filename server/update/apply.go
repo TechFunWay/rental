@@ -92,6 +92,13 @@ func handleApplyStart(c *gin.Context) {
 		response.ErrorBadRequest(c, "Windows 部署暂不支持一键更新，请到发行版页面手动下载替换")
 		return
 	}
+	// 飞牛安装形态：应用本体由飞牛应用中心管理，应用内自替换曾是白屏事故
+	// 的根源（2026-11-01 用户定调）。这里硬关闭一键更新——即使前端缓存了
+	// 旧按钮也调不动；引导去飞牛应用中心更新或下载 .fpk 手动安装。
+	if config.C.FnOSApp {
+		response.ErrorBadRequest(c, "飞牛安装形态不支持应用内一键更新：请到飞牛应用中心更新本应用，或下载 .fpk 安装包后手动安装（更新检查与下载入口仍可用）")
+		return
+	}
 	if applyJob.running.Load() {
 		response.Success(c, applyStatusView())
 		return

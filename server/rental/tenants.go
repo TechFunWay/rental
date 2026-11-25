@@ -37,6 +37,10 @@ type tenantRequest struct {
 	MoveInDate       string   `json:"move_in_date"`
 	LeaseEndDate     string   `json:"lease_end_date"` // 租约到期时间
 	Deposit          float64  `json:"deposit"`        // 押金（元）
+	// 入住时的水电煤气表底数（Gitee issue IKW41H 需求 7），0 = 没填。
+	InitWater float64 `json:"init_water"`
+	InitElec  float64 `json:"init_elec"`
+	InitGas   float64 `json:"init_gas"`
 	WaterMode        string   `json:"water_mode"`
 	WaterPrice       float64  `json:"water_price"`
 	WaterMonthlyFee  float64  `json:"water_monthly_fee"`
@@ -53,6 +57,13 @@ type tenantRequest struct {
 	// **一起保存**（一个事务）。带 id 的改、不带 id 的新增、数组里没有的删除；
 	// 字段不出现时不动成员（老客户端与接口调用方不受影响）。
 	Members []memberRequest `json:"members"`
+	// CreateFirstBill 登记时立即生成首期账单（2026-11-18 粉丝需求：入住登记
+	// 之后没有待缴费订单，房租和押金要开单收）。true 时与租户同事务建一张
+	// 首期账单，账期取入住日期所在月（没填则当前月），押金走 firstBillDeposit
+	// 的「该房首张账单」口径一并计入。同房同月已有账单则跳过、不报错（幂等）。
+	// 只在**新建**租户时生效；编辑请求里出现也忽略——补账走账单页。
+	// 需要请求人在该台账同时有账单模块操作档（见 handleTenantCreate）。
+	CreateFirstBill bool `json:"create_first_bill"`
 }
 
 // tenantRow 是租户列表的出参视图：附加所属房源的位置标签
@@ -267,6 +278,12 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 		if !requireLedgerWrite(db, c, room.LedgerID, ModuleTenants, PermEdit) {
 			return
 		}
+		// 首期账单是**账单**模块的写操作：只有租户权限的抄表员/前台不能借
+		// 登记顺手造账单（前端把勾选藏在 canEdit('bills') 之后，这里服务端
+		// 同样把关——界面隐藏不是权限边界）。
+		if req.CreateFirstBill && !requireLedgerWrite(db, c, room.LedgerID, ModuleBills, PermEdit) {
+			return
+		}
 		if !validateTenantBillingRequest(c, &req) {
 			return
 		}
@@ -291,6 +308,9 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 			MoveInDate:       req.MoveInDate,
 			LeaseEndDate:     req.LeaseEndDate,
 			Deposit:          req.Deposit,
+			InitWater:        req.InitWater,
+			InitElec:         req.InitElec,
+			InitGas:          req.InitGas,
 			Active:           true,
 			Notes:            req.Notes,
 		}
@@ -306,10 +326,20 @@ func handleTenantCreate(db *gorm.DB) gin.HandlerFunc {
 			if err := tx.Create(&tenant).Error; err != nil {
 				return err
 			}
-			if req.Members == nil {
-				return nil
+			if req.Members != nil {
+				if err := applyMemberPayload(tx, tenant.LedgerID, tenant.ID, tenant.UserID, req.Members); err != nil {
+					return err
+				}
 			}
-			return applyMemberPayload(tx, tenant.LedgerID, tenant.ID, tenant.UserID, req.Members)
+			// 首期账单（2026-11-18 粉丝需求）：与租户**同事务**——要么"档案+
+			// 待缴单"一起成，要么都不成，不留"登记了却还得手动补单"的半成品，
+			// 也不留"账单有了档案回滚了"的孤儿单。押金自动走首张口径。
+			if req.CreateFirstBill {
+				if _, _, err := generateBillForRoom(tx, room, firstBillPeriod(req.MoveInDate), currentUserID(c)); err != nil {
+					return err
+				}
+			}
+			return nil
 		}); err != nil {
 			var bad memberPayloadError
 			if errors.As(err, &bad) {
@@ -379,6 +409,9 @@ func handleTenantUpdate(db *gorm.DB) gin.HandlerFunc {
 		tenant.MoveInDate = req.MoveInDate
 		tenant.LeaseEndDate = req.LeaseEndDate
 		tenant.Deposit = req.Deposit
+		tenant.InitWater = req.InitWater
+		tenant.InitElec = req.InitElec
+		tenant.InitGas = req.InitGas
 		tenant.Notes = req.Notes
 		applyTenantBilling(tenant, &req)
 		tenant.ExcludedFees = normalizeExcludedFeeKeys(req.ExcludedFees)
@@ -424,6 +457,12 @@ func validateTenantBillingRequest(c *gin.Context, req *tenantRequest) bool {
 	if msg := validateTenantBilling(req.WaterMode, req.WaterPrice, req.WaterMonthlyFee,
 		req.PayCycle, payDay, remindDays); msg != "" {
 		response.ErrorBadRequest(c, msg)
+		return false
+	}
+	// 入住起始读数只能是非负数（Gitee issue IKW41H 需求 7）：负的表读数没有
+	// 物理意义，还会让首期账单算出负用量。
+	if req.InitWater < 0 || req.InitElec < 0 || req.InitGas < 0 {
+		response.ErrorBadRequest(c, "水电煤气起始读数不能为负数")
 		return false
 	}
 	return true

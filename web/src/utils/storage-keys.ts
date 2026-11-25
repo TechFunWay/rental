@@ -13,4 +13,7 @@ export const SK = {
   // 当前选中的台账（0.5.2 台账隔离）：存台账 id 的十进制字符串。
   // 同样必须带前缀：网关域下与兄弟应用共享 localStorage。
   currentLedger: `${P}current_ledger`,
+  // 最近一次抄表使用的账期（YYYY-MM）：水电表常不在一处，先抄水再抄电，
+  // 重开弹窗要停在上次抄的月份而不是退回系统当月（2026-10-31 粉丝反馈）。
+  meterPeriod: `${P}meter_period`,
 } as const

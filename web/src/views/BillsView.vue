@@ -5,6 +5,7 @@
         <button class="btn-ghost" @click="downloadTemplate">下载模板</button>
         <button class="btn-ghost" @click="doExport">导出</button>
         <button class="btn-ghost" @click="openBatchPrint">打印单据</button>
+        <button v-if="ledgerStore.canEdit('bills')" class="btn-ghost" @click="openGenerate">生成账单</button>
         <button v-if="ledgerStore.canFull('bills')" class="btn-ghost" @click="showImport = true">导入</button>
       </template>
     </PageHeader>
@@ -61,8 +62,12 @@
               <th rowspan="2" class="py-2.5 px-3 font-medium align-bottom">月份</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium align-bottom">房号</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium align-bottom">租户</th>
-              <th colspan="6" class="py-2 px-3 font-medium text-center border-b border-border/60">抄数（上月 → 本月）</th>
-              <th colspan="3" class="py-2 px-3 font-medium text-center border-b border-border/60">抄表费用</th>
+              <!-- 分组表头的 colspan 必须与下面真实列数一致：水表恒有，
+                   电表/燃气表按表种开关增减（2026-10-30 粉丝反馈）。
+                   原先是写死的 colspan="6" / "3"，但只有 3 个抄数子列，
+                   导致整组表头右移 3 列、与数据错位——顺手一并修正。 -->
+              <th :colspan="readingColCount" class="py-2 px-3 font-medium text-center border-b border-border/60">抄数（上月 → 本月）</th>
+              <th :colspan="readingFeeColCount" class="py-2 px-3 font-medium text-center border-b border-border/60">抄表费用</th>
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom">卫生费（元）</th>
               <!-- 房东口语叫「物业费」，与收费项目「管理费」是同一项，表头带说明避免对不上 -->
               <th rowspan="2" class="py-2.5 px-3 font-medium text-right align-bottom" title="即房东常说的物业费，按房源设置的默认金额计入账单">管理费／物业费（元）</th>
@@ -75,11 +80,11 @@
             </tr>
             <tr class="text-left text-muted-foreground/80 text-xs border-b border-border">
               <th class="py-1.5 px-3 font-medium text-right">水表（吨）</th>
-              <th class="py-1.5 px-3 font-medium text-right">电表（度）</th>
-              <th class="py-1.5 px-3 font-medium text-right">燃气表（方）</th>
+              <th v-if="elecEnabled" class="py-1.5 px-3 font-medium text-right">电表（度）</th>
+              <th v-if="gasEnabled" class="py-1.5 px-3 font-medium text-right">燃气表（方）</th>
               <th class="py-1.5 px-3 font-medium text-right">水费（元）</th>
-              <th class="py-1.5 px-3 font-medium text-right">电费（元）</th>
-              <th class="py-1.5 px-3 font-medium text-right">燃气费（元）</th>
+              <th v-if="elecEnabled" class="py-1.5 px-3 font-medium text-right">电费（元）</th>
+              <th v-if="gasEnabled" class="py-1.5 px-3 font-medium text-right">燃气费（元）</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-border">
@@ -91,11 +96,11 @@
               <td class="py-2.5 px-3 font-semibold text-foreground whitespace-nowrap">{{ b.room_no }}</td>
               <td class="py-2.5 px-3 text-foreground whitespace-nowrap max-w-[120px] truncate" :title="b.tenant_name">{{ b.tenant_name || '—' }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums text-muted-foreground whitespace-nowrap">{{ waterReadingText(b) }}</td>
-              <td class="py-2.5 px-3 text-right tabular-nums text-muted-foreground whitespace-nowrap">{{ meterReadingText(b, 'elec') }}</td>
-              <td class="py-2.5 px-3 text-right tabular-nums text-muted-foreground whitespace-nowrap">{{ meterReadingText(b, 'gas') }}</td>
+              <td v-if="elecEnabled" class="py-2.5 px-3 text-right tabular-nums text-muted-foreground whitespace-nowrap">{{ meterReadingText(b, 'elec') }}</td>
+              <td v-if="gasEnabled" class="py-2.5 px-3 text-right tabular-nums text-muted-foreground whitespace-nowrap">{{ meterReadingText(b, 'gas') }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.water_fee) }}</td>
-              <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.elec_fee) }}</td>
-              <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.gas_fee) }}</td>
+              <td v-if="elecEnabled" class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.elec_fee) }}</td>
+              <td v-if="gasEnabled" class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.gas_fee) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.sanitation_fee) }}</td>
               <td class="py-2.5 px-3 text-right tabular-nums">{{ fmtMoney(b.management_fee) }}</td>
               <!-- 押金：只在首张账单有值，其余账期显示 —（避免一列全是 0.00 看着乱） -->
@@ -146,8 +151,17 @@
           </div>
 
           <div class="text-[11px] text-muted-foreground tabular-nums rounded-md bg-muted/50 px-2 py-1.5">
-            <div>水 {{ waterReadingText(b, '→') }} 电 {{ meterReadingText(b, 'elec') }} 气 {{ meterReadingText(b, 'gas') }}</div>
-            <div class="mt-0.5">水费 {{ fmtMoney(b.water_fee) }} 元 · 电费 {{ fmtMoney(b.elec_fee) }} 元 · 燃气 {{ fmtMoney(b.gas_fee) }} 元 · 卫生 {{ fmtMoney(b.sanitation_fee) }} 元 · 管理 {{ fmtMoney(b.management_fee) }} 元</div>
+            <div>
+              水 {{ waterReadingText(b, '→') }}
+              <template v-if="elecEnabled"> 电 {{ meterReadingText(b, 'elec') }}</template>
+              <template v-if="gasEnabled"> 气 {{ meterReadingText(b, 'gas') }}</template>
+            </div>
+            <div class="mt-0.5">
+              水费 {{ fmtMoney(b.water_fee) }} 元
+              <template v-if="elecEnabled"> · 电费 {{ fmtMoney(b.elec_fee) }} 元</template>
+              <template v-if="gasEnabled"> · 燃气 {{ fmtMoney(b.gas_fee) }} 元</template>
+              · 卫生 {{ fmtMoney(b.sanitation_fee) }} 元 · 管理 {{ fmtMoney(b.management_fee) }} 元
+            </div>
             <!-- 押金只在首张账单出现；手机端单独一行并标黄，避免和普通费用混在一起 -->
             <div v-if="b.deposit_fee" class="mt-0.5 text-amber-600 dark:text-amber-300 font-medium">押金 {{ fmtMoney(b.deposit_fee) }} 元（入住押金，退租时结算退还）</div>
           </div>
@@ -254,6 +268,51 @@
             </div>
             </template>
           </div>
+          <!-- 峰谷分时电费：分峰/谷两路读数与单价，电费 = 峰用量×峰价 + 谷用量×谷价 -->
+          <div v-if="editForm?.elec_tou" class="rounded-lg bg-muted/60 p-2.5">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-sm font-medium text-foreground flex items-center gap-2">
+                电费
+                <span class="text-[11px] px-1.5 py-0.5 rounded-md bg-brand-500/10 text-brand-600 dark:text-brand-300">峰谷</span>
+              </span>
+              <span class="text-xs tabular-nums text-muted-foreground">
+                费用预估 <strong class="text-foreground">{{ fmtMoney(feeExcluded('elec') ? 0 : touPreviewFee(editForm)) }}</strong> 元
+              </span>
+            </div>
+            <p v-if="feeExcluded('elec')" class="text-[11px] text-muted-foreground">
+              {{ feeDisabledByLedger('elec') ? '「电费」已在收费项目里停用' : '本租户不参与电费收费' }}，出账费用为 0（读数仍会记录）。
+            </p>
+            <div v-else class="space-y-2">
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">上月峰（度）</span>
+                  <input v-model.number="editForm.elec_peak_last" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">本月峰（度）</span>
+                  <input v-model.number="editForm.elec_peak_now" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">峰价（元/度）</span>
+                  <input v-model.number="editForm.elec_peak_price" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+              </div>
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">上月谷（度）</span>
+                  <input v-model.number="editForm.elec_valley_last" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">本月谷（度）</span>
+                  <input v-model.number="editForm.elec_valley_now" type="number" step="1" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+                <label class="block">
+                  <span class="text-[11px] text-muted-foreground">谷价（元/度）</span>
+                  <input v-model.number="editForm.elec_valley_price" type="number" step="0.01" class="input-field !px-2 !py-1.5 text-right" />
+                </label>
+              </div>
+            </div>
+          </div>
           <div v-for="m in meterBlocks" :key="m.lastKey" class="rounded-lg bg-muted/60 p-2.5">
             <div class="flex items-center justify-between mb-1.5">
               <span class="text-sm font-medium text-foreground">{{ m.label }}</span>
@@ -312,7 +371,10 @@
         </div>
         <div>
           <label class="text-xs font-semibold text-muted-foreground block mb-1.5">备注</label>
-          <input v-model="editForm.remark" class="input-field" placeholder="选填" />
+          <!-- 备注是给房东留的活口径（水电另计、押金补多少、几号到几号的租期……），
+               单行 input 装不下（2026-11-18 粉丝反馈「单据底部备注请留大一些编辑地方」）；
+               换行会原样存进账单，单据/文本导出按行显示。 -->
+          <textarea v-model="editForm.remark" class="input-field min-h-[72px]" rows="3" placeholder="选填，可多行，会显示并打印在单据底部" />
         </div>
         <p v-if="editError" class="text-sm text-destructive">{{ editError }}</p>
         <div class="flex gap-3 pt-1">
@@ -423,8 +485,32 @@
             <ReceiptPaperPicker v-model:paper="receiptPaper" v-model:custom="customPaper" @update:paper="onPaperChange" @update:custom="onPaperChange" />
           </div>
           <button class="btn-ghost" @click="showReceipt = false">关闭</button>
+          <button class="btn-ghost" @click="copyReceiptText">📋 复制文本</button>
+          <button class="btn-ghost" @click="downloadReceiptText">⬇ 导出 TXT</button>
           <button class="btn-brand" @click="printReceipt">🖨 打印 / 另存 PDF</button>
         </div>
+      </div>
+    </Modal>
+
+    <!-- 一键生成账单（2026-11-18 粉丝需求：租期到了不抄表就不出单，容易漏收）：
+         后端与手动开票同一条建账链，同房同期已有账单自动跳过，可放心重复点。 -->
+    <Modal v-model="showGenerate" title="一键生成账单">
+      <p class="text-sm text-muted-foreground mb-3 leading-relaxed">
+        给当前台账<span class="text-foreground">所有在租房间</span>生成所选账期的账单：
+        租金按缴费周期到期的才计，押金只在该房首张账单收一次，自定义收费项目照常并入；
+        水电燃气读数<strong class="text-foreground">留空待抄</strong>，生成后到「抄表」页录入读数会直接写进这张单。
+        已有账单的房间自动跳过，重复执行不会多开。
+      </p>
+      <div class="w-48">
+        <label class="text-xs font-semibold text-muted-foreground block mb-1.5">账期</label>
+        <DateField v-model="genPeriod" type="month" />
+      </div>
+      <p v-if="genError" class="text-sm text-destructive mt-2">{{ genError }}</p>
+      <div class="flex gap-3 pt-4">
+        <button type="button" class="btn-ghost flex-1" @click="showGenerate = false">取消</button>
+        <button type="button" class="btn-brand flex-1" :disabled="generating" @click="doGenerate">
+          {{ generating ? '生成中…' : '立即生成' }}
+        </button>
       </div>
     </Modal>
 
@@ -477,6 +563,7 @@
           <ReceiptPaperPicker v-model:paper="receiptPaper" v-model:custom="customPaper" @update:paper="onPaperChange" @update:custom="onPaperChange" />
         </div>
         <button class="btn-brand !py-1.5 !px-3 text-xs" @click="printBatch">🖨 打印</button>
+        <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="exportBatchText">⬇ 导出全部文本</button>
         <button class="btn-ghost !py-1.5 !px-3 text-xs" @click="batchPrinting = false">关闭</button>
       </div>
       <div class="max-w-3xl mx-auto py-5 space-y-6">
@@ -512,6 +599,8 @@ import { useLedgerStore } from '../stores/ledger'
 import RentalReceipt from '../components/RentalReceipt.vue'
 import ReceiptPaperPicker from '../components/ReceiptPaperPicker.vue'
 import { toast } from '../utils/toast'
+import { billToText, billsBundleToText, downloadTextFile, safeTextFilename } from '../utils/receipt-text'
+import { copyPlainText } from '../utils/clipboard'
 import {
   applyReceiptPaper, loadCustomPaper, loadReceiptPaper, paperSummary, saveReceiptPaper,
   type CustomPaper, type ReceiptPaper,
@@ -522,7 +611,7 @@ import {
 import { billTypeLabel, coveredPeriodText, cycleLabel, cycleMonths, payCycleOptions, type PayCycle } from '../utils/cycle'
 import {
   arrearsOf, carryInOf, createBill, currentPeriod, deleteBill, downloadTemplate, exportBills, fmtMoney,
-  getAllRooms, getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears,
+  generateBills, getAllRooms, getBillDetail, getBillReceipts, getBills, getFeeItems, getRooms, importBills, isArrears,
   payableOf, payBill, updateBill,
   type Bill, type BillItemDetail, type FeeItem, type ImportResult, type PropertyMeta, type ReceiptEntry, type RoomView,
 } from '../api/rental'
@@ -558,6 +647,15 @@ const saving = ref(false)
 
 // 全局默认（偏好设置 → 租房设置）：抄表预览里电/燃气单价的兜底值
 const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
+
+// 表种启停（2026-10-30 粉丝反馈「用不到的功能能不能关掉（电表 燃气表）」）：
+// 关掉的表在账单列表的抄数/抄表费用列、编辑弹窗的输入块、手机卡片里都不再出现。
+// 历史账单金额是快照，照旧显示（这里只管「这一列还显不显示」）。
+const elecEnabled = computed(() => billingDefaults.value.elecEnabled)
+const gasEnabled = computed(() => billingDefaults.value.gasEnabled)
+// 抄数/抄表费用两组表头的合并列数，必须跟着真实列数走（见模板里的说明）。
+const readingColCount = computed(() => 1 + (elecEnabled.value ? 1 : 0) + (gasEnabled.value ? 1 : 0))
+const readingFeeColCount = readingColCount
 
 const showEdit = ref(false)
 const editForm = ref<Bill | null>(null)
@@ -649,16 +747,35 @@ function applyFilters() {
   filterRef.value?.collapse()
 }
 
-// meterBlocks 电/燃气抄表块（水费单独成块，因为可按吨/包月切换）
+// meterBlocks 电/燃气抄表块（水费单独成块，因为可按吨/包月切换）。
+// 峰谷分时账单的电费单独成块，这里剔除电费避免重复。
 // feeKey 用于租户收费项目排除判断（被排除项目禁用输入并按 0 预估）
-const meterBlocks = [
-  { label: '电费', feeKey: 'elec', unit: meterUnit('elec'), lastKey: 'elec_last', nowKey: 'elec_now', priceKey: 'elec_price' },
-  { label: '燃气费', feeKey: 'gas', unit: meterUnit('gas'), lastKey: 'gas_last', nowKey: 'gas_now', priceKey: 'gas_price' },
-] as const
+// 2026-10-30：关掉的表种不进这个列表，编辑账单时不再出现那两块输入。
+// 与峰谷分时一起判断：先按表种开关剔除，再按峰谷剔除电费块。
+const meterBlocks = computed(() => {
+  const blocks = [
+    { label: '电费', feeKey: 'elec', unit: meterUnit('elec'), lastKey: 'elec_last' as const, nowKey: 'elec_now' as const, priceKey: 'elec_price' as const, kind: 'elec' as const },
+    { label: '燃气费', feeKey: 'gas', unit: meterUnit('gas'), lastKey: 'gas_last' as const, nowKey: 'gas_now' as const, priceKey: 'gas_price' as const, kind: 'gas' as const },
+  ]
+  return blocks.filter((m) => {
+    if (m.kind === 'elec' && !elecEnabled.value) return false
+    if (m.kind === 'gas' && !gasEnabled.value) return false
+    if (m.kind === 'elec' && editForm.value?.elec_tou) return false
+    return true
+  })
+})
 
 function previewFee(last: number, now: number, price: number): number {
   const usage = now > last ? now - last : 0
   return Math.round(usage * price * 100) / 100
+}
+
+// touPreviewFee 峰谷分时电费预估（与服务端 elecFee 同口径）
+function touPreviewFee(f: Bill | null): number {
+  if (!f) return 0
+  const peak = previewFee(f.elec_peak_last, f.elec_peak_now, f.elec_peak_price)
+  const valley = previewFee(f.elec_valley_last, f.elec_valley_now, f.elec_valley_price)
+  return Math.round((peak + valley) * 100) / 100
 }
 
 // ---------- 租户收费项目排除（账单快照 excluded_fees） ----------
@@ -706,7 +823,7 @@ function previewTotal(): number {
   const t =
     (feeExcluded('rent') ? 0 : (f.rent || 0)) +
     (feeExcluded('water') ? 0 : waterPreview(f)) +
-    (feeExcluded('elec') ? 0 : previewFee(f.elec_last, f.elec_now, f.elec_price)) +
+    (feeExcluded('elec') ? 0 : (f.elec_tou ? touPreviewFee(f) : previewFee(f.elec_last, f.elec_now, f.elec_price))) +
     (feeExcluded('gas') ? 0 : previewFee(f.gas_last, f.gas_now, f.gas_price)) +
     (feeExcluded('sanitation') ? 0 : (f.sanitation_fee || 0)) +
     (feeExcluded('management') ? 0 : (f.management_fee || 0)) +
@@ -947,6 +1064,66 @@ async function openDetail(b: Bill) {
 function printReceipt() {
   applyReceiptPaper(receiptPaper.value, customPaper.value)
   window.print()
+}
+
+// ---------- 一键生成账单（2026-11-18 粉丝需求） ----------
+// 接口早已存在（POST /rental/bills/generate）但没有界面入口——这次接上。
+// 后端复用手动开票同一条建账链（newBillFromRoom → 自定义项目 → recalc），
+// 幂等靠「同房同月唯一」：已有账单的房间计入 skipped，绝不重复开。
+const showGenerate = ref(false)
+const genPeriod = ref(currentPeriod())
+const generating = ref(false)
+const genError = ref('')
+function openGenerate() {
+  genPeriod.value = currentPeriod()
+  genError.value = ''
+  showGenerate.value = true
+}
+async function doGenerate() {
+  if (!genPeriod.value) {
+    genError.value = '请选择账期'
+    return
+  }
+  generating.value = true
+  genError.value = ''
+  try {
+    const res = await generateBills(genPeriod.value)
+    if (res.data?.code === 0) {
+      const d = (res.data.data || {}) as { created?: number; skipped?: number }
+      toast(`已生成 ${d.created || 0} 张账单${d.skipped ? `，跳过 ${d.skipped} 间（已有账单或本期不出账）` : ''}`)
+      showGenerate.value = false
+      await load(1)
+    } else {
+      genError.value = res.data?.message || '生成失败'
+    }
+  } catch {
+    genError.value = '生成失败，请重试'
+  } finally {
+    generating.value = false
+  }
+}
+
+// ---------- 文本单据（2026-11-18 粉丝需求：图片发微信不打开就失效） ----------
+// 与打印/PDF 同源：明细直接用 bills/:id 的 items 出参，前端不重算金额。
+async function copyReceiptText() {
+  if (!receiptBill.value) return
+  const ok = await copyPlainText(billToText(receiptBill.value, receiptItems.value, receiptProperty.value))
+  if (ok) toast('已复制单据文本，去聊天窗口粘贴即可')
+  else toast('浏览器不允许直接复制，请用「导出 TXT」下载', 'error')
+}
+function downloadReceiptText() {
+  if (!receiptBill.value) return
+  downloadTextFile(
+    safeTextFilename('收费单据', receiptBill.value.period, receiptBill.value.room_no),
+    billToText(receiptBill.value, receiptItems.value, receiptProperty.value),
+  )
+  toast('已导出文本单据')
+}
+function exportBatchText() {
+  if (!batchBills.value.length) return
+  const range = `${batchFrom.value || '全部'}~${batchTo.value || '全部'}`
+  downloadTextFile(`收费单据-${range}.txt`, billsBundleToText(batchProperty.value, batchBills.value))
+  toast(`已导出 ${batchBills.value.length} 张文本单据`)
 }
 
 // ---------- 批量打印收费单据 ----------

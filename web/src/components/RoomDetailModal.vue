@@ -231,6 +231,11 @@ const canEditTenants = computed(() => ledgerStore.canEdit('tenants'))
 const billingDefaults = ref<BillingDefaults>({ ...defaultBilling })
 fetchBillingDefaults().then((d) => { billingDefaults.value = d })
 
+// 表种启停（2026-10-30 粉丝反馈「用不到的功能能不能关掉（电表 燃气表）」）：
+// 关掉的表在详情概况里不出现（单价行、抄表底数行按启用的表种拼）。
+const elecEnabled = computed(() => billingDefaults.value.elecEnabled)
+const gasEnabled = computed(() => billingDefaults.value.gasEnabled)
+
 const locationText = computed(() => {
   const r = props.room
   if (!r) return ''
@@ -251,6 +256,10 @@ const roomFacts = computed(() => {
   if (!r) return []
   const elec = (r.elec_price || 0) > 0 ? r.elec_price : billingDefaults.value.elecPrice
   const gas = (r.gas_price || 0) > 0 ? r.gas_price : billingDefaults.value.gasPrice
+  const elecLabel = r.elec_tou ? '电单价（峰谷）' : '电单价'
+  const elecText = r.elec_tou
+    ? `${numText((r.elec_peak_price || 0) > 0 ? r.elec_peak_price : billingDefaults.value.elecPeakPrice)} / ${numText((r.elec_valley_price || 0) > 0 ? r.elec_valley_price : billingDefaults.value.elecValleyPrice)} 元/度`
+    : `${numText(elec)} 元/度`
   return [
     { label: '月租金', value: `${fmtMoney(r.default_rent)} 元` },
     // 面积与定位地址在 2026-10-20 新增；未填时不占位置（老房源不用补）。
@@ -258,16 +267,29 @@ const roomFacts = computed(() => {
     ...(r.address ? [{ label: '定位地址', value: r.address }] : []),
     { label: '卫生费', value: `${fmtMoney(r.default_sanitation_fee)} 元/月` },
     { label: '管理费（物业费）', value: `${fmtMoney(r.default_management_fee)} 元/月` },
-    { label: '电单价', value: `${numText(elec)} 元/度` },
-    { label: '燃气单价', value: `${numText(gas)} 元/方` },
+    ...(elecEnabled.value ? [{ label: elecLabel, value: elecText }] : []),
+    ...(gasEnabled.value ? [{ label: '燃气单价', value: `${numText(gas)} 元/方` }] : []),
     { label: '计费与缴费（随租户）', value: roomBillingSummary(r.billing) },
     // 房东信息与介绍费都只在有值时才显示（选填字段不留空行）
     ...(r.landlord_name ? [{ label: '房东', value: r.landlord_name }] : []),
     ...(r.landlord_phone ? [{ label: '联系电话', value: r.landlord_phone }] : []),
     ...(roomReferralText(r) ? [{ label: '介绍费', value: roomReferralText(r) }] : []),
-    { label: '抄表底数（水/电/燃气）', value: `${numText(r.initial_water)} / ${numText(r.initial_elec)} / ${numText(r.initial_gas)}` },
+    // 抄表底数按启用的表种拼（关掉的表不占位，标签也跟着变短）
+    ...(initialReadingsText(r) ? [{ label: `抄表底数（${initialReadingsLabel}）`, value: initialReadingsText(r) }] : []),
   ]
 })
+
+// 抄表底数行按启用的表种拼：关掉的表不显示（标签同步收窄，如「水/电」）。
+const initialReadingsLabel = computed(() =>
+  ['水', ...(elecEnabled.value ? ['电'] : []), ...(gasEnabled.value ? ['燃气'] : [])].join('/'),
+)
+
+function initialReadingsText(r: RoomView): string {
+  const parts = [numText(r.initial_water)]
+  if (elecEnabled.value) parts.push(numText(r.initial_elec))
+  if (gasEnabled.value) parts.push(numText(r.initial_gas))
+  return parts.join(' / ')
+}
 
 // 同住成员：一次按房间取回该房全部租户的成员（后端一条 JOIN 查询；**含已搬离**，
 // 退租后仍能在这间房的详情里查到曾经住过谁），前端按 tenant_id 归组，

@@ -43,7 +43,17 @@
           </RouterLink>
         </nav>
 
-        <div class="p-3 border-t border-border">
+        <div class="p-3 border-t border-border space-y-2">
+          <!-- 多角色（2026-11-25）：user 账号被关联为租户后进门户看自己的账单，
+               这里给他一条回后台的路；纯租客（role=tenant）看不到。 -->
+          <RouterLink
+            v-if="isManagerRole"
+            to="/admin"
+            class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-brand-600 dark:text-brand-300 bg-brand-500/10 hover:bg-brand-500/20 transition-colors"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+            返回管理后台
+          </RouterLink>
           <div class="flex items-center gap-2.5 p-2.5 rounded-xl bg-muted">
             <div class="w-9 h-9 rounded-full bg-brand-gradient flex items-center justify-center text-white font-bold text-xs shrink-0">
               {{ userInitial }}
@@ -84,6 +94,14 @@
               租客服务{{ status?.tenant_name ? ` · ${status.tenant_name}` : '' }}
             </div>
           </div>
+          <RouterLink
+            v-if="isManagerRole"
+            to="/admin"
+            class="p-2 rounded-lg text-brand-600 dark:text-brand-300 hover:bg-brand-500/10 transition-colors"
+            title="返回管理后台"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2-2m-2 2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+          </RouterLink>
           <button
             class="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
             title="退出登录"
@@ -155,6 +173,12 @@ const ledgerStore = useLedgerStore()
 const status = ref<PortalStatus | null>(null)
 
 const userInitial = computed(() => (authStore.user?.username || '?').slice(0, 1).toUpperCase())
+
+// 多角色（2026-11-25）：账号同时是房东（role=user）时，门户里给一条回后台的
+// 入口。纯租客 role=tenant 看不到——他本来就没有后台可回。status.role 由
+// /rental/portal/status 返回真实角色，登录态里也有一份，双保险。
+const isManagerRole = computed(() =>
+  (authStore.user?.role === 'user') || status.value?.role === 'user')
 
 const navItems = [
   {
